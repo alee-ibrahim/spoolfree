@@ -79,7 +79,16 @@ foreach ($step in $plan) {
             'Remove' { Uninstall-SpoolfreePrinter -Name $step.Name; $removed.Add($step.Name) }
             'Conflict' { $errors.Add("$($step.Name): a queue with this name exists and was not created by Spoolfree; skipped.") }
             'SetDefault' { }
-            'Keep' { }
+            'Keep' {
+                $q = Get-Printer -Name $step.Name -ErrorAction SilentlyContinue
+                if ($q) {
+                    $update = Get-SpoolfreeQueueUpdate -Printer $step.Printer -Queue $q
+                    if ($update.Count) {
+                        Set-Printer -Name $step.Name @update -ErrorAction Stop
+                        Write-Log "$($step.Name): updated $(@($update.Keys) -join ', ')."
+                    }
+                }
+            }
         }
     } catch {
         $msg = "$($step.Name): $($step.Action) failed: $($_.Exception.Message)"

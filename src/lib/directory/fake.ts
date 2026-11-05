@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { z } from "zod";
 import { parentDn, rdnValue } from "../dn";
 import type { ComputerObject, Directory, OuNode } from "./types";
 
@@ -20,7 +22,10 @@ const OUS: [string, string | null][] = [
   ["OU=Servers,DC=example,DC=org", "No printers"],
 ];
 
-const COMPUTERS: [string, string, string?][] = [
+/** [name, parent OU DN, operating system?, objectGUID?] */
+type FakeComputer = [string, string, string?, string?];
+
+const COMPUTERS: FakeComputer[] = [
   ["ADM-01", "OU=Administration,OU=Workstations,DC=example,DC=org"],
   ["ADM-02", "OU=Administration,OU=Workstations,DC=example,DC=org"],
   ["FIN-01", "OU=Finance,OU=Administration,OU=Workstations,DC=example,DC=org"],
@@ -49,8 +54,9 @@ export function fakeGuid(name: string): string {
 export class FakeDirectory implements Directory {
   constructor(
     private ous: [string, string | null][] = OUS,
-    private computers: [string, string, string?][] = COMPUTERS,
-    private baseDn = FAKE_BASE_DN,
+    private computers: FakeComputer[] = COMPUTERS,
+    readonly baseDn = FAKE_BASE_DN,
+    private disabledNames: string[] = ["OLD-LAPTOP"],
   ) {}
 
   async listContainers(): Promise<OuNode[]> {
@@ -62,13 +68,13 @@ export class FakeDirectory implements Directory {
   }
 
   async listComputers(): Promise<ComputerObject[]> {
-    return this.computers.map(([name, ou, os]) => ({
+    return this.computers.map(([name, ou, os, guid]) => ({
       dn: `CN=${name},${ou}`,
       name,
-      objectGuid: fakeGuid(name),
-      dnsHostName: `${name.toLowerCase()}.example.org`,
+      objectGuid: (guid ?? fakeGuid(name)).toLowerCase(),
+      dnsHostName: `${name.toLowerCase()}.${dnsDomainOf(this.baseDn)}`,
       operatingSystem: os ?? "Windows 11 Enterprise",
-      disabled: name === "OLD-LAPTOP",
+      disabled: this.disabledNames.includes(name),
     }));
   }
 
@@ -79,6 +85,61 @@ export class FakeDirectory implements Directory {
   async defaultComputersContainer(): Promise<string> {
     return `CN=Computers,${this.baseDn}`;
   }
+}
+
+function dnsDomainOf(baseDn: string): string {
+  return baseDn
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => /^dc=/i.test(p))
+    .map((p) => p.slice(3))
+    .join(".")
+    .toLowerCase();
+}
+
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Optional development directory loaded from a JSON file (DEV_FAKE_AD_FILE), so a
+ * real test PC can enroll against a dev server without LDAP. Keep the file outside
+ * the repository: it describes your own domain.
+ *
+ * { "baseDn": "DC=corp,DC=example",
+ *   "ous": [{ "dn": "OU=Lab,DC=corp,DC=example", "description": "optional" }],
+ *   "computers": [{ "dn": "CN=PC1,OU=Lab,DC=corp,DC=example", "objectGuid": "...", "os": "optional", "disabled": false }] }
+ */
+const FakeDirectoryFile = z.object({
+  baseDn: z.string().min(3),
+  ous: z.array(z.object({ dn: z.string().min(3), description: z.string().nullish() })).default([]),
+  computers: z
+    .array(
+      z.object({
+        dn: z.string().regex(/^CN=[^,]+,.+/i, "computer dn must start with CN=<name>,"),
+        objectGuid: z.string().regex(GUID_RE, "invalid objectGuid").optional(),
+        os: z.string().optional(),
+        disabled: z.boolean().default(false),
+      }),
+    )
+    .default([]),
+});
+
+export function fakeDirectoryFromJson(json: unknown): FakeDirectory {
+  const data = FakeDirectoryFile.parse(json);
+  const computers: FakeComputer[] = data.computers.map((c) => {
+    const parent = parentDn(c.dn);
+    if (!parent) throw new Error(`computer dn has no parent: ${c.dn}`);
+    return [rdnValue(c.dn), parent, c.os, c.objectGuid];
+  });
+  return new FakeDirectory(
+    data.ous.map((o) => [o.dn, o.description ?? null]),
+    computers,
+    data.baseDn,
+    data.computers.filter((c) => c.disabled).map((c) => rdnValue(c.dn)),
+  );
+}
+
+export function loadFakeDirectoryFile(path: string): FakeDirectory {
+  return fakeDirectoryFromJson(JSON.parse(readFileSync(path, "utf8")));
 }
 
 export function parentOf(dn: string): string {

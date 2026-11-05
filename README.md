@@ -180,7 +180,8 @@ See [SECURITY.md](SECURITY.md) for the threat model: enrollment token, per-machi
 
 ## Known gaps
 
-- `Add-Printer -IppURL` behaviour still needs a lab test as SYSTEM on Windows 10 22H2 and Windows 11 24H2 with WPP on. That includes the port naming, and whether IPPS queues need the "same security settings for all users" option.
+- `Add-Printer -IppURL` has been tested as SYSTEM on one Windows 11 25H2 PC (build 26200, WPP off) against an AirPrint printer over plain IPP. The queue gets the Microsoft IPP Class Driver and a port named `WSD-<guid>` (description "IPP Port"), which Windows removes together with the queue. Windows allows only one IPP queue per device, so the agent removes a renamed queue before it adds the new one. Still untested: Windows 10 22H2, WPP on, and IPPS queues (including whether they need the "same security settings for all users" option).
+- On laptops in Modern Standby, Task Scheduler holds the sync task as "Queued" until the device wakes, so changes are applied at the next wake rather than on the hour.
 - IPPS printers with self-signed certificates may need their certificate trusted on PCs.
 - Per-user (rather than per-computer) printer targeting is not supported.
 - SNMP is v2c only.

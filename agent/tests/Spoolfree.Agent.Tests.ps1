@@ -95,6 +95,35 @@ Describe 'Get-SpoolfreePlan' {
         $plan = Get-SpoolfreePlan -Desired @((P 'A')) -Installed @() -DefaultPrinter 'A'
         $plan[-1].Action | Should -Be 'SetDefault'
     }
+    It 'removes the old queue before adding the renamed one (one IPP queue per device)' {
+        $plan = Get-SpoolfreePlan -Desired @((P 'Copier 2')) -Installed @((I 'Copier')) -Existing @('Copier')
+        @($plan.Action) | Should -Be @('Remove', 'Add')
+        $plan[0].Name | Should -Be 'Copier'
+        $plan[1].Name | Should -Be 'Copier 2'
+    }
+}
+
+Describe 'Get-SpoolfreeQueueUpdate' {
+    BeforeAll {
+        $script:p = [pscustomobject]@{ id = 'x'; name = 'A'; revision = 1; location = 'Block B' }
+    }
+    It 'updates the location of a kept queue when it changed in the manifest' {
+        $u = Get-SpoolfreeQueueUpdate -Printer $p -Queue ([pscustomobject]@{ Comment = 'Managed by Spoolfree [x rev 1]'; Location = 'Block A' })
+        $u['Location'] | Should -Be 'Block B'
+    }
+    It 'clears the location when the manifest has none' {
+        $none = [pscustomobject]@{ id = 'x'; name = 'A'; revision = 1; location = $null }
+        $u = Get-SpoolfreeQueueUpdate -Printer $none -Queue ([pscustomobject]@{ Comment = 'Managed by Spoolfree [x rev 1]'; Location = 'Old' })
+        $u['Location'] | Should -Be ''
+    }
+    It 'returns nothing when the queue already matches' {
+        $u = Get-SpoolfreeQueueUpdate -Printer $p -Queue ([pscustomobject]@{ Comment = 'Managed by Spoolfree [x rev 1]'; Location = 'Block B' })
+        $u.Count | Should -Be 0
+    }
+    It 'leaves a queue alone once its Spoolfree comment was changed' {
+        $u = Get-SpoolfreeQueueUpdate -Printer $p -Queue ([pscustomobject]@{ Comment = 'Installed by hand'; Location = 'Block A' })
+        $u.Count | Should -Be 0
+    }
 }
 
 Describe 'Install method selection' {

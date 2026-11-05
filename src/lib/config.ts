@@ -65,6 +65,8 @@ const schema = z.object({
 
   // Development only
   DEV_FAKE_AD: bool,
+  /** Optional JSON file that replaces the sample directory (see directory/fake.ts). */
+  DEV_FAKE_AD_FILE: z.string().optional(),
   DEV_LOGIN: bool,
 });
 

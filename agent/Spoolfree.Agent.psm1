@@ -210,10 +210,19 @@ function Get-SpoolfreePlan {
     $existingSet = @{}
     foreach ($e in $Existing) { $existingSet[$e.ToLowerInvariant()] = $true }
     $desiredNames = @{}
+    foreach ($d in $Desired) { $desiredNames[([string]$d.name).ToLowerInvariant()] = $true }
+
+    # Removals come first. Windows allows only one IPP queue per device, so when a
+    # printer is renamed (Remove old name + Add new name, same device) the Add fails
+    # with "The specified printer already exists" unless the old queue is gone.
+    foreach ($i in $Installed) {
+        if (-not $desiredNames.ContainsKey(([string]$i.Name).ToLowerInvariant())) {
+            $actions.Add([pscustomobject]@{ Action = 'Remove'; Name = $i.Name; Printer = $null })
+        }
+    }
 
     foreach ($d in $Desired) {
         $key = ([string]$d.name).ToLowerInvariant()
-        $desiredNames[$key] = $true
         $mine = $installedByName[$key]
         if ($null -eq $mine) {
             if ($existingSet.ContainsKey($key)) {
@@ -228,11 +237,6 @@ function Get-SpoolfreePlan {
             $actions.Add([pscustomobject]@{ Action = 'Keep'; Name = $d.name; Printer = $d })
         }
     }
-    foreach ($i in $Installed) {
-        if (-not $desiredNames.ContainsKey(([string]$i.Name).ToLowerInvariant())) {
-            $actions.Add([pscustomobject]@{ Action = 'Remove'; Name = $i.Name; Printer = $null })
-        }
-    }
     if ($DefaultPrinter) {
         $actions.Add([pscustomobject]@{ Action = 'SetDefault'; Name = $DefaultPrinter; Printer = $null })
     }
@@ -242,6 +246,24 @@ function Get-SpoolfreePlan {
 function Get-SpoolfreeComment {
     param([Parameter(Mandatory)]$Printer)
     return ('{0} [{1} rev {2}]' -f $script:CommentPrefix, $Printer.id, $Printer.revision)
+}
+
+function Get-SpoolfreeQueueUpdate {
+    <#
+    .SYNOPSIS
+        Pure: Set-Printer parameters needed to bring a kept queue in line with the
+        manifest. Edits that do not bump the revision (location) would otherwise
+        never reach PCs. Returns an empty hashtable when nothing changed or when the
+        queue no longer carries the Spoolfree comment (someone else owns it now).
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)]$Printer, [Parameter(Mandatory)]$Queue)
+    $update = @{}
+    if (-not ([string]$Queue.Comment).StartsWith($script:CommentPrefix)) { return $update }
+    $wantLocation = if ($Printer.location) { [string]$Printer.location } else { '' }
+    if ([string]$Queue.Location -cne $wantLocation) { $update['Location'] = $wantLocation }
+    return $update
 }
 
 # ---------------------------------------------------------------------------
