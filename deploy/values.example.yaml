@@ -1,0 +1,39 @@
+# Example values for deploy/helm/spoolfree. Copy, adjust, and install:
+#   helm upgrade --install spoolfree deploy/helm/spoolfree -n spoolfree -f my-values.yaml
+# All names are placeholders (example.org; 192.0.2.0/24 is the TEST-NET-1 range).
+
+image:
+  repository: ghcr.io/alee-ibrahim/spoolfree
+  tag: "0.1.0"
+
+config:
+  PUBLIC_URL: https://spoolfree.example.org
+  LDAP_URL: ldaps://dc1.example.org:636
+  LDAP_BASE_DN: DC=example,DC=org
+  LDAP_BIND_DN: CN=svc-spoolfree,OU=Service Accounts,DC=example,DC=org
+  AUTH_MICROSOFT_ENTRA_ID_ISSUER: https://login.microsoftonline.com/<tenant-id>/v2.0
+  ADMIN_GROUP_IDS: <entra-admin-group-object-id>
+  POLL_INTERVAL_SECONDS: "120"
+  SNMP_COMMUNITY: public
+  LOW_TONER_PERCENT: "15"
+  # ALERT_WEBHOOK_URL can also live in the Secret if it embeds a token.
+
+# The Secret "spoolfree" must exist with: DATABASE_URL, AUTH_SECRET,
+# AUTH_MICROSOFT_ENTRA_ID_ID, AUTH_MICROSOFT_ENTRA_ID_SECRET, LDAP_BIND_PASSWORD,
+# MANIFEST_SIGNING_KEY and AGENT_ENROLLMENT_TOKEN (generate the last two with `pnpm keygen`).
+existingSecret: spoolfree
+
+ldapCa:
+  enabled: true
+  configMap: spoolfree-ldap-ca
+
+ingress:
+  enabled: true
+  className: nginx
+  host: spoolfree.example.org
+  tls:
+    - secretName: spoolfree-tls
+      hosts: [spoolfree.example.org]
+
+serviceMonitor:
+  enabled: true

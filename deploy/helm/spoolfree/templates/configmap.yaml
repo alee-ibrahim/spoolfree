@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "spoolfree.fullname" . }}
+  labels:
+    {{- include "spoolfree.labels" . | nindent 4 }}
+data:
+  {{- range $k, $v := .Values.config }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  {{- if .Values.ldapCa.enabled }}
+  LDAP_CA_CERT_FILE: /etc/spoolfree/ldap-ca/ca.crt
+  {{- end }}

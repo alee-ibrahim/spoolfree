@@ -1,0 +1,67 @@
+# Default values. See ../../values.example.yaml for a commented example.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/alee-ibrahim/spoolfree
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Non-secret settings, rendered into a ConfigMap and loaded with envFrom.
+config:
+  PUBLIC_URL: https://spoolfree.example.org
+  LDAP_URL: ldaps://dc1.example.org:636
+  LDAP_BASE_DN: DC=example,DC=org
+  LDAP_BIND_DN: CN=svc-spoolfree,OU=Service Accounts,DC=example,DC=org
+  AUTH_MICROSOFT_ENTRA_ID_ISSUER: https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0
+  ADMIN_GROUP_IDS: 00000000-0000-0000-0000-000000000000
+  POLL_INTERVAL_SECONDS: "120"
+  LOW_TONER_PERCENT: "15"
+
+# Name of an existing Secret with the sensitive variables:
+#   DATABASE_URL, AUTH_SECRET, AUTH_MICROSOFT_ENTRA_ID_ID, AUTH_MICROSOFT_ENTRA_ID_SECRET,
+#   LDAP_BIND_PASSWORD, MANIFEST_SIGNING_KEY, AGENT_ENROLLMENT_TOKEN,
+#   and optionally METRICS_TOKEN, ALERT_WEBHOOK_URL.
+# Create it with your secret manager. The chart never creates secrets.
+existingSecret: spoolfree
+
+# Optional: mount the AD CS CA certificate used to validate LDAPS.
+ldapCa:
+  enabled: false
+  configMap: spoolfree-ldap-ca   # must contain the key ca.crt
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: spoolfree.example.org
+  tls: []
+
+resources:
+  requests: { cpu: 50m, memory: 192Mi }
+  limits: { memory: 512Mi }
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile: { type: RuntimeDefault }
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }
+
+serviceMonitor:
+  enabled: false
+  interval: 60s
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

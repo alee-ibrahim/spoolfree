@@ -1,0 +1,32 @@
+# Local development: PostgreSQL only. Run the app with `pnpm dev`.
+# To try the production image as well: `docker compose --profile app up --build`.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: spoolfree
+      POSTGRES_PASSWORD: spoolfree
+      POSTGRES_DB: spoolfree
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spoolfree"]
+      interval: 5s
+      retries: 10
+
+  app:
+    profiles: ["app"]
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://spoolfree:spoolfree@postgres:5432/spoolfree
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  pgdata:
