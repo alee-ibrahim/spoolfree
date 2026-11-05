@@ -2,7 +2,7 @@ import NextAuth, { type NextAuthConfig } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
 import { adminFromClaims } from "@/lib/admin-claims";
-import { config, devLoginEnabled } from "@/lib/config";
+import { adminAccessPolicy, devLoginEnabled } from "@/lib/config";
 
 declare module "next-auth" {
   interface Session {
@@ -43,7 +43,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         token.isAdmin = true;
         token.authError = undefined;
       } else if (account && profile) {
-        const r = adminFromClaims(profile as Record<string, unknown>, config().ADMIN_GROUP_IDS);
+        const r = adminFromClaims(profile as Record<string, unknown>, adminAccessPolicy());
         token.isAdmin = r.isAdmin;
         token.authError = r.error;
       }

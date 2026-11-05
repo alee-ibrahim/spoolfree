@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
+import type { AdminAccessMode, AdminAccessPolicy } from "./admin-claims";
 
 /**
  * All runtime configuration comes from environment variables.
@@ -19,6 +20,8 @@ const schema = z.object({
   AUTH_MICROSOFT_ENTRA_ID_ID: z.string().optional(),
   AUTH_MICROSOFT_ENTRA_ID_SECRET: z.string().optional(),
   AUTH_MICROSOFT_ENTRA_ID_ISSUER: z.string().optional(),
+  /** "group" (default): ADMIN_GROUP_IDS decides. "entra-assignment": everyone the single-tenant Entra app lets in. */
+  ADMIN_ACCESS_MODE: z.string().trim().toLowerCase().default("group"),
   ADMIN_GROUP_IDS: z
     .string()
     .default("")
@@ -77,6 +80,16 @@ let cached: Config | undefined;
 export function config(): Config {
   if (!cached) cached = schema.parse(process.env);
   return cached;
+}
+
+/** Admin access policy from the environment (see lib/admin-claims.ts). */
+export function adminAccessPolicy(): AdminAccessPolicy {
+  const c = config();
+  return {
+    mode: c.ADMIN_ACCESS_MODE as AdminAccessMode,
+    adminGroupIds: c.ADMIN_GROUP_IDS,
+    issuer: c.AUTH_MICROSOFT_ENTRA_ID_ISSUER,
+  };
 }
 
 /** Dev conveniences are compiled out of production builds (`next build` sets NODE_ENV=production). */
