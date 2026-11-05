@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { adminFromClaims } from "@/lib/admin-claims";
 import { generateSeed, keyId, privateKeyFromSeed, publicKeyRaw, verifyBytes } from "@/lib/crypto/signing";
 import { buildManifest, httpUrlFor, signManifest, type ManifestPrinterInput } from "@/lib/manifest";
 import { renderMetrics } from "@/lib/metrics";
@@ -64,6 +65,18 @@ describe("manifest", () => {
 
   it("http URL keeps custom ports", () => {
     expect(httpUrlFor({ host: "192.0.2.9", port: 8631, ippPath: "/ipp/print", useTls: false })).toBe("http://192.0.2.9:8631/ipp/print");
+  });
+});
+
+describe("admin claim check", () => {
+  const admins = ["11111111-1111-1111-1111-111111111111"];
+  it("grants access to members of the admin group (case-insensitive)", () => {
+    expect(adminFromClaims({ groups: ["11111111-1111-1111-1111-111111111111".toUpperCase()] }, admins).isAdmin).toBe(true);
+  });
+  it("denies others and explains group overage", () => {
+    expect(adminFromClaims({ groups: ["22222222-2222-2222-2222-222222222222"] }, admins)).toMatchObject({ isAdmin: false });
+    expect(adminFromClaims({ _claim_names: { groups: "src1" } }, admins).error).toMatch(/overage/);
+    expect(adminFromClaims({ groups: admins }, []).isAdmin).toBe(false);
   });
 });
 

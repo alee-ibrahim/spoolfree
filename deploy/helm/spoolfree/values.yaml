@@ -15,8 +15,6 @@ config:
   LDAP_BASE_DN: DC=example,DC=org
   LDAP_BIND_DN: CN=svc-spoolfree,OU=Service Accounts,DC=example,DC=org
   AUTH_MICROSOFT_ENTRA_ID_ISSUER: https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0
-  # group (default) or entra-assignment; see docs/admin-access.md
-  ADMIN_ACCESS_MODE: group
   ADMIN_GROUP_IDS: 00000000-0000-0000-0000-000000000000
   POLL_INTERVAL_SECONDS: "120"
   LOW_TONER_PERCENT: "15"

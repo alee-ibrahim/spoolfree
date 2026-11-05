@@ -12,8 +12,6 @@ config:
   LDAP_BASE_DN: DC=example,DC=org
   LDAP_BIND_DN: CN=svc-spoolfree,OU=Service Accounts,DC=example,DC=org
   AUTH_MICROSOFT_ENTRA_ID_ISSUER: https://login.microsoftonline.com/<tenant-id>/v2.0
-  # group (default) or entra-assignment; see docs/admin-access.md
-  ADMIN_ACCESS_MODE: group
   ADMIN_GROUP_IDS: <entra-admin-group-object-id>
   POLL_INTERVAL_SECONDS: "120"
   SNMP_COMMUNITY: public

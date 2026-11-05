@@ -19,10 +19,8 @@ Please report vulnerabilities privately using GitHub's **"Report a vulnerability
 ### Trust boundaries and controls
 
 **Admin UI**
-- Login is by Entra ID OIDC only. Who gets in depends on `ADMIN_ACCESS_MODE` (see [docs/admin-access.md](docs/admin-access.md)):
-  - `group` (default): the ID token's `groups` claim must contain one of `ADMIN_GROUP_IDS`. Group overage tokens (no `groups` list) are refused.
-  - `entra-assignment`: every user who signs in through the single-tenant Entra app is an admin. **"Assignment required" MUST be enabled on the enterprise app in this mode**; otherwise every account in the tenant becomes a Spoolfree admin. The token's `tid` and `iss` must both match the tenant in `AUTH_MICROSOFT_ENTRA_ID_ISSUER`, and a `common`, `organizations` or `consumers` issuer is refused.
-  - A production server refuses to start in `group` mode with an empty `ADMIN_GROUP_IDS`, or in `entra-assignment` mode without a single-tenant issuer.
+- Login is by Entra ID OIDC only. Access requires an ID token whose `groups` claim contains one of `ADMIN_GROUP_IDS`.
+  - Group overage tokens (no `groups` list) are refused.
   - The check runs at login, and the session lasts 8 hours.
   - Every server action re-checks the session.
 - All changes are written to the audit log, with the actor's e-mail.
