@@ -188,10 +188,6 @@ See [SECURITY.md](SECURITY.md) for the threat model: enrollment token, per-machi
 - The webhook payload is a generic JSON body. There are no Teams- or Slack-specific formats yet.
 - The enrollment token is a shared secret. Kerberos- or certificate-based machine authentication is on the roadmap (see SECURITY.md).
 
-## Prior art and thanks
-
-**[PrintDeployGPO](https://github.com/tinkervalley/PrintDeployGPO)** inspired the signed-manifest approach and the "what will this computer get" preview. Spoolfree is an independent implementation and contains no code from it.
-
 ## Licence
 
 MIT © Alee Ibrahim. See [LICENSE](LICENSE).
