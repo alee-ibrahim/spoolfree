@@ -239,8 +239,9 @@ jobs:
             if [ "$PRERELEASE" != true ]; then
               tags+=(-t "$image:$MINOR" -t "$image:latest")
             fi
-            # One source: imagetools copies the index as is, so every tag points at the same digest.
-            docker buildx imagetools create "${tags[@]}" "$image@$digest"
+            # One source: every tag points at the scanned and signed digest.
+            # --prefer-index=false: a single-platform image stays a plain manifest (same digest), not a new index.
+            docker buildx imagetools create --prefer-index=false "${tags[@]}" "$image@$digest"
             got="$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)"
             [ "$got" = "$digest" ] || { echo "::error::$image:$VERSION is $got, expected $digest"; exit 1; }
           done
