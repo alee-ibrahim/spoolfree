@@ -30,6 +30,9 @@ function local(): LocalLogin {
 
 const providers: NextAuthConfig["providers"] = [
   MicrosoftEntraID({
+    // Send the client secret in the token request body. With HTTP Basic auth, Entra rejects secrets
+    // containing characters such as "~" (invalid_client), because of how they are form-encoded.
+    client: { token_endpoint_auth_method: "client_secret_post" },
     // Request the groups claim; group IDs only, no Graph calls, no photo download.
     authorization: { params: { scope: "openid profile email" } },
     profile(profile) {
