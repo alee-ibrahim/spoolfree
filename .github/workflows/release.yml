@@ -1,7 +1,7 @@
 # Release: push a tag vX.Y.Z (or vX.Y.Z-rc.N) on a commit of main whose CI passed.
 #
 #   1. check    the tag is semver, the commit is on main and workflow "CI" passed for it
-#   2. image    linux/amd64, pushed as ghcr.io/<owner>/spoolfree:sha-<12>;
+#   2. images   linux/amd64, pushed as ghcr.io/<owner>/spoolfree:sha-<12> and ghcr.io/<owner>/spoolfree-adsync:sha-<12>;
 #               Trivy gate (no fixable CRITICAL), SPDX SBOM (syft), cosign keyless signature,
 #               build provenance + SBOM attestations (GitHub / Sigstore)
 #   3. tags     only when the image passed: X.Y.Z, X.Y and latest (pre-releases: X.Y.Z only)
@@ -104,8 +104,17 @@ jobs:
           echo "::error::timed out waiting for CI on $GITHUB_SHA"; exit 1
 
   images:
-    name: Image
+    name: Image ${{ matrix.name }}
     needs: check
+    strategy:
+      matrix:
+        include:
+          - name: spoolfree
+            context: .
+            description: "Spoolfree: driverless IPP printer management for Active Directory"
+          - name: spoolfree-adsync
+            context: adsync
+            description: "Spoolfree AD sync sidecar: Kerberos (SASL GSSAPI) LDAP snapshots for DIRECTORY_MODE=snapshot"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -115,7 +124,8 @@ jobs:
       attestations: write
       artifact-metadata: write
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/spoolfree
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+      NAME: ${{ matrix.name }}
       VERSION: ${{ needs.check.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,7 +141,7 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: .
+          context: ${{ matrix.context }}
           platforms: linux/amd64
           push: true
           # Provenance and SBOM are published as signed attestations below instead of BuildKit's
@@ -140,14 +150,14 @@ jobs:
           sbom: false
           tags: ${{ env.IMAGE }}:sha-${{ needs.check.outputs.sha12 }}
           labels: |
-            org.opencontainers.image.title=spoolfree
-            org.opencontainers.image.description=Spoolfree: driverless IPP printer management for Active Directory
+            org.opencontainers.image.title=${{ matrix.name }}
+            org.opencontainers.image.description=${{ matrix.description }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.licenses=MIT
-          cache-from: type=gha,scope=spoolfree
-          cache-to: type=gha,scope=spoolfree,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
       - name: Trivy gate (no fixable CRITICAL)
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -171,7 +181,7 @@ jobs:
           registry-username: ${{ github.actor }}
           registry-password: ${{ github.token }}
           format: spdx-json
-          output-file: spoolfree-${{ env.VERSION }}.spdx.json
+          output-file: ${{ matrix.name }}-${{ env.VERSION }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
@@ -191,18 +201,18 @@ jobs:
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
-          sbom-path: spoolfree-${{ env.VERSION }}.spdx.json
+          sbom-path: ${{ matrix.name }}-${{ env.VERSION }}.spdx.json
           push-to-registry: true
       - name: Keep digest and SBOM for the release
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p out
-          echo "$DIGEST" > out/digest-image
-          mv "spoolfree-${VERSION}.spdx.json" out/
+          echo "$DIGEST" > "out/digest-$NAME"
+          mv "$NAME-${VERSION}.spdx.json" out/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: image-spoolfree
+          name: image-${{ matrix.name }}
           path: out/
           retention-days: 7
 
@@ -232,9 +242,9 @@ jobs:
           MINOR: ${{ needs.check.outputs.minor }}
           PRERELEASE: ${{ needs.check.outputs.prerelease }}
         run: |
-          for c in spoolfree; do
+          for c in spoolfree spoolfree-adsync; do
             image="ghcr.io/$OWNER/$c"
-            digest="$(cat out/digest-image)"
+            digest="$(cat "out/digest-$c")"
             tags=(-t "$image:$VERSION")
             if [ "$PRERELEASE" != true ]; then
               tags+=(-t "$image:$MINOR" -t "$image:latest")
@@ -330,7 +340,7 @@ jobs:
         run: |
           prev="$(git describe --tags --abbrev=0 --match 'v*.*.*' "$TAG^" 2>/dev/null || true)"
           range="$prev..$TAG"
-          i="$(cat out/digest-image)"; c="$(cat out/digest-chart)"
+          i="$(cat out/digest-spoolfree)"; a="$(cat out/digest-spoolfree-adsync)"; c="$(cat out/digest-chart)"
           {
             echo "## Changes"
             echo
@@ -347,9 +357,10 @@ jobs:
             echo '| Artifact | Reference |'
             echo '|---|---|'
             echo "| Image (UI, agent API, poller) | \`ghcr.io/$OWNER/spoolfree:$VERSION@$i\` |"
+            echo "| AD sync sidecar (optional) | \`ghcr.io/$OWNER/spoolfree-adsync:$VERSION@$a\` |"
             echo "| Helm chart | \`oci://ghcr.io/$OWNER/charts/spoolfree\` version \`$VERSION\` (\`$c\`) |"
             echo
-            echo 'The image is linux/amd64, scanned with Trivy (no fixable critical vulnerabilities), signed with cosign (keyless) and carries SLSA build provenance and SPDX SBOM attestations. The SBOM is attached below.'
+            echo 'Both images are linux/amd64, scanned with Trivy (no fixable critical vulnerabilities), signed with cosign (keyless) and carry SLSA build provenance and SPDX SBOM attestations. The SBOMs are attached below.'
             echo
             echo '```sh'
             echo "helm install spoolfree oci://ghcr.io/$OWNER/charts/spoolfree --version $VERSION -n spoolfree -f values.yaml"

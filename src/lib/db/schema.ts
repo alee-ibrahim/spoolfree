@@ -133,3 +133,42 @@ export const auditLog = pgTable("audit_log", {
 export type Printer = typeof printers.$inferSelect;
 export type PrinterStatusRow = typeof printerStatus.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
+
+// --- Directory snapshot (DIRECTORY_MODE=snapshot, pushed by the adsync sidecar) ---------------------------
+
+export const directoryOus = pgTable("directory_ous", {
+  dn: text("dn").primaryKey(),
+  objectGuid: text("object_guid"),
+  name: text("name").notNull(),
+  description: text("description"),
+});
+
+export const directoryComputers = pgTable(
+  "directory_computers",
+  {
+    objectGuid: text("object_guid").primaryKey(),
+    dn: text("dn").notNull(),
+    name: text("name").notNull(),
+    dnsHostName: text("dns_host_name"),
+    operatingSystem: text("operating_system"),
+    userAccountControl: integer("user_account_control").notNull(),
+    disabled: boolean("disabled").notNull(),
+  },
+  (t) => [uniqueIndex("directory_computers_dn_unique").on(sql`lower(${t.dn})`)],
+);
+
+/** One row (id = 1): the state of the last snapshot and of the last failed sync. */
+export const directorySync = pgTable("directory_sync", {
+  id: integer("id").primaryKey(),
+  baseDn: text("base_dn"),
+  defaultContainer: text("default_container"),
+  /** Server time of the last snapshot that was stored. */
+  syncedAt: timestamp("synced_at", { withTimezone: true }),
+  source: text("source"),
+  ouCount: integer("ou_count").notNull().default(0),
+  computerCount: integer("computer_count").notNull().default(0),
+  lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+  lastError: text("last_error"),
+});
+
+export type DirectorySyncRow = typeof directorySync.$inferSelect;

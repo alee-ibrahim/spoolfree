@@ -17,6 +17,18 @@ export async function register() {
       process.exit(1);
     }
   }
+  if (c.DIRECTORY_MODE === "snapshot") {
+    const { secretValue } = await import("./lib/config");
+    let token: string | undefined;
+    try {
+      token = secretValue(c.DIRECTORY_SYNC_TOKEN, c.DIRECTORY_SYNC_TOKEN_FILE);
+    } catch {
+      token = undefined;
+    }
+    if (!token || token.length < 32) {
+      console.warn("[spoolfree] DIRECTORY_MODE=snapshot but DIRECTORY_SYNC_TOKEN is unset or shorter than 32 characters: snapshots are refused");
+    }
+  }
   if (process.env.MIGRATE_ON_START !== "0") {
     const { runMigrations } = await import("./lib/db/migrate");
     await runMigrations();

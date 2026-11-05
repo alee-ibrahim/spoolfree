@@ -8,6 +8,12 @@ data:
   {{- range $k, $v := .Values.config }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}
+  {{- if and .Values.adsync.enabled (not (hasKey .Values.config "DIRECTORY_MODE")) }}
+  DIRECTORY_MODE: snapshot
+  {{- end }}
+  {{- if .Values.adsync.enabled }}
+  DIRECTORY_SYNC_TOKEN_FILE: /etc/spoolfree/sync-token/token
+  {{- end }}
   {{- if .Values.ldapCa.enabled }}
   LDAP_CA_CERT_FILE: /etc/spoolfree/ldap-ca/ca.crt
   {{- end }}

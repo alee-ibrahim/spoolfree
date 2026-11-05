@@ -38,9 +38,28 @@ jobs:
           $c.Run.Exit = $true
           Invoke-Pester -Configuration $c
 
+  adsync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the sidecar image
+        run: docker build -t spoolfree-adsync:ci adsync
+      - name: Unit tests (inside the image)
+        run: docker run --rm --entrypoint python3 -v "$PWD/adsync:/src:ro" -w /src spoolfree-adsync:ci -m unittest discover -s tests -v
+      - name: Smoke test (configuration error exits 2)
+        run: |
+          set +e
+          docker run --rm --read-only --tmpfs /tmp spoolfree-adsync:ci --once
+          [ $? -eq 2 ]
+
   helm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
       - run: helm lint deploy/helm/spoolfree -f deploy/values.example.yaml
+      - name: Lint with the AD sync sidecar
+        run: |
+          helm lint deploy/helm/spoolfree -f deploy/values.example.yaml \
+            --set adsync.enabled=true --set 'adsync.ldapUrls={ldap://dc1.example.org,ldap://dc2.example.org}' \
+            --set adsync.realm=EXAMPLE.ORG --set adsync.principal=svc-spoolfree

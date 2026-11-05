@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { constantTimeEquals, sha256Hex } from "./crypto/signing";
 import { db, schema } from "./db";
 import { directory } from "./directory";
-import type { ComputerObject } from "./directory/types";
+import { DirectoryUnavailableError, type ComputerObject } from "./directory/types";
 
 export class AgentAuthError extends Error {
   constructor(
@@ -28,7 +28,8 @@ export function checkEnrollmentToken(presented: string, expected: string | undef
 
 /**
  * Authenticates an agent request: per-machine bearer token -> agent row ->
- * live LDAP lookup by objectGUID. Disabled or deleted computer accounts fail.
+ * directory lookup by objectGUID (live LDAP, or the synced snapshot). Disabled or deleted
+ * computer accounts fail; an unavailable directory gives 503 (fail closed).
  */
 export async function authenticateAgent(
   req: Request,
@@ -41,7 +42,7 @@ export async function authenticateAgent(
     .where(eq(schema.agents.tokenHash, sha256Hex(token)))
     .limit(1);
   if (!agent || agent.revokedAt) throw new AgentAuthError("unknown or revoked agent token");
-  const computer = await directory().findComputerByGuid(agent.objectGuid);
+  const computer = await findComputer(agent.objectGuid);
   if (!computer) throw new AgentAuthError("computer account not found in directory", 403);
   if (computer.disabled) throw new AgentAuthError("computer account is disabled", 403);
   if (computer.dn !== agent.dn || computer.name !== agent.computerName) {
@@ -51,4 +52,14 @@ export async function authenticateAgent(
       .where(eq(schema.agents.id, agent.id));
   }
   return { agent, computer };
+}
+
+/** Directory lookup for agent requests; maps "directory unavailable" to a 503 AgentAuthError. */
+export async function findComputer(guid: string): Promise<ComputerObject | null> {
+  try {
+    return await directory().findComputerByGuid(guid);
+  } catch (e) {
+    if (e instanceof DirectoryUnavailableError) throw new AgentAuthError(e.message, 503);
+    throw e;
+  }
 }

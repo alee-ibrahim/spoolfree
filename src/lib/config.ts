@@ -33,6 +33,15 @@ const schema = z.object({
     ),
 
   // Active Directory (read-only)
+  /** "ldap" (default): live LDAP(S) simple bind. "snapshot": served from snapshots pushed by the adsync sidecar. */
+  DIRECTORY_MODE: z.enum(["ldap", "snapshot"]).default("ldap"),
+  /** Bearer token the adsync sidecar sends to /api/internal/directory-snapshot (snapshot mode). */
+  DIRECTORY_SYNC_TOKEN: z.string().optional(),
+  DIRECTORY_SYNC_TOKEN_FILE: z.string().optional(),
+  /** The UI warns when the last snapshot is older than this. */
+  DIRECTORY_STALE_MINUTES: z.coerce.number().positive().default(30),
+  /** Agents are refused (fail closed) when the last snapshot is older than this; 0 disables the check. */
+  DIRECTORY_MAX_AGE_HOURS: z.coerce.number().min(0).default(24),
   LDAP_URL: z.string().default("ldaps://dc1.example.org:636"),
   LDAP_BIND_DN: z.string().default(""),
   LDAP_BIND_PASSWORD: z.string().default(""),
@@ -101,6 +110,11 @@ export function devLoginEnabled(): boolean {
 
 export function fakeAdEnabled(): boolean {
   return !isProductionBuild && config().DEV_FAKE_AD;
+}
+
+/** Where directory data comes from. DEV_FAKE_AD wins in development builds. */
+export function directoryMode(): "fake" | "ldap" | "snapshot" {
+  return fakeAdEnabled() ? "fake" : config().DIRECTORY_MODE;
 }
 
 /** Reads a value from `NAME` or from the file named by `NAME_FILE` (Docker/K8s secrets). */

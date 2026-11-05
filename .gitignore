@@ -45,3 +45,5 @@ next-env.d.ts
 # local screenshots / playwright
 /test-results/
 /playwright-report/
+__pycache__/
+*.pyc

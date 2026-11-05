@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { DirectorySyncBadge } from "@/components/app/directory-sync-status";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -22,7 +23,7 @@ export default async function UnassignedPage() {
   } catch (e) {
     return (
       <>
-        <PageHeader title="Unassigned PCs" />
+        <PageHeader title="Unassigned PCs" actions={<DirectorySyncBadge />} />
         <div className="p-6">
           <Alert variant="destructive">
             <AlertTitle>Cannot read Active Directory</AlertTitle>
@@ -46,7 +47,7 @@ export default async function UnassignedPage() {
 
   return (
     <>
-      <PageHeader title="Unassigned PCs" />
+      <PageHeader title="Unassigned PCs" actions={<DirectorySyncBadge />} />
       <div className="grid gap-6 p-6 xl:grid-cols-2">
         <Card>
           <CardHeader>

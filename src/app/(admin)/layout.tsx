@@ -1,4 +1,5 @@
 import { AppSidebar } from "@/components/app/app-sidebar";
+import { DirectorySyncAlert } from "@/components/app/directory-sync-status";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { signOut } from "@/auth";
 import { fakeAdEnabled } from "@/lib/config";
@@ -13,7 +14,10 @@ export default async function AdminLayout({ children }: LayoutProps<"/">) {
   return (
     <SidebarProvider>
       <AppSidebar user={user} devMode={fakeAdEnabled()} signOutAction={signOutAction} />
-      <SidebarInset>{children}</SidebarInset>
+      <SidebarInset>
+        <DirectorySyncAlert />
+        {children}
+      </SidebarInset>
     </SidebarProvider>
   );
 }

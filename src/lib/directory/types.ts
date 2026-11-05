@@ -25,3 +25,6 @@ export interface Directory {
   /** The default container for new computers (wellKnownObjects / CN=Computers). */
   defaultComputersContainer(): Promise<string>;
 }
+
+/** The directory cannot be trusted right now (no snapshot yet, or too old). Agents get 503. */
+export class DirectoryUnavailableError extends Error {}

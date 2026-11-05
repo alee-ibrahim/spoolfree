@@ -1,5 +1,6 @@
 import { BanIcon, FolderIcon, FolderOpenIcon, NetworkIcon } from "lucide-react";
 import Link from "next/link";
+import { DirectorySyncBadge } from "@/components/app/directory-sync-status";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -26,7 +27,7 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
   } catch (e) {
     return (
       <>
-        <PageHeader title="Assignments" />
+        <PageHeader title="Assignments" actions={<DirectorySyncBadge />} />
         <div className="p-6">
           <Alert variant="destructive">
             <AlertTitle>Cannot read Active Directory</AlertTitle>
@@ -57,7 +58,7 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
 
   return (
     <>
-      <PageHeader title="Assignments" />
+      <PageHeader title="Assignments" actions={<DirectorySyncBadge />} />
       <div className="grid gap-6 p-6 lg:grid-cols-[minmax(16rem,22rem)_1fr]">
         <Card className="h-fit">
           <CardHeader>

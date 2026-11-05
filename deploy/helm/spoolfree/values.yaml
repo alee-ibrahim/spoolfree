@@ -28,6 +28,39 @@ config:
 # Create it with your secret manager. The chart never creates secrets.
 existingSecret: spoolfree
 
+# Optional AD sync sidecar (spoolfree-adsync). For domains where a simple LDAP bind is not possible
+# (LDAP signing required, no LDAPS certificate): the sidecar binds with Kerberos (SASL GSSAPI, sealed)
+# and pushes a snapshot of OUs and computers to the app every intervalSeconds. Enabling it sets
+# DIRECTORY_MODE=snapshot on the app. See docs/deployment.md ("AD sync sidecar").
+adsync:
+  enabled: false
+  image:
+    repository: ghcr.io/alee-ibrahim/spoolfree-adsync
+    tag: ""            # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  # Domain controllers by FQDN (never an IP: the Kerberos service principal is ldap/<fqdn>). Tried in order.
+  ldapUrls: []         # [ldap://dc1.example.org, ldap://dc2.example.org]
+  realm: ""            # EXAMPLE.ORG
+  principal: ""        # sAMAccountName of the read-only account, e.g. svc-spoolfree
+  baseDn: ""           # defaults to config.LDAP_BASE_DN
+  kdcs: []             # defaults to the ldapUrls hosts
+  kvno: auto           # auto: read msDS-KeyVersionNumber after the first bind
+  intervalSeconds: 300
+  # The bind password, mounted as a file (only the sidecar sees it). name defaults to existingSecret.
+  passwordSecret:
+    name: ""
+    key: LDAP_BIND_PASSWORD
+  # Shared token for POST /api/internal/directory-snapshot, mounted as a file in both containers
+  # (DIRECTORY_SYNC_TOKEN_FILE / ADSYNC_TOKEN_FILE). 32+ characters. name defaults to existingSecret.
+  tokenSecret:
+    name: ""
+    key: DIRECTORY_SYNC_TOKEN
+  # Extra ADSYNC_* variables (e.g. ADSYNC_ENCTYPES, ADSYNC_MIN_SSF, ADSYNC_PAGE_SIZE).
+  env: {}
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits: { memory: 128Mi }
+
 # Optional: mount the AD CS CA certificate used to validate LDAPS.
 ldapCa:
   enabled: false

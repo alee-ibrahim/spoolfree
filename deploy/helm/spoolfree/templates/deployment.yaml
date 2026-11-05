@@ -14,7 +14,7 @@ spec:
       labels:
         {{- include "spoolfree.selector" . | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson .Values.config | sha256sum }}
+        checksum/config: {{ toJson (list .Values.config .Values.adsync) | sha256sum }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -55,6 +55,56 @@ spec:
               mountPath: /etc/spoolfree/ldap-ca
               readOnly: true
             {{- end }}
+            {{- if .Values.adsync.enabled }}
+            - name: sync-token
+              mountPath: /etc/spoolfree/sync-token
+              readOnly: true
+            {{- end }}
+        {{- if .Values.adsync.enabled }}
+        {{- $a := .Values.adsync }}
+        - name: adsync
+          image: "{{ $a.image.repository }}:{{ $a.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ $a.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: ADSYNC_LDAP_URLS
+              value: {{ required "adsync.ldapUrls is required" (join " " $a.ldapUrls | trim | default "") | quote }}
+            - name: ADSYNC_REALM
+              value: {{ required "adsync.realm is required" $a.realm | quote }}
+            - name: ADSYNC_PRINCIPAL
+              value: {{ required "adsync.principal is required" $a.principal | quote }}
+            - name: ADSYNC_BASE_DN
+              value: {{ $a.baseDn | default .Values.config.LDAP_BASE_DN | required "adsync.baseDn or config.LDAP_BASE_DN is required" | quote }}
+            {{- with $a.kdcs }}
+            - name: ADSYNC_KDCS
+              value: {{ join " " . | quote }}
+            {{- end }}
+            - name: ADSYNC_KVNO
+              value: {{ $a.kvno | toString | quote }}
+            - name: ADSYNC_INTERVAL_SECONDS
+              value: {{ $a.intervalSeconds | toString | quote }}
+            - name: ADSYNC_PUSH_URL
+              value: http://127.0.0.1:3000/api/internal/directory-snapshot
+            - name: ADSYNC_PASSWORD_FILE
+              value: /etc/adsync/secrets/password
+            - name: ADSYNC_TOKEN_FILE
+              value: /etc/adsync/secrets/token
+            - name: ADSYNC_RUNTIME_DIR
+              value: /tmp/adsync
+            {{- range $k, $v := $a.env }}
+            - name: {{ $k }}
+              value: {{ $v | toString | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml $a.resources | nindent 12 }}
+          volumeMounts:
+            - name: adsync-secrets
+              mountPath: /etc/adsync/secrets
+              readOnly: true
+            - name: adsync-tmp
+              mountPath: /tmp
+        {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -64,6 +114,35 @@ spec:
         - name: ldap-ca
           configMap:
             name: {{ .Values.ldapCa.configMap }}
+        {{- end }}
+        {{- if .Values.adsync.enabled }}
+        - name: sync-token
+          secret:
+            secretName: {{ .Values.adsync.tokenSecret.name | default .Values.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.adsync.tokenSecret.key }}
+                path: token
+        # Only the sidecar mounts the bind password.
+        - name: adsync-secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: {{ .Values.adsync.passwordSecret.name | default .Values.existingSecret }}
+                  items:
+                    - key: {{ .Values.adsync.passwordSecret.key }}
+                      path: password
+              - secret:
+                  name: {{ .Values.adsync.tokenSecret.name | default .Values.existingSecret }}
+                  items:
+                    - key: {{ .Values.adsync.tokenSecret.key }}
+                      path: token
+        # krb5.conf, keytab and ticket cache: memory only.
+        - name: adsync-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

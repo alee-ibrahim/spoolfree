@@ -14,7 +14,8 @@ Please report vulnerabilities privately using GitHub's **"Report a vulnerability
 | Enrollment token | Server secret + restricted share | Attacker can enroll as any **existing, enabled** computer and read that computer's printer list. |
 | Per-machine token | PC registry, DPAPI LocalMachine | Attacker can read that one computer's printer list and file fake reports for it. |
 | Admin session | Browser cookie (Auth.js JWT, encrypted with `AUTH_SECRET`) | Full control of printer policy. |
-| LDAP bind password | Server secret | Read access to the directory (the same as any domain user). |
+| LDAP bind password | Server secret (in snapshot mode: only the adsync sidecar) | Read access to the directory (the same as any domain user). |
+| Directory sync token | Server secret `DIRECTORY_SYNC_TOKEN` (snapshot mode) | Attacker who can also reach `/api/internal/directory-snapshot` could replace the directory snapshot: move computers between OUs (other printers) or mark them disabled. Keep the path off the ingress. |
 
 ### Trust boundaries and controls
 
@@ -47,6 +48,7 @@ Please report vulnerabilities privately using GitHub's **"Report a vulnerability
 - *Every request.* The server maps the bearer token to its `objectGUID` and queries AD **live**:
   - disabled or deleted computer accounts are refused immediately;
   - the OU used for policy is always the one in AD. The client never asserts it.
+  - With `DIRECTORY_MODE=snapshot` the lookup uses the last snapshot from the AD sync sidecar instead (default every 5 minutes), so a disable or move takes effect at the next sync. If no snapshot is younger than `DIRECTORY_MAX_AGE_HOURS` (default 24), agents are refused with 503 (fail closed).
 - *Revocation.* Revoking an agent in the UI invalidates its token. The PC re-enrolls at its next startup if it can still read the enrollment token.
 
 **What an attacker can do**
@@ -67,10 +69,11 @@ Printer lists are low-sensitivity, so the residual risk of the shared enrollment
 
 **Server hardening**
 - Non-root container with a read-only root filesystem in the Helm chart.
-- LDAPS with a configurable CA and TLS 1.2+.
+- LDAPS with a configurable CA and TLS 1.2+, or (snapshot mode) Kerberos SASL GSSAPI with a sealed connection (the sidecar refuses a security strength factor below 128). The sidecar keeps its keytab and ticket cache in a memory-backed volume and reads the password from a mounted file only.
+- `/api/internal/directory-snapshot` answers 404 unless `DIRECTORY_MODE=snapshot`, 503 when `DIRECTORY_SYNC_TOKEN` is unset or shorter than 32 characters, and 401 without the exact bearer token. Snapshots of another base DN, with objects outside it, duplicates or no computers are rejected.
 - No secrets in images. `*_FILE` variants are available for secrets mounted as files.
 - `/metrics` can require a bearer token (`METRICS_TOKEN`).
-- Admin-only routes are not reachable without a session. `/api/agent/*`, `/healthz` and `/metrics` are the only unauthenticated-by-session endpoints.
+- Admin-only routes are not reachable without a session. `/api/agent/*`, `/api/internal/*` (sync token), `/healthz` and `/metrics` are the only unauthenticated-by-session endpoints.
 
 ### Key rotation
 

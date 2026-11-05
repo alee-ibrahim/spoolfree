@@ -4,7 +4,7 @@
 
 image:
   repository: ghcr.io/alee-ibrahim/spoolfree
-  tag: "0.1.0"
+  tag: "0.2.0"
 
 config:
   PUBLIC_URL: https://spoolfree.example.org
@@ -28,6 +28,14 @@ existingSecret: spoolfree
 ldapCa:
   enabled: true
   configMap: spoolfree-ldap-ca
+
+# Instead of LDAPS with a simple bind: the AD sync sidecar binds with Kerberos and pushes snapshots
+# (DIRECTORY_MODE=snapshot). The Secret then also needs DIRECTORY_SYNC_TOKEN (32+ random characters).
+# adsync:
+#   enabled: true
+#   ldapUrls: [ldap://dc1.example.org, ldap://dc2.example.org]
+#   realm: EXAMPLE.ORG
+#   principal: svc-spoolfree
 
 ingress:
   enabled: true

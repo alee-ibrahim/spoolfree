@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { checkEnrollmentToken } from "@/lib/agent-auth";
+import { AgentAuthError, checkEnrollmentToken, findComputer } from "@/lib/agent-auth";
 import { randomToken, sha256Hex } from "@/lib/crypto/signing";
 import { db, schema } from "@/lib/db";
-import { directory } from "@/lib/directory";
 import { isGuid, normalizeGuid } from "@/lib/directory/guid";
 import { dnEquals } from "@/lib/dn";
 import { enrollmentToken, signingKeyInfo } from "@/lib/keys";
@@ -18,7 +17,7 @@ const Body = z.object({
 
 /**
  * One-time enrollment. The shared enrollment token proves the caller ran our
- * GPO script; LDAP proves the claimed computer exists, is enabled and matches
+ * GPO script; the directory (LDAP or the synced snapshot) proves the claimed computer exists, is enabled and matches
  * the claimed DN/name. A fresh per-machine token is issued (re-enrollment
  * after a reimage replaces the old token).
  */
@@ -31,7 +30,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid enrollment token" }, { status: 401 });
   }
   const guid = normalizeGuid(body.objectGuid);
-  const computer = await directory().findComputerByGuid(guid);
+  let computer;
+  try {
+    computer = await findComputer(guid);
+  } catch (e) {
+    if (e instanceof AgentAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    throw e;
+  }
   if (!computer || computer.disabled) {
     return NextResponse.json({ error: "computer not found or disabled" }, { status: 403 });
   }

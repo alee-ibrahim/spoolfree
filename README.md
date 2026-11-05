@@ -123,6 +123,8 @@ pnpm dev                               # http://localhost:3000 -> "Development l
 4. Add `Install-SpoolfreeAgent.ps1` as a computer startup script with `-ServerUrl https://spoolfree.example.org -PublicKey <key> -EnrollmentTokenPath <token file>`.
 5. Reboot a test PC; it shows up under **Agents** within minutes.
 
+Domains that require LDAP signing and have no LDAPS certificate can use the optional Kerberos [AD sync sidecar](docs/deployment.md#ad-sync-sidecar-kerberos) instead.
+
 Full guide, including the Entra app registration and the read-only AD account: [docs/deployment.md](docs/deployment.md). Agent internals: [docs/agent.md](docs/agent.md).
 
 ## Configuration
@@ -141,6 +143,9 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `AUTH_MICROSOFT_ENTRA_ID_ID` / `_SECRET` | | **Required.** Entra app client ID and secret. |
 | `AUTH_MICROSOFT_ENTRA_ID_ISSUER` | | **Required.** `https://login.microsoftonline.com/<tenant-id>/v2.0` |
 | `ADMIN_GROUP_IDS` | | **Required.** Comma-separated Entra group object IDs allowed to sign in. |
+| `DIRECTORY_MODE` | `ldap` | `ldap`, or `snapshot` for the [AD sync sidecar](docs/deployment.md#ad-sync-sidecar-kerberos). |
+| `DIRECTORY_SYNC_TOKEN` | | Snapshot mode: sidecar token (32+ characters). |
+| `DIRECTORY_STALE_MINUTES` / `DIRECTORY_MAX_AGE_HOURS` | `30` / `24` | Snapshot mode: UI warning / agents refused. |
 | `LDAP_URL` | | e.g. `ldaps://dc1.example.org:636` |
 | `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | | Read-only service account. |
 | `LDAP_BASE_DN` | | e.g. `DC=example,DC=org` |
