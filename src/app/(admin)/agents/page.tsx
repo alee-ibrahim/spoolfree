@@ -54,6 +54,10 @@ export default async function AgentsPage() {
                   const r = a.lastReport;
                   const stale = !a.lastReportAt || a.lastReportAt.getTime() < staleBefore;
                   const errors = r?.errors ?? [];
+                  const legacy = r?.legacy ?? [];
+                  const wouldRemove = legacy.filter((l) => l.action === "would-remove");
+                  const removedLegacy = legacy.filter((l) => l.action === "removed");
+                  const failedLegacy = legacy.filter((l) => l.action === "failed");
                   return (
                     <TableRow key={a.id} className={a.revokedAt ? "opacity-50" : undefined}>
                       <TableCell className="pl-4">
@@ -92,6 +96,27 @@ export default async function AgentsPage() {
                           </Tooltip>
                         ) : (
                           <Badge variant="secondary">OK</Badge>
+                        )}
+                        {legacy.length > 0 && (
+                          <div className="mt-1 flex flex-col gap-0.5 text-xs">
+                            {wouldRemove.map((l) => (
+                              <div key={`w${l.scope}${l.queue}`} className="text-amber-700 dark:text-amber-500" title={l.reason}>
+                                Would remove {l.queue} ({l.printer}
+                                {l.scope !== "machine" ? `, ${l.scope}` : ""})
+                              </div>
+                            ))}
+                            {removedLegacy.map((l) => (
+                              <div key={`r${l.scope}${l.queue}`} className="text-muted-foreground" title={l.reason}>
+                                Removed {l.queue} ({l.printer}
+                                {l.scope !== "machine" ? `, ${l.scope}` : ""})
+                              </div>
+                            ))}
+                            {failedLegacy.map((l) => (
+                              <div key={`f${l.scope}${l.queue}`} className="text-destructive" title={l.error ?? l.reason}>
+                                Could not remove {l.queue}: {l.error ?? "failed"}
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">

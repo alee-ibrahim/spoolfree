@@ -12,8 +12,8 @@ const printers = new Map<string, ManifestPrinterInput>([
 ]);
 const computer = { objectGuid: "0f8fad5b-d9cb-469f-a165-70867728950e", dn: `CN=PC1,${OU}`, name: "PC1" };
 
-function manifest() {
-  const resolution = resolvePrinters(
+function resolution() {
+  return resolvePrinters(
     {
       baseDn: "DC=example,DC=org",
       assignments: [{ ouDn: OU, printerId: "p1" }, { ouDn: OU, printerId: "p2" }, { ouDn: OU, printerId: "deleted" }],
@@ -22,7 +22,10 @@ function manifest() {
     },
     computer,
   );
-  return buildManifest({ resolution, printers, computer, now: new Date("2026-11-05T00:00:00Z"), ttlHours: 24, serial: "s1" });
+}
+
+function manifest() {
+  return buildManifest({ resolution: resolution(), printers, computer, now: new Date("2026-11-05T00:00:00Z"), ttlHours: 24, serial: "s1" });
 }
 
 describe("manifest", () => {
@@ -106,5 +109,20 @@ describe("metrics", () => {
     expect(text).toContain('spoolfree_printer_marker_level_percent{printer="Lab \\"A\\"",marker="Black",color="#000000"} 40');
     expect(text).toContain("spoolfree_printer_last_seen_timestamp_seconds");
     expect(text).toContain('spoolfree_agents{state="stale"} 1');
+  });
+});
+
+describe("manifest: duplex and legacy takeover", () => {
+  it("defaults to auto / off for printers without the fields", () => {
+    const m = manifest();
+    expect(m.printers[0]).toMatchObject({ defaultSides: "auto", legacy: { mode: "off", shares: [] } });
+    expect(m.legacyPrintServers).toEqual([]);
+  });
+  it("carries defaultSides, the takeover mode, shares and the legacy print servers", () => {
+    const p = new Map(printers);
+    p.set("p1", { ...printers.get("p1")!, defaultSides: "two-sided-long-edge", legacyTakeover: "dry-run", legacyShares: ["StaffCopier"] });
+    const m = buildManifest({ resolution: resolution(), printers: p, computer, now: new Date("2026-11-05T00:00:00Z"), ttlHours: 24, legacyPrintServers: ["printsrv01.example.org"] });
+    expect(m.printers[0]).toMatchObject({ defaultSides: "two-sided-long-edge", legacy: { mode: "dry-run", shares: ["StaffCopier"] } });
+    expect(m.legacyPrintServers).toEqual(["printsrv01.example.org"]);
   });
 });

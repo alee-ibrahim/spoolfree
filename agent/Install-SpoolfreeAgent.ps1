@@ -82,6 +82,9 @@ if (-not $current.PSObject.Properties['PublicKey'] -or $Force) {
     Write-Warning 'A different public key is already pinned; keeping it. Use -Force to rotate the key.'
 }
 
+# Per-user legacy takeover results (written by the logon task; users can create, not read others')
+Initialize-SpoolfreeUserTakeoverDir
+
 # 3. Enrollment -------------------------------------------------------------------
 $identity = Get-SpoolfreeComputerIdentity
 $cfg = Get-SpoolfreeConfig

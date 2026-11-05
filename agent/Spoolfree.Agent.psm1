@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.1.0'
+$script:AgentVersion = '0.4.0'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -267,6 +267,229 @@ function Get-SpoolfreeQueueUpdate {
 }
 
 # ---------------------------------------------------------------------------
+# Legacy queue takeover (pure). Opt-in per printer through the manifest:
+#   printer.legacy = { mode: off | dry-run | on, shares: [share names] }
+#   manifest.legacyPrintServers = [print server host names]
+# A queue is only ever matched when its device is positively identified as
+# the printer's; USB, virtual and unidentifiable queues are never touched.
+# ---------------------------------------------------------------------------
+
+$script:VirtualQueuePattern = 'PDF|OneNote|XPS Document Writer|(^|\W)Fax($|\W)|Evernote|Microsoft Print to|Send To '
+$script:LocalPortPattern = '^(USB\d+|DOT4_\d+|LPT\d+:?|COM\d+:?|FILE:|nul:|PORTPROMPT:|TS\d+|XPSPort:|SHRFAX:|FOXIT_[^\s]*|Ne\d+:)$'
+$script:LocalMonitors = @('Local Monitor', 'Local Port', 'USB Monitor', 'Dynamic Print Monitor', 'Inactive TS Port', 'Microsoft Shared Fax Monitor', 'Appmon')
+
+function Get-SpoolfreeProperty {
+    <# StrictMode-safe property read on PSCustomObjects and hashtables; $null when missing. #>
+    param($Object, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { if ($Object.Contains($Name)) { return $Object[$Name] } else { return $null } }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($p) { return $p.Value }
+    return $null
+}
+
+function Get-SpoolfreeLegacyMode {
+    <# 'off' | 'dry-run' | 'on' for a manifest printer (missing or unknown => off). #>
+    param($Printer)
+    $legacy = Get-SpoolfreeProperty $Printer 'legacy'
+    $mode = [string](Get-SpoolfreeProperty $legacy 'mode')
+    if ($mode -eq 'on' -or $mode -eq 'dry-run') { return $mode }
+    return 'off'
+}
+
+function Get-SpoolfreeUrlHost {
+    <# Host part of http/https/ipp/ipps URLs, lower-case; $null otherwise. #>
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+    if (-not $Value) { return $null }
+    $m = [regex]::Match($Value.Trim(), '^(?i)(https?|ipps?)://(\[[0-9a-f:.]+\]|[^/:\s\[\]]+)')
+    if (-not $m.Success) { return $null }
+    return $m.Groups[2].Value.Trim('[', ']').ToLowerInvariant()
+}
+
+function Test-SpoolfreeLegacyServer {
+    <#
+    .SYNOPSIS
+        True when $Server (from \\server\share) is one of the legacy print servers. A short name
+        and an FQDN are equal when the short name is the FQDN's first label.
+    #>
+    param([string]$Server, [AllowEmptyCollection()][string[]]$Servers)
+    if (-not $Server) { return $false }
+    $s = $Server.ToLowerInvariant().TrimEnd('.')
+    foreach ($c in @($Servers)) {
+        if (-not $c) { continue }
+        $c = $c.ToLowerInvariant().Trim().TrimEnd('.')
+        if ($c -eq $s) { return $true }
+        if ($c -notmatch '\.' -and $s -match '\.' -and $s.Split('.')[0] -eq $c) { return $true }
+        if ($s -notmatch '\.' -and $c -match '\.' -and $c.Split('.')[0] -eq $s) { return $true }
+    }
+    return $false
+}
+
+function Test-SpoolfreeVirtualQueue {
+    <# True for queues that must never be taken over: virtual printers, USB/parallel/serial/local ports. #>
+    param([Parameter(Mandatory)]$Queue, $Port)
+    $name = [string](Get-SpoolfreeProperty $Queue 'Name')
+    $driver = [string](Get-SpoolfreeProperty $Queue 'DriverName')
+    $portName = [string](Get-SpoolfreeProperty $Queue 'PortName')
+    if ($name -match $script:VirtualQueuePattern -or $driver -match $script:VirtualQueuePattern) { return $true }
+    if ($portName -match $script:LocalPortPattern) { return $true }
+    if ($Port) {
+        $monitor = [string](Get-SpoolfreeProperty $Port 'Monitor')
+        $desc = [string](Get-SpoolfreeProperty $Port 'Description')
+        if ($script:LocalMonitors -contains $monitor -or $script:LocalMonitors -contains $desc) { return $true }
+    }
+    return $false
+}
+
+function Get-SpoolfreeLegacyMatches {
+    <#
+    .SYNOPSIS
+        Pure: the non-Spoolfree queues that point at the same device as $Printer.
+    .PARAMETER Queues
+        Objects with Name, Type (Local/Connection), PortName, DriverName, Comment.
+    .PARAMETER Ports
+        Hashtable PortName -> object with Monitor, Description, HostAddress, Addresses (resolved IPs).
+    .PARAMETER PrinterAddresses
+        The printer's host name(s) and resolved IPs, lower-case.
+    .PARAMETER ConnectionsOnly
+        Only consider \\server\share connections (per-user logon task).
+    .OUTPUTS
+        Objects with Queue and Reason (use @(...) around the call).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Printer,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Queues,
+        [AllowNull()][hashtable]$Ports = @{},
+        [AllowEmptyCollection()][string[]]$PrinterAddresses = @(),
+        [AllowEmptyCollection()][string[]]$LegacyServers = @(),
+        [AllowEmptyCollection()][string[]]$Installed = @(),
+        [switch]$ConnectionsOnly
+    )
+    $out = New-Object System.Collections.Generic.List[object]
+    if ((Get-SpoolfreeLegacyMode $Printer) -eq 'off') { return }
+    if ($null -eq $Ports) { $Ports = @{} }
+    $legacy = Get-SpoolfreeProperty $Printer 'legacy'
+    $shares = @{}
+    foreach ($s in @(Get-SpoolfreeProperty $legacy 'shares')) { if ($s) { $shares[([string]$s).Trim().ToLowerInvariant()] = $true } }
+    $addr = @{}
+    foreach ($a in @($PrinterAddresses)) { if ($a) { $addr[$a.ToLowerInvariant()] = $true } }
+    $mine = @{}
+    foreach ($n in @($Installed)) { if ($n) { $mine[$n.ToLowerInvariant()] = $true } }
+    $target = ([string](Get-SpoolfreeProperty $Printer 'name')).ToLowerInvariant()
+
+    foreach ($q in @($Queues)) {
+        $name = [string](Get-SpoolfreeProperty $q 'Name')
+        if (-not $name) { continue }
+        $lname = $name.ToLowerInvariant()
+        if ($lname -eq $target -or $mine.ContainsKey($lname)) { continue }
+        if (([string](Get-SpoolfreeProperty $q 'Comment')).StartsWith($script:CommentPrefix)) { continue }
+
+        $conn = [regex]::Match($name, '^\\\\([^\\]+)\\(.+)$')
+        $isConnection = $conn.Success -or ([string](Get-SpoolfreeProperty $q 'Type')) -eq 'Connection'
+        if ($isConnection) {
+            if (-not $conn.Success) { continue }
+            $server = $conn.Groups[1].Value
+            $share = $conn.Groups[2].Value
+            if ((Test-SpoolfreeLegacyServer -Server $server -Servers $LegacyServers) -and $shares.ContainsKey($share.ToLowerInvariant())) {
+                $out.Add([pscustomobject]@{ Queue = $name; Reason = "print server connection \\$server\$share" })
+            }
+            continue
+        }
+        if ($ConnectionsOnly -or $addr.Count -eq 0) { continue }
+
+        $portName = [string](Get-SpoolfreeProperty $q 'PortName')
+        $port = if ($portName -and $Ports.ContainsKey($portName)) { $Ports[$portName] } else { $null }
+        if (Test-SpoolfreeVirtualQueue -Queue $q -Port $port) { continue }
+
+        $hostAddress = ([string](Get-SpoolfreeProperty $port 'HostAddress')).Trim().ToLowerInvariant()
+        $candidates = New-Object System.Collections.Generic.List[string]
+        foreach ($a in @(Get-SpoolfreeProperty $port 'Addresses')) { if ($a) { $candidates.Add(([string]$a).ToLowerInvariant()) } }
+        $monitor = [string](Get-SpoolfreeProperty $port 'Monitor')
+        $urlHost = Get-SpoolfreeUrlHost $portName
+        if (-not $urlHost) { $urlHost = Get-SpoolfreeUrlHost $hostAddress }
+
+        $kind = $null; $label = $null
+        if ($portName -match '^WSD-' -or $monitor -eq 'WSD Port') {
+            # Only when the impure layer found the device's address; otherwise unidentifiable.
+            $kind = 'WSD port'
+        } elseif ($urlHost) {
+            $kind = 'IPP port'; $label = $urlHost; $candidates.Add($urlHost)
+        } elseif ($hostAddress -or $monitor -eq 'Standard TCP/IP Port') {
+            $kind = 'TCP/IP port'; $label = $hostAddress
+            if ($hostAddress) { $candidates.Add($hostAddress) }
+        } else { continue }
+
+        $hit = $null
+        foreach ($c in $candidates) { if ($addr.ContainsKey($c)) { $hit = $c; break } }
+        if (-not $hit) { continue }
+        if (-not $label) { $label = $hit }
+        $out.Add([pscustomobject]@{ Queue = $name; Reason = "$kind $label" })
+    }
+    # Emitted one by one: wrap calls in @() for an array (empty => @()).
+    return $out.ToArray()
+}
+
+function Merge-SpoolfreeRemovedMap {
+    <# Pure: previous removedMap (object/hashtable) + new entries => hashtable, at most $Max entries (newest win). #>
+    param($Previous, [hashtable]$New = @{}, [int]$Max = 500)
+    $merged = [ordered]@{}
+    if ($Previous -is [System.Collections.IDictionary]) {
+        foreach ($k in $Previous.Keys) { $merged[[string]$k] = [string]$Previous[$k] }
+    } elseif ($null -ne $Previous) {
+        foreach ($p in $Previous.PSObject.Properties) { $merged[$p.Name] = [string]$p.Value }
+    }
+    foreach ($k in $New.Keys) { if ($merged.Contains($k)) { $merged.Remove($k) }; $merged[$k] = [string]$New[$k] }
+    while ($merged.Count -gt $Max) { $merged.RemoveAt(0) }
+    $h = @{}
+    foreach ($k in $merged.Keys) { $h[$k] = $merged[$k] }
+    return $h
+}
+
+# ---------------------------------------------------------------------------
+# Default duplex (manifest printer.defaultSides, IPP "sides" keywords)
+# ---------------------------------------------------------------------------
+
+function ConvertTo-SpoolfreeDuplexingMode {
+    <# Pure: IPP sides keyword -> Set-PrintConfiguration -DuplexingMode value; $null for auto/unknown. #>
+    param([AllowNull()][AllowEmptyString()][string]$Sides)
+    switch ($Sides) {
+        'one-sided' { return 'OneSided' }
+        'two-sided-long-edge' { return 'TwoSidedLongEdge' }
+        'two-sided-short-edge' { return 'TwoSidedShortEdge' }
+        default { return $null }
+    }
+}
+
+function Get-SpoolfreeDesiredSides {
+    <# Pure: the manifest printer's defaultSides, 'auto' when missing or unknown. #>
+    param($Printer)
+    $s = [string](Get-SpoolfreeProperty $Printer 'defaultSides')
+    if (ConvertTo-SpoolfreeDuplexingMode $s) { return $s }
+    return 'auto'
+}
+
+function Test-SpoolfreeDuplexNeeded {
+    <#
+    .SYNOPSIS
+        Pure: should the duplex default be (re)applied? Only when a mode is wanted and either the queue was
+        just (re)created or the value recorded in the marker differs. 'auto' never touches the queue.
+    #>
+    param([string]$Desired, [AllowNull()][AllowEmptyString()][string]$Applied, [bool]$Recreated)
+    if (-not (ConvertTo-SpoolfreeDuplexingMode $Desired)) { return $false }
+    if ($Recreated) { return $true }
+    return ($Applied -ne $Desired)
+}
+
+function Set-SpoolfreeQueueDuplex {
+    <# Sets the queue's default duplex (printer defaults; users' own saved preferences still win). #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Sides)
+    $mode = ConvertTo-SpoolfreeDuplexingMode $Sides
+    if (-not $mode) { throw "Unknown duplex mode '$Sides'." }
+    Set-PrintConfiguration -PrinterName $Name -DuplexingMode $mode -ErrorAction Stop
+}
+
+# ---------------------------------------------------------------------------
 # Machine identity and secrets
 # ---------------------------------------------------------------------------
 
@@ -330,7 +553,8 @@ function Get-SpoolfreeInstalled {
     if (-not (Test-Path $script:PrinterRegistry)) { return @() }
     $list = foreach ($k in Get-ChildItem -Path $script:PrinterRegistry) {
         $p = Get-ItemProperty -Path $k.PSPath
-        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName }
+        $sides = if ($p.PSObject.Properties['Sides']) { [string]$p.Sides } else { '' }
+        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName; Sides = $sides }
     }
     return @($list)
 }
@@ -355,6 +579,13 @@ function Set-SpoolfreeMarker {
     New-ItemProperty -Path $key -Name Url -Value $Printer.ippUrl -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Method -Value $Method -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name PortName -Value $PortName -PropertyType String -Force | Out-Null
+}
+
+function Set-SpoolfreeMarkerSides {
+    <# Records the duplex default last applied to a queue (so it is re-applied only when the manifest changes). #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Sides)
+    $key = Get-SpoolfreeMarkerKey -Name $Name
+    if (Test-Path $key) { New-ItemProperty -Path $key -Name Sides -Value $Sides -PropertyType String -Force | Out-Null }
 }
 
 function Remove-SpoolfreeMarker {
@@ -458,14 +689,185 @@ function Set-SpoolfreeDefaultPrinter {
         policy default changes.
     #>
     param([AllowEmptyString()][string]$Name)
-    if (-not (Test-Path $script:PublicRegistry)) {
-        New-Item -Path $script:PublicRegistry -Force | Out-Null
-        $acl = Get-Acl -Path $script:PublicRegistry
-        $users = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($users, 'ReadKey', 'None', 'None', 'Allow')))
-        Set-Acl -Path $script:PublicRegistry -AclObject $acl
-    }
+    Initialize-SpoolfreePublicKey
     New-ItemProperty -Path $script:PublicRegistry -Name DefaultPrinter -Value $Name -PropertyType String -Force | Out-Null
+}
+
+function Initialize-SpoolfreePublicKey {
+    <# HKLM:\SOFTWARE\Spoolfree\Public: written by SYSTEM, readable by Users (logon task). #>
+    if (Test-Path $script:PublicRegistry) { return }
+    New-Item -Path $script:PublicRegistry -Force | Out-Null
+    $acl = Get-Acl -Path $script:PublicRegistry
+    $users = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($users, 'ReadKey', 'None', 'None', 'Allow')))
+    Set-Acl -Path $script:PublicRegistry -AclObject $acl
+}
+
+# ---------------------------------------------------------------------------
+# Legacy queue takeover (impure side)
+# ---------------------------------------------------------------------------
+
+$script:UserTakeoverDir = Join-Path $env:ProgramData 'Spoolfree\UserTakeover'
+$script:DnsCache = @{}
+
+function Resolve-SpoolfreeAddress {
+    <# Host name or IP -> lower-case IP strings. Tolerates DNS failures and slow servers (3 s). #>
+    param([AllowEmptyString()][string]$HostName)
+    if (-not $HostName) { return @() }
+    $h = $HostName.Trim().Trim('[', ']').ToLowerInvariant()
+    $ip = $null
+    if ([Net.IPAddress]::TryParse($h, [ref]$ip)) { return @($ip.ToString().ToLowerInvariant()) }
+    if ($script:DnsCache.ContainsKey($h)) { return $script:DnsCache[$h] }
+    $result = @()
+    try {
+        $ar = [Net.Dns]::BeginGetHostAddresses($h, $null, $null)
+        if ($ar.AsyncWaitHandle.WaitOne(3000)) {
+            $result = @([Net.Dns]::EndGetHostAddresses($ar) | ForEach-Object { $_.ToString().ToLowerInvariant() })
+        }
+    } catch { $result = @() }
+    $script:DnsCache[$h] = $result
+    return $result
+}
+
+function Get-SpoolfreePrinterAddressSet {
+    <# The printer's host (and the host in its IPP URL) plus their resolved IPs, lower-case. #>
+    param([Parameter(Mandatory)]$Printer)
+    $set = New-Object System.Collections.Generic.List[string]
+    foreach ($h in @([string](Get-SpoolfreeProperty $Printer 'host'), (Get-SpoolfreeUrlHost ([string](Get-SpoolfreeProperty $Printer 'ippUrl'))))) {
+        if (-not $h) { continue }
+        $set.Add($h.ToLowerInvariant())
+        foreach ($a in (Resolve-SpoolfreeAddress $h)) { $set.Add($a) }
+    }
+    return @($set | Select-Object -Unique)
+}
+
+function Get-SpoolfreeQueueInventory {
+    param([switch]$ConnectionsOnly)
+    $list = foreach ($q in @(Get-Printer -ErrorAction SilentlyContinue)) {
+        $o = [pscustomobject]@{ Name = [string]$q.Name; Type = [string]$q.Type; PortName = [string]$q.PortName; DriverName = [string]$q.DriverName; Comment = [string]$q.Comment }
+        if ($ConnectionsOnly -and $o.Type -ne 'Connection' -and -not $o.Name.StartsWith('\\')) { continue }
+        $o
+    }
+    return @($list)
+}
+
+function Get-SpoolfreeWsdAddresses {
+    <# Best effort: URL-looking values stored for a WSD port. Empty when the address is not detectable. #>
+    param([Parameter(Mandatory)][string]$PortName)
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\WSD Port\Ports\$PortName"
+    $out = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $key)) { return @() }
+    $props = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+    if (-not $props) { return @() }
+    foreach ($p in $props.PSObject.Properties) {
+        if ($p.Name -like 'PS*' -or -not ($p.Value -is [string])) { continue }
+        $h = Get-SpoolfreeUrlHost $p.Value
+        if ($h) { $out.Add($h); foreach ($a in (Resolve-SpoolfreeAddress $h)) { $out.Add($a) } }
+    }
+    return @($out | Select-Object -Unique)
+}
+
+function Get-SpoolfreePortInventory {
+    <# Hashtable PortName -> Monitor, Description, HostAddress, Addresses (resolved). #>
+    $ports = @{}
+    foreach ($p in @(Get-PrinterPort -ErrorAction SilentlyContinue)) {
+        $name = [string]$p.Name
+        $hostAddress = ''
+        if ($p.PSObject.Properties['PrinterHostAddress'] -and $p.PrinterHostAddress) { $hostAddress = [string]$p.PrinterHostAddress }
+        $monitor = if ($p.PSObject.Properties['PortMonitor']) { [string]$p.PortMonitor } else { '' }
+        $addresses = @()
+        $urlHost = Get-SpoolfreeUrlHost $name
+        if ($hostAddress) { $addresses = Resolve-SpoolfreeAddress $hostAddress }
+        elseif ($urlHost) { $addresses = Resolve-SpoolfreeAddress $urlHost }
+        elseif ($name -match '^WSD-' -or $monitor -eq 'WSD Port') { $addresses = Get-SpoolfreeWsdAddresses -PortName $name }
+        $ports[$name] = [pscustomobject]@{ Monitor = $monitor; Description = [string]$p.Description; HostAddress = $hostAddress; Addresses = @($addresses) }
+    }
+    return $ports
+}
+
+function Get-SpoolfreeTakeoverState {
+    <# The Takeover JSON published for the logon task, or $null. #>
+    $v = Get-ItemProperty -Path $script:PublicRegistry -Name Takeover -ErrorAction SilentlyContinue
+    if (-not $v -or -not $v.Takeover) { return $null }
+    try { return ($v.Takeover | ConvertFrom-Json) } catch { return $null }
+}
+
+function Set-SpoolfreeTakeoverState {
+    <# Publishes legacy servers, rules and the merged removed-queue map for the logon task. #>
+    param([AllowEmptyCollection()][string[]]$Servers = @(), [AllowEmptyCollection()][object[]]$Rules = @(), [hashtable]$Removed = @{})
+    Initialize-SpoolfreePublicKey
+    $prev = Get-SpoolfreeTakeoverState
+    $map = Merge-SpoolfreeRemovedMap -Previous (Get-SpoolfreeProperty $prev 'removedMap') -New $Removed
+    $state = [ordered]@{ servers = @($Servers); rules = @($Rules); removedMap = $map }
+    New-ItemProperty -Path $script:PublicRegistry -Name Takeover -Value ($state | ConvertTo-Json -Depth 5 -Compress) -PropertyType String -Force | Out-Null
+}
+
+function Initialize-SpoolfreeUserTakeoverDir {
+    <#
+    Users may create their own result file (the logon task writes <SID>.json) but cannot list,
+    read or change other users' files. SYSTEM and Administrators: full control.
+    #>
+    param([string]$Path = $script:UserTakeoverDir)
+    if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $sid = { param($s) New-Object System.Security.Principal.SecurityIdentifier $s }
+    foreach ($s in 'S-1-5-18', 'S-1-5-32-544') {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((& $sid $s), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    # Authenticated Users: create files in this folder only.
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((& $sid 'S-1-5-11'), 'CreateFiles, ReadAttributes, Synchronize', 'None', 'None', 'Allow')))
+    # CREATOR OWNER: full control of the files they created.
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((& $sid 'S-1-3-0'), 'FullControl', 'ObjectInherit', 'InheritOnly', 'Allow')))
+    Set-Acl -Path $Path -AclObject $acl
+}
+
+function ConvertTo-SpoolfreeLegacyEntry {
+    <# Pure: validated report entry (strings capped), or $null. #>
+    param($Entry, [Parameter(Mandatory)][string]$Scope)
+    $action = [string](Get-SpoolfreeProperty $Entry 'action')
+    if (@('removed', 'would-remove', 'failed') -notcontains $action) { return $null }
+    $cap = { param($v) $s = [string]$v; if ($s.Length -gt 256) { $s.Substring(0, 256) } else { $s } }
+    $o = [ordered]@{
+        printer = & $cap (Get-SpoolfreeProperty $Entry 'printer')
+        queue   = & $cap (Get-SpoolfreeProperty $Entry 'queue')
+        reason  = & $cap (Get-SpoolfreeProperty $Entry 'reason')
+        action  = $action
+        scope   = & $cap $Scope
+    }
+    if (-not $o.printer -or -not $o.queue) { return $null }
+    $err = Get-SpoolfreeProperty $Entry 'error'
+    if ($err) { $o['error'] = & $cap $err }
+    return [pscustomobject]$o
+}
+
+function Get-SpoolfreeUserTakeoverResults {
+    <# Per-user results written by the logon task. The scope comes from the file owner, not its content. #>
+    param([string]$Path = $script:UserTakeoverDir, [int]$Max = 200)
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path $Path)) { return @() }
+    foreach ($f in @(Get-ChildItem -Path $Path -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        if ($f.Length -gt 65536) { continue }
+        try {
+            $owner = (Get-Acl -LiteralPath $f.FullName).Owner
+            $data = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
+        } catch { continue }
+        foreach ($e in @($data)) {
+            $entry = ConvertTo-SpoolfreeLegacyEntry -Entry $e -Scope "user:$owner"
+            if ($entry) { $out.Add($entry) }
+            if ($out.Count -ge $Max) { return $out.ToArray() }
+        }
+    }
+    return $out.ToArray()
+}
+
+function Get-SpoolfreeUserDefaultQueue {
+    <# The user's current default queue name (HKCU ...\Windows\Device = "Name,winspool,Ne00:"). #>
+    $v = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows' -Name Device -ErrorAction SilentlyContinue
+    if (-not $v -or -not $v.Device) { return $null }
+    $parts = ([string]$v.Device).Split(',')
+    if ($parts.Count -ge 3) { return ($parts[0..($parts.Count - 3)] -join ',') }
+    return $parts[0]
 }
 
 function Invoke-SpoolfreeHttp {

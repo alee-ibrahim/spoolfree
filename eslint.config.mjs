@@ -9,6 +9,7 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    "cli/**", // bundled admin CLI (pnpm build:cli)
     "out/**",
     "build/**",
     "next-env.d.ts",

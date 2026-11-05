@@ -112,10 +112,59 @@ Only the sidecar mounts the password; both containers mount the token as a file.
 docker run --rm --read-only --tmpfs /tmp -v /path/to/pw:/run/pw:ro \
   -e ADSYNC_LDAP_URLS=ldap://dc1.example.org -e ADSYNC_BASE_DN=DC=example,DC=org \
   -e ADSYNC_REALM=EXAMPLE.ORG -e ADSYNC_PRINCIPAL=svc-spoolfree -e ADSYNC_PASSWORD_FILE=/run/pw \
-  ghcr.io/alee-ibrahim/spoolfree-adsync:0.3.0 --once --dry-run
+  ghcr.io/alee-ibrahim/spoolfree-adsync:0.4.0 --once --dry-run
 # {"ous": 9, "computers": 17, "enabled": 16, "disabled": 1, "withDnsHostName": 17, "server": "dc1.example.org", "ssf": 256, "kvno": 2}
 ```
 
 `--snapshot-file snapshot.json` pushes a JSON file instead of reading AD (development without a domain).
 
 **Password rotation:** change the password in AD and in your secret store, at about the same time. The sidecar re-reads the password file on every cycle and rebuilds the keytab when it changes (and once more after a failed `kinit`); with `ADSYNC_KVNO=auto` it picks up the new key version by itself. Kubernetes refreshes mounted Secret files within about a minute, so no restart is needed; until then a sync may fail and is retried at the next interval.
+
+## Bulk import and export
+
+`spoolfree-cli printers` creates or updates printers, OU assignments and OU default printers from a YAML or CSV file.
+It is idempotent: printers are matched by name (case-insensitive), only changed fields are written, and running the
+same file twice changes nothing. Every change is in the audit log with actor `cli`. A host/port/path/TLS change bumps the
+printer's revision, so PCs re-create the queue.
+
+```yaml
+printers:
+  - name: Staff Room Copier          # queue name on PCs
+    ip: 192.0.2.10                   # or host: copier.example.org; port 631, ippPath /ipp/print, useTls false by default
+    location: Block A
+    model: Brother MFC-L8900CDW
+    notes: Toner in the store room
+    defaultSides: two-sided-long-edge   # auto | one-sided | two-sided-long-edge | two-sided-short-edge
+    legacyTakeover: dry-run             # off | dry-run | on (docs/agent.md, "Legacy queue takeover")
+    legacyShares: [StaffRoom]           # share names on LEGACY_PRINT_SERVERS
+    assignments: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
+    defaultFor: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
+```
+
+CSV uses the columns `name,host` (or `ip`)`,port,ipp_path,tls,location,model,notes,duplex,takeover,shares,assignments,default_for`;
+lists are separated by `;` and DNs must be quoted (they contain commas). `export --format csv` writes this layout.
+
+Options: `--dry-run` prints the plan and writes nothing; `--prune-assignments` also removes assignments of the listed
+printers that are not in the file (otherwise assignments are only added); `--format yaml|csv` (default: by file
+extension); `-` reads the file from stdin.
+
+In the container image the CLI is one bundled file (no tsx or `scripts/` needed), using the pod's `DATABASE_URL`:
+
+```sh
+kubectl exec -i -n spoolfree deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers import - --dry-run < printers.yaml
+kubectl exec -i -n spoolfree deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers import - < printers.yaml
+kubectl exec -n spoolfree deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers export > printers.yaml
+```
+
+From a checkout: `npx tsx scripts/printers.ts import printers.yaml --dry-run` (`DATABASE_URL` from the environment).
+The same bundle has the break-glass account commands: `node cli/spoolfree-cli.mjs local-user add <name>` with the
+password on stdin (docs/admin-access.md).
+
+## Migrating from a print server
+
+1. List the old servers in `LEGACY_PRINT_SERVERS` (FQDN and/or short name, comma-separated).
+2. Import the printers with their old share names (`legacyShares`) and `legacyTakeover: dry-run`.
+3. After a sync, **Agents** shows "Would remove …" per PC (machine queues at the next sync, per-user `\\server\share`
+   connections after the user's next logon). Check that only the expected queues are listed.
+4. Switch the printers to `on` (UI or re-import). Agents remove the old queues, create the Spoolfree queue and, for users
+   whose default was a removed queue, make the Spoolfree queue their default at their next logon.

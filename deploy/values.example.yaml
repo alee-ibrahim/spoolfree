@@ -4,7 +4,7 @@
 
 image:
   repository: ghcr.io/alee-ibrahim/spoolfree
-  tag: "0.3.0"
+  tag: "0.4.0"
 
 config:
   PUBLIC_URL: https://spoolfree.example.org

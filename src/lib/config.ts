@@ -83,6 +83,17 @@ const schema = z.object({
 
   METRICS_TOKEN: z.string().optional(),
 
+  /** Old print servers whose \\server\share connections agents may replace (legacy queue takeover). */
+  LEGACY_PRINT_SERVERS: z
+    .string()
+    .default("")
+    .transform((v) =>
+      v
+        .split(/[\s,]+/)
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+
   // Development only
   DEV_FAKE_AD: bool,
   /** Optional JSON file that replaces the sample directory (see directory/fake.ts). */

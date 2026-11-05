@@ -15,6 +15,9 @@ export interface ManifestPrinterInput {
   model: string | null;
   location: string | null;
   revision: number;
+  legacyTakeover?: "off" | "dry-run" | "on";
+  legacyShares?: string[];
+  defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
 }
 
 export interface ManifestPrinter {
@@ -31,6 +34,10 @@ export interface ManifestPrinter {
   /** Bumped whenever the endpoint changes; the agent re-creates the queue on change. */
   revision: number;
   isDefault: boolean;
+  /** Legacy queue takeover for this device (agents 0.4+; older agents ignore it). */
+  legacy?: { mode: "off" | "dry-run" | "on"; shares: string[] };
+  /** Default duplex for the queue (agents 0.4+): auto | one-sided | two-sided-long-edge | two-sided-short-edge. */
+  defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
 }
 
 export interface ManifestPayload {
@@ -42,6 +49,8 @@ export interface ManifestPayload {
   printers: ManifestPrinter[];
   defaultPrinter: string | null;
   syncIntervalMinutes: number;
+  /** Print servers whose \\server\share connections count as legacy queues (LEGACY_PRINT_SERVERS). */
+  legacyPrintServers?: string[];
 }
 
 export interface SignedManifest {
@@ -64,6 +73,7 @@ export function buildManifest(args: {
   ttlHours: number;
   syncIntervalMinutes?: number;
   serial?: string;
+  legacyPrintServers?: string[];
 }): ManifestPayload {
   const list: ManifestPrinter[] = [];
   for (const r of args.resolution.printers) {
@@ -79,6 +89,8 @@ export function buildManifest(args: {
       location: p.location,
       revision: p.revision,
       isDefault: r.printerId === args.resolution.defaultPrinterId,
+      defaultSides: p.defaultSides ?? "auto",
+      legacy: { mode: p.legacyTakeover ?? "off", shares: p.legacyTakeover && p.legacyTakeover !== "off" ? (p.legacyShares ?? []) : [] },
     });
   }
   const def = list.find((p) => p.isDefault)?.name ?? null;
@@ -91,6 +103,7 @@ export function buildManifest(args: {
     printers: list,
     defaultPrinter: def,
     syncIntervalMinutes: args.syncIntervalMinutes ?? 60,
+    legacyPrintServers: args.legacyPrintServers ?? [],
   };
 }
 

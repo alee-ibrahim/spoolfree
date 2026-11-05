@@ -17,7 +17,7 @@ No print server. No printer drivers. PrintNightmare-safe.
 
 Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** that print straight to the printer through the inbox *Microsoft IPP Class Driver*. You pick which PCs get which printers by **AD OU**; a small PowerShell agent applies a **signed manifest** on each PC.
 
-> **Status:** v0.3, usable for pilots. See [limitations](#limitations).
+> **Status:** v0.4, usable for pilots. See [limitations](#limitations).
 
 ## Why
 
@@ -31,7 +31,7 @@ Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** th
 | | |
 |---|---|
 | **Entra ID login** | OIDC sign-in (automatic by default), limited to admins; optional break-glass local accounts. |
-| **Printers** | Add, edit, delete. **Test** checks driverless support over IPP; **Replace** swaps the device and keeps the name. |
+| **Printers** | Add, edit, delete, [bulk import/export](docs/deployment.md#bulk-import-and-export). **Test** checks driverless support over IPP; **Replace** swaps the device and keeps the name; default duplex; opt-in takeover of old queues. |
 | **OU assignments** | Read-only LDAP(S) view of AD with inheritance, block rules, per-OU defaults and per-computer overrides. |
 | **Preview** | "What will computer X get?", with a step-by-step trace and the exact manifest. |
 | **Unassigned PCs** | Computers in `CN=Computers`, or whose OU chain gets no printers. |
@@ -165,6 +165,7 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `SNMP_COMMUNITY` | `public` | SNMP v2c community for the Printer-MIB fallback. |
 | `LOW_TONER_PERCENT` | `15` | Low-toner threshold. |
 | `ALERT_WEBHOOK_URL` | | POST a JSON alert on offline / jam / low toner and recovery. |
+| `LEGACY_PRINT_SERVERS` | | Old print servers whose `\\server\share` queues agents may replace ([takeover](docs/agent.md#legacy-queue-takeover)). |
 | `METRICS_TOKEN` | | Bearer token required to scrape `/metrics`. |
 | `DEV_FAKE_AD`, `DEV_FAKE_AD_FILE`, `DEV_LOGIN` | `0` | Development only; ignored by production builds. |
 

@@ -56,6 +56,9 @@ export function toManifestInput(p: typeof schema.printers.$inferSelect): Manifes
     model: p.model,
     location: p.location,
     revision: p.revision,
+    legacyTakeover: p.legacyTakeover,
+    legacyShares: p.legacyShares,
+    defaultSides: p.defaultSides,
   };
 }
 
@@ -68,6 +71,7 @@ export async function manifestForComputer(computer: ComputerObject) {
     computer: { objectGuid: computer.objectGuid, dn: computer.dn, name: computer.name },
     now: new Date(),
     ttlHours: config().MANIFEST_TTL_HOURS,
+    legacyPrintServers: config().LEGACY_PRINT_SERVERS,
   });
 }
 

@@ -15,6 +15,23 @@ const Report = z.object({
   removed: list,
   defaultPrinter: z.string().max(256).nullable().optional(),
   errors: list,
+  legacy: z
+    .array(
+      z.object({
+        printer: z.string().max(256),
+        queue: z.string().max(512),
+        reason: z.string().max(512),
+        action: z.enum(["removed", "would-remove", "failed"]),
+        scope: z.string().max(300),
+        error: z.string().max(1000).optional(),
+      }),
+    )
+    .max(200)
+    .optional(),
+  sides: z
+    .record(z.string().max(256), z.string().max(32))
+    .optional()
+    .refine((v) => !v || Object.keys(v).length <= 200),
   method: z.string().max(32).optional(),
   durationMs: z.number().int().nonnegative().optional(),
 });

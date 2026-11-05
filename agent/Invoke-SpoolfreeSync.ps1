@@ -62,6 +62,55 @@ try {
 }
 
 $method = Get-SpoolfreeInstallMethod -IppUrlSupported (Test-SpoolfreeIppUrlSupported) -ProtectedPrintMode (Test-SpoolfreeProtectedPrintMode)
+
+# Legacy queue takeover (opt-in per printer): remove non-Spoolfree queues for the same device BEFORE
+# creating the Spoolfree queue (Windows allows one IPP queue per device). Dry-run only reports.
+$legacy = New-Object System.Collections.Generic.List[object]
+$legacyRemoved = @{}
+$legacyRules = New-Object System.Collections.Generic.List[object]
+$legacyServers = @(Get-SpoolfreeProperty $manifest 'legacyPrintServers' | Where-Object { $_ } | ForEach-Object { [string]$_ })
+$queues = $null; $ports = $null
+$installedNames = @(Get-SpoolfreeInstalled | ForEach-Object { [string]$_.Name })
+foreach ($p in @($manifest.printers)) {
+    $mode = Get-SpoolfreeLegacyMode $p
+    if ($mode -eq 'off') { continue }
+    try {
+        $addresses = Get-SpoolfreePrinterAddressSet -Printer $p
+        $shares = @(Get-SpoolfreeProperty (Get-SpoolfreeProperty $p 'legacy') 'shares' | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        $legacyRules.Add([ordered]@{ printer = [string]$p.name; mode = $mode; shares = $shares; addresses = @($addresses) })
+        if ($null -eq $queues) { $queues = Get-SpoolfreeQueueInventory; $ports = Get-SpoolfreePortInventory }
+        $found = @(Get-SpoolfreeLegacyMatches -Printer $p -Queues $queues -Ports $ports -PrinterAddresses $addresses -LegacyServers $legacyServers -Installed $installedNames)
+        foreach ($m in $found) {
+            $entry = [ordered]@{ printer = [string]$p.name; queue = $m.Queue; reason = $m.Reason; action = 'would-remove'; scope = 'machine' }
+            if ($mode -eq 'on' -and $PSCmdlet.ShouldProcess($m.Queue, "Remove legacy queue (replaced by $($p.name))")) {
+                try {
+                    Remove-Printer -Name $m.Queue -ErrorAction Stop
+                    $entry.action = 'removed'
+                    $legacyRemoved[$m.Queue] = [string]$p.name
+                    Write-Log "Legacy queue '$($m.Queue)' removed ($($m.Reason)); replaced by '$($p.name)'."
+                } catch {
+                    $entry.action = 'failed'
+                    $entry['error'] = $_.Exception.Message
+                    $errors.Add("$($m.Queue): legacy takeover failed: $($_.Exception.Message)")
+                    Write-Log "Legacy queue '$($m.Queue)': remove failed: $($_.Exception.Message)"
+                }
+            } else {
+                Write-Log "Legacy queue '$($m.Queue)' would be removed ($($m.Reason)); printer '$($p.name)' is in $mode mode."
+            }
+            $legacy.Add([pscustomobject]$entry)
+        }
+    } catch {
+        $errors.Add("$($p.name): legacy takeover check failed: $($_.Exception.Message)")
+        Write-Log "$($p.name): legacy takeover check failed: $($_.Exception.Message)"
+    }
+}
+if ($PSCmdlet.ShouldProcess('legacy takeover rules', 'publish')) {
+    try {
+        Set-SpoolfreeTakeoverState -Servers $legacyServers -Rules $legacyRules.ToArray() -Removed $legacyRemoved
+    } catch { Write-Log "Publishing takeover rules failed: $($_.Exception.Message)" }
+}
+foreach ($e in (Get-SpoolfreeUserTakeoverResults)) { if ($legacy.Count -lt 200) { $legacy.Add($e) } }
+
 $existing = @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
 $plan = Get-SpoolfreePlan -Desired @($manifest.printers) -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter
 Write-Log ("Manifest {0}: {1} printer(s); method {2}; plan: {3}" -f $manifest.serial, @($manifest.printers).Count, $method, (($plan | ForEach-Object { "$($_.Action) $($_.Name)" }) -join '; '))
@@ -96,6 +145,38 @@ foreach ($step in $plan) {
         Write-Log $msg
     }
 }
+# Default duplex: applied after the queue exists, re-applied only when the manifest value changes
+# (recorded in the marker) or the queue was re-created. A failure is retried at the next sync.
+$sides = [ordered]@{}
+$markers = @{}
+foreach ($m in @(Get-SpoolfreeInstalled)) { $markers[([string]$m.Name).ToLowerInvariant()] = $m }
+foreach ($p in @($manifest.printers)) {
+    $name = [string]$p.name
+    $marker = $markers[$name.ToLowerInvariant()]
+    if (-not $marker) { continue }
+    $want = Get-SpoolfreeDesiredSides $p
+    if ($want -eq 'auto') {
+        if ($marker.Sides -ne 'auto') { Set-SpoolfreeMarkerSides -Name $name -Sides 'auto' }
+        $sides[$name] = 'auto'
+        continue
+    }
+    if (Test-SpoolfreeDuplexNeeded -Desired $want -Applied $marker.Sides -Recreated ($added -contains $name)) {
+        if (-not $PSCmdlet.ShouldProcess($name, "Set default duplex $want")) { continue }
+        try {
+            Set-SpoolfreeQueueDuplex -Name $name -Sides $want
+            Set-SpoolfreeMarkerSides -Name $name -Sides $want
+            $sides[$name] = $want
+            Write-Log "${name}: default duplex set to $want."
+        } catch {
+            $sides[$name] = "failed:$want"
+            $errors.Add("${name}: default duplex $want failed: $($_.Exception.Message)")
+            Write-Log "${name}: default duplex $want failed: $($_.Exception.Message)"
+        }
+    } else {
+        $sides[$name] = $want
+    }
+}
+
 if ($PSCmdlet.ShouldProcess('default printer', 'set')) {
     Set-SpoolfreeDefaultPrinter -Name ([string]$manifest.defaultPrinter)
 }
@@ -112,6 +193,8 @@ $report = [ordered]@{
     defaultPrinter = $manifest.defaultPrinter
     errors         = $errors.ToArray()
     method         = $method
+    legacy         = @($legacy | Select-Object -First 200)
+    sides          = $sides
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds
 }
 try {

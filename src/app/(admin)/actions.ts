@@ -30,6 +30,14 @@ const PrinterInput = z.object({
   location: z.string().trim().max(200).optional().transform((v) => v || null),
   model: z.string().trim().max(200).optional().transform((v) => v || null),
   notes: z.string().trim().max(2000).optional().transform((v) => v || null),
+  legacyTakeover: z.enum(["off", "dry-run", "on"]).default("off"),
+  defaultSides: z.enum(["auto", "one-sided", "two-sided-long-edge", "two-sided-short-edge"]).default("auto"),
+  legacyShares: z
+    .string()
+    .max(2000)
+    .optional()
+    .transform((v) => [...new Set((v ?? "").split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean))])
+    .pipe(z.array(z.string().max(80).regex(/^[^\\/]+$/, "Share names only, without \\\\server\\"))),
 });
 
 function formObject(fd: FormData) {
@@ -50,10 +58,12 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
   if (!parsed.success) return { ok: false, error: firstError(parsed.error) };
   const id = fd.get("id")?.toString() || null;
   const d = db();
+  let sidesWarning = "";
   try {
     if (id) {
       const [before] = await d.select().from(schema.printers).where(eq(schema.printers.id, id));
       if (!before) return { ok: false, error: "Printer not found" };
+      sidesWarning = sidesSupportWarning(parsed.data.defaultSides, before.lastTest?.sidesSupported);
       const endpointChanged =
         before.host !== parsed.data.host ||
         before.port !== parsed.data.port ||
@@ -74,11 +84,30 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
     throw e;
   }
   revalidateAll();
-  return { ok: true, message: id ? "Printer updated" : "Printer added" };
+  return { ok: true, message: (id ? "Printer updated" : "Printer added") + sidesWarning };
+}
+
+/** Warns (but saves) when the printer's last IPP test did not list the chosen duplex mode. */
+function sidesSupportWarning(sides: string, supported: string[] | undefined): string {
+  if (sides === "auto") return "";
+  if (!supported) return ". Run Test to check that the printer supports this duplex mode.";
+  if (!supported.includes(sides)) return `. Warning: the printer does not advertise ${sides} (sides-supported: ${supported.join(", ") || "none"}).`;
+  return "";
 }
 
 function pick(p: typeof schema.printers.$inferSelect) {
-  return { name: p.name, host: p.host, port: p.port, ippPath: p.ippPath, useTls: p.useTls, model: p.model, location: p.location };
+  return {
+    name: p.name,
+    host: p.host,
+    port: p.port,
+    ippPath: p.ippPath,
+    useTls: p.useTls,
+    model: p.model,
+    location: p.location,
+    legacyTakeover: p.legacyTakeover,
+    legacyShares: p.legacyShares,
+    defaultSides: p.defaultSides,
+  };
 }
 
 const ReplaceInput = z.object({

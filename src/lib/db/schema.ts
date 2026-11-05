@@ -13,6 +13,24 @@ import {
 } from "drizzle-orm/pg-core";
 import type { DriverlessCheck, Marker } from "../ipp/interpret";
 
+export type LegacyTakeover = "off" | "dry-run" | "on";
+/** Default duplex set on the PC queue. "auto" leaves the driver default alone. */
+export type DefaultSides = "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
+export const DEFAULT_SIDES: DefaultSides[] = ["auto", "one-sided", "two-sided-long-edge", "two-sided-short-edge"];
+export const LEGACY_TAKEOVER_MODES: LegacyTakeover[] = ["off", "dry-run", "on"];
+
+export interface LegacyQueueResult {
+  /** Spoolfree queue name. */
+  printer: string;
+  /** The legacy queue that matched. */
+  queue: string;
+  reason: string;
+  action: "removed" | "would-remove" | "failed";
+  /** "machine" or "user:DOMAIN\\name" (per-user print-server connections, handled at logon). */
+  scope: string;
+  error?: string;
+}
+
 export const printers = pgTable(
   "printers",
   {
@@ -28,6 +46,15 @@ export const printers = pgTable(
     notes: text("notes"),
     /** Incremented on "Replace" so agents re-create the queue. */
     revision: integer("revision").notNull().default(1),
+    /**
+     * Legacy queue takeover: "off", "dry-run" (agents only report what they would remove) or "on"
+     * (agents remove non-Spoolfree queues for the same device before creating this one).
+     */
+    legacyTakeover: text("legacy_takeover").$type<LegacyTakeover>().notNull().default("off"),
+    /** Share names of this device on the LEGACY_PRINT_SERVERS (\\server\<share> connections). */
+    legacyShares: jsonb("legacy_shares").$type<string[]>().notNull().default([]),
+    /** Default duplex for the PC queue (agents run Set-PrintConfiguration -DuplexingMode). */
+    defaultSides: text("default_sides").$type<DefaultSides>().notNull().default("auto"),
     lastTestAt: timestamp("last_test_at", { withTimezone: true }),
     lastTest: jsonb("last_test").$type<DriverlessCheck & { error?: string | null }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -99,6 +126,9 @@ export interface AgentReport {
   removed?: string[];
   defaultPrinter?: string | null;
   errors?: string[];
+  legacy?: LegacyQueueResult[];
+  /** Printer name -> duplex default the agent applied ("auto" = left alone). */
+  sides?: Record<string, string>;
   method?: string;
   durationMs?: number;
 }

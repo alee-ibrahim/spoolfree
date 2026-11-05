@@ -37,6 +37,7 @@ import {
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
@@ -52,6 +53,11 @@ export interface PrinterView {
   location: string | null;
   model: string | null;
   notes: string | null;
+  legacyTakeover: "off" | "dry-run" | "on";
+  legacyShares: string[];
+  defaultSides: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
+  sidesSupported: string[] | null;
+  sidesDefault: string | null;
   revision: number;
   lastTestAt: string | null;
   lastTestOk: boolean | null;
@@ -97,6 +103,47 @@ function EndpointFields({ p }: { p?: Partial<PrinterView> }) {
   );
 }
 
+const SIDES_LABEL: Record<string, string> = {
+  auto: "Driver default (don't change)",
+  "one-sided": "One-sided",
+  "two-sided-long-edge": "Two-sided, long edge (portrait)",
+  "two-sided-short-edge": "Two-sided, short edge (landscape)",
+};
+
+function SidesField({ printer }: { printer?: PrinterView }) {
+  const [sides, setSides] = useState<string>(printer?.defaultSides ?? "auto");
+  const supported = printer?.sidesSupported ?? null;
+  const unsupported = sides !== "auto" && supported !== null && !supported.includes(sides);
+  return (
+    <Field>
+      <FieldLabel htmlFor="defaultSides">Default duplex</FieldLabel>
+      <Select name="defaultSides" value={sides} onValueChange={setSides}>
+        <SelectTrigger id="defaultSides" className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {Object.entries(SIDES_LABEL).map(([v, label]) => (
+            <SelectItem key={v} value={v}>
+              {label}
+              {supported && v !== "auto" && !supported.includes(v) ? " (not advertised)" : ""}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <FieldDescription>
+        {supported === null
+          ? "Run Test to read the printer's sides-supported."
+          : `Printer advertises: ${supported.join(", ") || "none"}${printer?.sidesDefault ? ` (default ${printer.sidesDefault})` : ""}.`}
+      </FieldDescription>
+      {unsupported && (
+        <Alert variant="destructive">
+          <AlertDescription>The printer does not advertise {sides}. PCs may ignore this setting.</AlertDescription>
+        </Alert>
+      )}
+    </Field>
+  );
+}
+
 export function PrinterFormDialog({ printer, trigger }: { printer?: PrinterView; trigger?: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState(savePrinter, null);
@@ -138,6 +185,34 @@ export function PrinterFormDialog({ printer, trigger }: { printer?: PrinterView;
             <Field>
               <FieldLabel htmlFor="notes">Notes</FieldLabel>
               <Textarea id="notes" name="notes" rows={2} defaultValue={printer?.notes ?? ""} />
+            </Field>
+            <SidesField printer={printer} />
+            <Field>
+              <FieldLabel htmlFor="legacyTakeover">Replace existing queues for this device</FieldLabel>
+              <Select name="legacyTakeover" defaultValue={printer?.legacyTakeover ?? "off"}>
+                <SelectTrigger id="legacyTakeover" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="off">Off: never touch other queues</SelectItem>
+                  <SelectItem value="dry-run">Dry run: report what would be removed</SelectItem>
+                  <SelectItem value="on">On: remove them, then add this printer</SelectItem>
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                Removes non-Spoolfree queues on PCs that print to this device (same IP or hostname, or a print-server
+                share below). USB and virtual printers are never touched. Start with a dry run and check Agents.
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="legacyShares">Shares on the old print servers</FieldLabel>
+              <Input
+                id="legacyShares"
+                name="legacyShares"
+                defaultValue={(printer?.legacyShares ?? []).join(", ")}
+                placeholder="Staff-Room-Copier, StaffRoom2"
+              />
+              <FieldDescription>Comma-separated share names on the servers in LEGACY_PRINT_SERVERS.</FieldDescription>
             </Field>
           </FieldGroup>
           <DialogFooter>
@@ -243,6 +318,12 @@ function TestDialog({ result, onOpenChange }: { result: (TestResult & { name: st
                   <TableCell className="text-muted-foreground">Colour / duplex</TableCell>
                   <TableCell>
                     {result.check.color === null ? "?" : result.check.color ? "Colour" : "Mono"} · {result.check.duplex ? "Duplex" : "Simplex"}
+                    {result.check.sidesSupported && (
+                      <div className="text-xs text-muted-foreground">
+                        sides-supported: {result.check.sidesSupported.join(", ") || "none"}
+                        {result.check.sidesDefault ? ` · sides-default: ${result.check.sidesDefault}` : ""}
+                      </div>
+                    )}
                   </TableCell>
                 </TableRow>
               </TableBody>

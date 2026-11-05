@@ -7,6 +7,7 @@
  *   npx tsx scripts/local-user.ts disable|enable <username>
  *   npx tsx scripts/local-user.ts delete <username>
  *   npx tsx scripts/local-user.ts list
+ *   In the image: kubectl exec -i ... -- node cli/spoolfree-cli.mjs local-user add <username>   (password on stdin)
  *
  * The password is never taken from the command line. Piped: the first line of stdin
  * (e.g. `your-secret-manager read ... | npx tsx scripts/local-user.ts add breakglass`).
@@ -63,15 +64,15 @@ async function audit(action: string, username: string) {
   await db().insert(schema.auditLog).values({ actor: "cli", action, entityType: "local_user", entityId: username });
 }
 
-async function main() {
-  const [cmd, rawName] = process.argv.slice(2);
+export async function localUserCli(argv: string[]): Promise<number> {
+  const [cmd, rawName] = argv;
   const usage = "usage: local-user.ts add|reset|unlock|disable|enable|delete <username> | list";
   if (cmd === "list") {
     for (const u of await listLocalUsers()) {
       const state = u.disabled ? "disabled" : u.lockedUntil && u.lockedUntil > new Date() ? `locked until ${u.lockedUntil.toISOString()}` : "active";
       console.log(`${u.username}\t${state}\tlast login ${u.lastLoginAt?.toISOString() ?? "never"}\tpassword set ${u.passwordChangedAt.toISOString()}`);
     }
-    return;
+    return 0;
   }
   if (!cmd || !rawName) throw new Error(usage);
   const username = rawName.trim().toLowerCase();
@@ -106,11 +107,16 @@ async function main() {
     default:
       throw new Error(usage);
   }
+  return 0;
 }
 
-main()
-  .catch((e) => {
-    console.error(`error: ${(e as Error).message}`);
-    process.exitCode = 1;
-  })
-  .finally(() => sqlClient().end({ timeout: 5 }));
+// Run directly (tsx) unless bundled into the combined CLI, which calls localUserCli itself.
+if (process.argv[1] && /local-user\.(ts|js|mjs)$/.test(process.argv[1])) {
+  localUserCli(process.argv.slice(2))
+    .then((code) => (process.exitCode = code))
+    .catch((e) => {
+      console.error(`error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    })
+    .finally(() => sqlClient().end({ timeout: 5 }));
+}

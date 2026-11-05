@@ -14,7 +14,7 @@ RUN corepack enable
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN pnpm build
+RUN pnpm build && pnpm build:cli
 
 FROM node:${NODE_VERSION} AS runtime
 WORKDIR /app
@@ -27,6 +27,9 @@ COPY --from=build --chown=node:node /app/.next/standalone ./
 COPY --from=build --chown=node:node /app/.next/static ./.next/static
 COPY --from=build --chown=node:node /app/public ./public
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
+# Admin CLI (printers import/export, break-glass local users), bundled into one file:
+#   node cli/spoolfree-cli.mjs printers import - --dry-run < printers.yaml
+COPY --from=build --chown=node:node /app/cli ./cli
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \

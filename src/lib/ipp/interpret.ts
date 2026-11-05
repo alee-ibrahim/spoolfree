@@ -19,6 +19,7 @@ export const TEST_ATTRIBUTES = [
   "pwg-raster-document-resolution-supported",
   "color-supported",
   "sides-supported",
+  "sides-default",
   "printer-uri-supported",
 ];
 
@@ -70,6 +71,9 @@ export interface DriverlessCheck {
   features: string[];
   color: boolean | null;
   duplex: boolean;
+  /** IPP sides-supported / sides-default (one-sided, two-sided-long-edge, two-sided-short-edge). */
+  sidesSupported?: string[];
+  sidesDefault?: string | null;
   problems: string[];
 }
 
@@ -103,6 +107,8 @@ export function checkDriverless(attrs: Record<string, IppValue[]>): DriverlessCh
     features: strings(attrs["ipp-features-supported"]),
     color: first<boolean>(attrs["color-supported"]),
     duplex: sides.some((s) => s.startsWith("two-sided")),
+    sidesSupported: sides,
+    sidesDefault: first<string>(attrs["sides-default"]),
     problems,
   };
 }
