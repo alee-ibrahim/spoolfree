@@ -190,7 +190,7 @@ See [SECURITY.md](SECURITY.md) for the threat model: enrollment token, per-machi
 
 ## Prior art and thanks
 
-**PrintDeployGPO** inspired the signed-manifest approach and the "what will this computer get" preview. Spoolfree is an independent implementation and contains no code from it.
+**[PrintDeployGPO](https://github.com/tinkervalley/PrintDeployGPO)** inspired the signed-manifest approach and the "what will this computer get" preview. Spoolfree is an independent implementation and contains no code from it.
 
 ## Licence
 
