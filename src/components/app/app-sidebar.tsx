@@ -1,5 +1,6 @@
 "use client";
 
+import { Badge } from "@/components/ui/badge";
 import {
   ActivityIcon,
   FolderTreeIcon,
@@ -50,7 +51,7 @@ const groups = [
   },
 ];
 
-export function AppSidebar({ user, devMode, signOutAction }: { user: { name: string; email: string }; devMode: boolean; signOutAction: () => Promise<void> }) {
+export function AppSidebar({ user, devMode, signOutAction }: { user: { name: string; email: string; local?: boolean }; devMode: boolean; signOutAction: () => Promise<void> }) {
   const pathname = usePathname();
   return (
     <Sidebar collapsible="icon">
@@ -112,6 +113,11 @@ export function AppSidebar({ user, devMode, signOutAction }: { user: { name: str
                 <span className="truncate">
                   {user.name} · Sign out
                 </span>
+                {user.local && (
+                  <Badge variant="outline" title="Signed in with a break-glass local account">
+                    local
+                  </Badge>
+                )}
               </SidebarMenuButton>
             </form>
           </SidebarMenuItem>

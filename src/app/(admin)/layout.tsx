@@ -9,7 +9,7 @@ export default async function AdminLayout({ children }: LayoutProps<"/">) {
   const user = await requireAdmin();
   async function signOutAction() {
     "use server";
-    await signOut({ redirectTo: "/login" });
+    await signOut({ redirectTo: "/login?signedout=1" });
   }
   return (
     <SidebarProvider>

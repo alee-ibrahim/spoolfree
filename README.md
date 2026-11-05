@@ -17,7 +17,7 @@ No print server. No printer drivers. PrintNightmare-safe.
 
 Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** that print straight to the printer through the inbox *Microsoft IPP Class Driver*. You pick which PCs get which printers by **AD OU**; a small PowerShell agent applies a **signed manifest** on each PC.
 
-> **Status:** v0.1, usable for pilots. See [limitations](#limitations).
+> **Status:** v0.3, usable for pilots. See [limitations](#limitations).
 
 ## Why
 
@@ -30,7 +30,7 @@ Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** th
 
 | | |
 |---|---|
-| **Entra ID login** | OIDC sign-in, limited to members of an admin group. |
+| **Entra ID login** | OIDC sign-in (automatic by default), limited to admins; optional break-glass local accounts. |
 | **Printers** | Add, edit, delete. **Test** checks driverless support over IPP; **Replace** swaps the device and keeps the name. |
 | **OU assignments** | Read-only LDAP(S) view of AD with inheritance, block rules, per-OU defaults and per-computer overrides. |
 | **Preview** | "What will computer X get?", with a step-by-step trace and the exact manifest. |
@@ -97,7 +97,7 @@ flowchart LR
 
 ## Quick start
 
-Development mode needs no AD or Entra. Requires Node.js 22+, pnpm and Docker.
+Development mode needs no AD or Entra. Requires Node.js 24.7+, pnpm and Docker.
 
 ```bash
 pnpm install
@@ -142,6 +142,8 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `AUTH_SECRET` | | **Required.** Random 32+ byte session secret. |
 | `AUTH_MICROSOFT_ENTRA_ID_ID` / `_SECRET` | | **Required.** Entra app client ID and secret. |
 | `AUTH_MICROSOFT_ENTRA_ID_ISSUER` | | **Required.** `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+| `AUTH_AUTO_SIGNIN` | on with Entra | Skip the login page and go straight to Entra ([details](docs/admin-access.md#automatic-sign-in)). |
+| `LOCAL_LOGIN_ENABLED` | `false` | Break-glass local accounts at `/login?local=1` ([details](docs/admin-access.md#break-glass-local-accounts)). |
 | `ADMIN_GROUP_IDS` | | **Required.** Comma-separated Entra group object IDs allowed to sign in. |
 | `DIRECTORY_MODE` | `ldap` | `ldap`, or `snapshot` for the [AD sync sidecar](docs/deployment.md#ad-sync-sidecar-kerberos). |
 | `DIRECTORY_SYNC_TOKEN` | | Snapshot mode: sidecar token (32+ characters). |
@@ -171,7 +173,7 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 <details>
 <summary><b>Security model (summary)</b></summary>
 
-- Admin login is Entra ID only, gated on the `groups` claim; every change is audit-logged.
+- Admin login is Entra ID (automatic redirect by default), gated on the `groups` claim or app assignment; optional break-glass local accounts are off by default; every change is audit-logged.
 - Manifests carry an **Ed25519 signature** over the exact bytes. Agents pin the public key and reject bad signatures, the wrong computer, or expired manifests, so a network attacker cannot inject printers.
 - PCs enroll with a shared token read from a Domain Computers-only share, then get a per-machine token (stored DPAPI-encrypted; only its hash is kept server-side).
 - Every agent request is checked live against AD by `objectGUID`; disabled or deleted computers are refused.

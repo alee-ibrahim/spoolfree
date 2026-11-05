@@ -1,6 +1,6 @@
 {
   "name": "spoolfree",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -13,6 +13,7 @@
     "keygen": "node --env-file-if-exists=.env --import tsx scripts/keygen.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node --env-file-if-exists=.env --import tsx scripts/migrate.ts",
+    "local-user": "node --env-file-if-exists=.env --import tsx scripts/local-user.ts",
     "seed:dev": "node --env-file-if-exists=.env --import tsx scripts/seed-dev.ts",
     "screenshots": "node --env-file-if-exists=.env --import tsx scripts/screenshots.ts",
     "dev:printers": "node --import tsx scripts/fake-printers.ts"

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { AdminAccessMode, AdminAccessPolicy } from "./admin-claims";
+import { autoSignInEnabled } from "./auth-flow";
 
 /**
  * All runtime configuration comes from environment variables.
@@ -22,6 +23,13 @@ const schema = z.object({
   AUTH_MICROSOFT_ENTRA_ID_ISSUER: z.string().optional(),
   /** "group" (default): ADMIN_GROUP_IDS decides. "entra-assignment": everyone the single-tenant Entra app lets in. */
   ADMIN_ACCESS_MODE: z.string().trim().toLowerCase().default("group"),
+  /** Go straight to Entra from /login (default: on when Entra is configured and dev login is off). */
+  AUTH_AUTO_SIGNIN: z.string().optional(),
+  /** Break-glass local admin users (scripts/local-user.ts), shown only at /login?local=1. */
+  LOCAL_LOGIN_ENABLED: bool,
+  LOCAL_LOGIN_MAX_FAILURES: z.coerce.number().int().positive().default(5),
+  LOCAL_LOGIN_LOCKOUT_MINUTES: z.coerce.number().positive().default(15),
+  LOCAL_LOGIN_IP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(20),
   ADMIN_GROUP_IDS: z
     .string()
     .default("")
@@ -106,6 +114,19 @@ export const isProductionBuild = process.env.NODE_ENV === "production";
 
 export function devLoginEnabled(): boolean {
   return !isProductionBuild && config().DEV_LOGIN;
+}
+
+export function entraConfigured(): boolean {
+  const c = config();
+  return Boolean(c.AUTH_MICROSOFT_ENTRA_ID_ID && c.AUTH_MICROSOFT_ENTRA_ID_ISSUER);
+}
+
+export function autoSignIn(): boolean {
+  return autoSignInEnabled({ setting: config().AUTH_AUTO_SIGNIN, entraConfigured: entraConfigured(), devLogin: devLoginEnabled() });
+}
+
+export function localLoginEnabled(): boolean {
+  return config().LOCAL_LOGIN_ENABLED;
 }
 
 export function fakeAdEnabled(): boolean {

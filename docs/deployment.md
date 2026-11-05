@@ -112,7 +112,7 @@ Only the sidecar mounts the password; both containers mount the token as a file.
 docker run --rm --read-only --tmpfs /tmp -v /path/to/pw:/run/pw:ro \
   -e ADSYNC_LDAP_URLS=ldap://dc1.example.org -e ADSYNC_BASE_DN=DC=example,DC=org \
   -e ADSYNC_REALM=EXAMPLE.ORG -e ADSYNC_PRINCIPAL=svc-spoolfree -e ADSYNC_PASSWORD_FILE=/run/pw \
-  ghcr.io/alee-ibrahim/spoolfree-adsync:0.2.0 --once --dry-run
+  ghcr.io/alee-ibrahim/spoolfree-adsync:0.3.0 --once --dry-run
 # {"ous": 9, "computers": 17, "enabled": 16, "disabled": 1, "withDnsHostName": 17, "server": "dc1.example.org", "ssf": 256, "kvno": 2}
 ```
 

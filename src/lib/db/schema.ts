@@ -172,3 +172,23 @@ export const directorySync = pgTable("directory_sync", {
 });
 
 export type DirectorySyncRow = typeof directorySync.$inferSelect;
+
+// --- Break-glass local admin users (LOCAL_LOGIN_ENABLED, scripts/local-user.ts) ---------------------------
+
+export const localUsers = pgTable(
+  "local_users",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Lower-case [a-z0-9._-]. */
+    username: text("username").notNull(),
+    /** argon2id PHC string. */
+    passwordHash: text("password_hash").notNull(),
+    disabled: boolean("disabled").notNull().default(false),
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("local_users_username_unique").on(t.username)],
+);

@@ -20,13 +20,15 @@ Please report vulnerabilities privately using GitHub's **"Report a vulnerability
 ### Trust boundaries and controls
 
 **Admin UI**
-- Login is by Entra ID OIDC only. Who gets in depends on `ADMIN_ACCESS_MODE` (see [docs/admin-access.md](docs/admin-access.md)):
+- Login is by Entra ID OIDC (optionally automatic, `AUTH_AUTO_SIGNIN`), plus optional break-glass local accounts (below). Who gets in through Entra depends on `ADMIN_ACCESS_MODE` (see [docs/admin-access.md](docs/admin-access.md)):
   - `group` (default): the ID token's `groups` claim must contain one of `ADMIN_GROUP_IDS`. Group overage tokens (no `groups` list) are refused.
   - `entra-assignment`: every user who signs in through the single-tenant Entra app is an admin. **"Assignment required" MUST be enabled on the enterprise app in this mode**; otherwise every account in the tenant becomes a Spoolfree admin. The token's `tid` and `iss` must both match the tenant in `AUTH_MICROSOFT_ENTRA_ID_ISSUER`, and a `common`, `organizations` or `consumers` issuer is refused.
   - A production server refuses to start in `group` mode with an empty `ADMIN_GROUP_IDS`, or in `entra-assignment` mode without a single-tenant issuer.
   - The check runs at login, and the session lasts 8 hours.
   - Every server action re-checks the session.
 - All changes are written to the audit log, with the actor's e-mail.
+- **Break-glass local accounts** (`LOCAL_LOGIN_ENABLED`, **off by default**) exist for when Entra ID is down. They are created only with `scripts/local-user.ts` (password from stdin or a hidden prompt, never argv; no self-signup), stored as argon2id hashes, and offered only at `/login?local=1`. Accounts lock after 5 wrong passwords for 15 minutes, each IP gets 20 attempts per 15 minutes, unknown and disabled usernames cost the same argon2 work, and every attempt is audit-logged; the UI marks such sessions with a "local" badge. They bypass Entra MFA and conditional access, so keep the feature off, keep the password in a vault, and disable the account after use. See [docs/admin-access.md](docs/admin-access.md#break-glass-local-accounts).
+- Automatic sign-in never loops: Auth.js errors, sign-out, `?local=1` and a one-minute guard cookie all stop the redirect.
 - The development login and fake directory are compiled out of production builds: they depend on `NODE_ENV !== "production"`, which `next build` fixes at build time.
 
 **Manifest integrity (server → agent)**

@@ -15,6 +15,13 @@
       "when": 1793918120597,
       "tag": "0001_directory_snapshot",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793920689284,
+      "tag": "0002_local_users",
+      "breakpoints": true
     }
   ]
 }
