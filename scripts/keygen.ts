@@ -22,5 +22,5 @@ if (process.argv.includes("--env")) {
   console.log("");
   console.log(`Public key for Install-SpoolfreeAgent.ps1 -PublicKey: ${publicKey}`);
   console.log(`Key ID: ${id}`);
-  console.log("\nWrite AGENT_ENROLLMENT_TOKEN to the token file on your restricted share (see README).");
+  console.log("\nWrite AGENT_ENROLLMENT_TOKEN to the token file on your restricted share (see docs/deployment.md).");
 }
