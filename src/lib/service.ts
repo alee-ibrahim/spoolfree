@@ -72,6 +72,7 @@ export async function manifestForComputer(computer: ComputerObject) {
     now: new Date(),
     ttlHours: config().MANIFEST_TTL_HOURS,
     legacyPrintServers: config().LEGACY_PRINT_SERVERS,
+    syncIntervalMinutes: config().AGENT_SYNC_INTERVAL_MINUTES,
   });
 }
 

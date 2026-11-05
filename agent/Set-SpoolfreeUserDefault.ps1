@@ -85,11 +85,29 @@ if ($currentDefault) {
     }
 }
 
+# --- 2b. Default printer across rename / replace --------------------------------------------------------
+# The sync re-creates a queue on Replace or rename; Windows then drops it as the user's default. The default
+# recorded at the previous logon is restored when its queue was re-created since then.
+$lastKnown = Get-ItemProperty -Path $userKey -ErrorAction SilentlyContinue
+$lastName = if ($lastKnown -and $lastKnown.PSObject.Properties['LastKnownDefault']) { [string]$lastKnown.LastKnownDefault } else { '' }
+$lastAt = if ($lastKnown -and $lastKnown.PSObject.Properties['LastKnownDefaultAt']) { [string]$lastKnown.LastKnownDefaultAt } else { '' }
+$existingNames = @(Get-Printer | ForEach-Object { [string]$_.Name })
+$restore = Get-SpoolfreeDefaultRestore -CurrentDefault $currentDefault -LastKnownDefault $lastName -LastKnownAt $lastAt `
+    -Recreated (Get-SpoolfreeProperty $takeover 'recreated') -Existing $existingNames
+if ($restore -and (Set-UserDefault $restore)) { $currentDefault = $restore }
+
 # --- 3. Policy default --------------------------------------------------------------------------------
 $wanted = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Spoolfree\Public' -Name DefaultPrinter).DefaultPrinter
-if (-not $wanted) { exit 0 }
 $applied = (Get-ItemProperty -Path $userKey -Name AppliedDefault).AppliedDefault
-if ($applied -eq $wanted) { exit 0 }
-if (Set-UserDefault $wanted) {
-    New-ItemProperty -Path $userKey -Name AppliedDefault -Value $wanted -PropertyType String -Force | Out-Null
+if ($wanted -and $applied -ne $wanted) {
+    if (Set-UserDefault $wanted) {
+        New-ItemProperty -Path $userKey -Name AppliedDefault -Value $wanted -PropertyType String -Force | Out-Null
+    }
+}
+
+# --- 4. Remember this user's default for the next logon (rename/replace restore) ------------------------
+$now = Get-SpoolfreeUserDefaultQueue
+if ($now) {
+    New-ItemProperty -Path $userKey -Name LastKnownDefault -Value $now -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $userKey -Name LastKnownDefaultAt -Value ([datetime]::UtcNow.ToString('o')) -PropertyType String -Force | Out-Null
 }

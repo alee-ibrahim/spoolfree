@@ -90,7 +90,7 @@ flowchart LR
 **How it works**
 
 1. An admin assigns printers to OUs in the web UI.
-2. At startup and hourly, each PC's agent requests its manifest with a per-machine token.
+2. At startup and every `AGENT_SYNC_INTERVAL_MINUTES` (default 15), each PC's agent requests its manifest with a per-machine token.
 3. The server looks the PC up in AD by `objectGUID` (the OU always comes from AD, never the client), resolves inheritance and overrides, and signs the manifest with **Ed25519**.
 4. The agent checks the signature against its pinned public key, the computer identity and the expiry.
 5. It creates, re-points or removes the queues it owns, records the default printer, and reports back.
@@ -156,6 +156,7 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `LDAP_CACHE_SECONDS` | `300` | Cache for OU and computer lists. Agent auth always queries live. |
 | `MANIFEST_SIGNING_KEY` | | **Required.** Base64 Ed25519 seed from `pnpm keygen`. |
 | `AGENT_ENROLLMENT_TOKEN` | | **Required.** Shared enrollment token from `pnpm keygen`. |
+| `AGENT_SYNC_INTERVAL_MINUTES` | `15` | How often agents sync (5-240); agents update their own task, no GPO change. |
 | `MANIFEST_TTL_HOURS` | `24` | Manifest validity (replay protection). |
 | `AGENT_STALE_HOURS` | `26` | Agents without a report for this long show as stale. |
 | `POLLER_ENABLED` | `1` | Run the status poller. |

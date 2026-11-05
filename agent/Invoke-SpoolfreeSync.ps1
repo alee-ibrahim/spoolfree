@@ -104,16 +104,30 @@ foreach ($p in @($manifest.printers)) {
         Write-Log "$($p.name): legacy takeover check failed: $($_.Exception.Message)"
     }
 }
-if ($PSCmdlet.ShouldProcess('legacy takeover rules', 'publish')) {
-    try {
-        Set-SpoolfreeTakeoverState -Servers $legacyServers -Rules $legacyRules.ToArray() -Removed $legacyRemoved
-    } catch { Write-Log "Publishing takeover rules failed: $($_.Exception.Message)" }
-}
 foreach ($e in (Get-SpoolfreeUserTakeoverResults)) { if ($legacy.Count -lt 200) { $legacy.Add($e) } }
 
 $existing = @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
 $plan = Get-SpoolfreePlan -Desired @($manifest.printers) -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter
 Write-Log ("Manifest {0}: {1} printer(s); method {2}; plan: {3}" -f $manifest.serial, @($manifest.printers).Count, $method, (($plan | ForEach-Object { "$($_.Action) $($_.Name)" }) -join '; '))
+
+# Rename/replace re-creates queues; users whose default was such a queue get it back at their next logon.
+$recreated = Get-SpoolfreeRecreatedQueues -Plan $plan -Installed @(Get-SpoolfreeInstalled)
+if ($PSCmdlet.ShouldProcess('legacy takeover rules', 'publish')) {
+    try {
+        Set-SpoolfreeTakeoverState -Servers $legacyServers -Rules $legacyRules.ToArray() -Removed $legacyRemoved -Recreated $recreated
+    } catch { Write-Log "Publishing takeover rules failed: $($_.Exception.Message)" }
+}
+
+# Sync interval from the server (AGENT_SYNC_INTERVAL_MINUTES): update this task's trigger when it changes.
+if ($PSCmdlet.ShouldProcess('Spoolfree Sync task', 'set interval')) {
+    try {
+        $newInterval = Update-SpoolfreeSyncInterval (Get-SpoolfreeProperty $manifest 'syncIntervalMinutes')
+        if ($newInterval) { Write-Log "Sync interval set to $newInterval minutes." }
+    } catch {
+        $errors.Add("sync interval: $($_.Exception.Message)")
+        Write-Log "Updating the sync interval failed: $($_.Exception.Message)"
+    }
+}
 
 foreach ($step in $plan) {
     if (-not $PSCmdlet.ShouldProcess($step.Name, $step.Action)) { continue }

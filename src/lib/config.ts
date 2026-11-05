@@ -67,6 +67,8 @@ const schema = z.object({
   MANIFEST_SIGNING_KEY: z.string().optional(),
   MANIFEST_SIGNING_KEY_FILE: z.string().optional(),
   MANIFEST_TTL_HOURS: z.coerce.number().positive().default(24),
+  /** How often agents sync (sent in the manifest; agents update their own scheduled task). 5-240. */
+  AGENT_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(240).default(15),
   AGENT_STALE_HOURS: z.coerce.number().positive().default(26),
 
   // Poller

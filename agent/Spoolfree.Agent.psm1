@@ -447,6 +447,138 @@ function Merge-SpoolfreeRemovedMap {
 }
 
 # ---------------------------------------------------------------------------
+# Sync interval (manifest syncIntervalMinutes, AGENT_SYNC_INTERVAL_MINUTES on the server)
+# ---------------------------------------------------------------------------
+
+function Get-SpoolfreeSyncSchedule {
+    <#
+    .SYNOPSIS
+        Pure: the repeating trigger for an interval: minutes clamped to 5..240 (invalid => $null), and a random
+        delay of about 20% of the interval (1..48 minutes) so PCs do not all call the server at once.
+    #>
+    param($Minutes)
+    $m = 0
+    if (-not [int]::TryParse([string]$Minutes, [ref]$m)) { return $null }
+    if ($m -lt 5) { $m = 5 }
+    if ($m -gt 240) { $m = 240 }
+    $delay = [int][Math]::Max(1, [Math]::Round($m * 0.2))
+    return [pscustomobject]@{ IntervalMinutes = $m; RandomDelayMinutes = $delay }
+}
+
+function New-SpoolfreeSyncTriggers {
+    <# Startup trigger (2 min delay) + the repeating trigger with random delay. #>
+    param([Parameter(Mandatory)][int]$IntervalMinutes)
+    $s = Get-SpoolfreeSyncSchedule $IntervalMinutes
+    $startup = New-ScheduledTaskTrigger -AtStartup
+    $startup.Delay = 'PT2M'
+    $repeat = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(5)) `
+        -RepetitionInterval (New-TimeSpan -Minutes $s.IntervalMinutes) `
+        -RandomDelay (New-TimeSpan -Minutes $s.RandomDelayMinutes)
+    return @($startup, $repeat)
+}
+
+function Update-SpoolfreeSyncInterval {
+    <#
+    .SYNOPSIS
+        Applies the server's sync interval to the "Spoolfree Sync" task when it differs from the value last
+        applied (HKLM:\SOFTWARE\Spoolfree\SyncIntervalMinutes). Keeps the startup trigger. Returns the new
+        interval, or $null when nothing changed.
+    #>
+    param($Minutes)
+    $s = Get-SpoolfreeSyncSchedule $Minutes
+    if (-not $s) { return $null }
+    $current = Get-ItemProperty -Path $script:RegistryRoot -Name SyncIntervalMinutes -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask -TaskName 'Spoolfree Sync' -TaskPath '\Spoolfree\' -ErrorAction SilentlyContinue
+    if ($current -and [int]$current.SyncIntervalMinutes -eq $s.IntervalMinutes -and $task) { return $null }
+    if ($task) {
+        Set-ScheduledTask -TaskName 'Spoolfree Sync' -TaskPath '\Spoolfree\' -Trigger (New-SpoolfreeSyncTriggers $s.IntervalMinutes) -ErrorAction Stop | Out-Null
+    }
+    New-ItemProperty -Path $script:RegistryRoot -Name SyncIntervalMinutes -Value $s.IntervalMinutes -PropertyType DWord -Force | Out-Null
+    return $s.IntervalMinutes
+}
+
+# ---------------------------------------------------------------------------
+# Default printer across rename / replace
+# ---------------------------------------------------------------------------
+
+function Get-SpoolfreeRecreatedQueues {
+    <#
+    .SYNOPSIS
+        Pure: queues the plan removes and creates again under the same or a new name (Replace, or a rename =
+        Remove of a marker whose printer id is now wanted under another name). Returns a hashtable
+        oldName -> newName, so a user's default can follow the queue.
+    #>
+    param([AllowEmptyCollection()][object[]]$Plan = @(), [AllowEmptyCollection()][object[]]$Installed = @())
+    $map = @{}
+    $wantedById = @{}
+    foreach ($s in @($Plan)) {
+        if ($s.Printer -and @('Add', 'Replace') -contains $s.Action) { $wantedById[[string]$s.Printer.id] = [string]$s.Name }
+    }
+    foreach ($s in @($Plan)) {
+        if ($s.Action -eq 'Replace') { $map[[string]$s.Name] = [string]$s.Name }
+        elseif ($s.Action -eq 'Remove') {
+            $marker = @($Installed) | Where-Object { [string]$_.Name -eq [string]$s.Name } | Select-Object -First 1
+            if ($marker -and $wantedById.ContainsKey([string]$marker.Id)) { $map[[string]$s.Name] = $wantedById[[string]$marker.Id] }
+        }
+    }
+    return $map
+}
+
+function Merge-SpoolfreeRecreatedMap {
+    <# Pure: previous recreated map ({old: {to, at}}) + new oldName->newName entries stamped $At; newest $Max kept. #>
+    param($Previous, [hashtable]$New = @{}, [datetime]$At = [datetime]::UtcNow, [int]$Max = 200)
+    $list = New-Object System.Collections.Generic.List[object]
+    if ($null -ne $Previous) {
+        $props = if ($Previous -is [System.Collections.IDictionary]) { $Previous.Keys | ForEach-Object { [pscustomobject]@{ Name = $_; Value = $Previous[$_] } } } else { $Previous.PSObject.Properties }
+        foreach ($p in $props) { if (-not $New.ContainsKey([string]$p.Name)) { $list.Add([pscustomobject]@{ Old = [string]$p.Name; To = [string](Get-SpoolfreeProperty $p.Value 'to'); At = [string](Get-SpoolfreeProperty $p.Value 'at') }) } }
+    }
+    $stamp = $At.ToUniversalTime().ToString('o')
+    foreach ($k in $New.Keys) { $list.Add([pscustomobject]@{ Old = [string]$k; To = [string]$New[$k]; At = $stamp }) }
+    $h = @{}
+    foreach ($e in @($list | Sort-Object At | Select-Object -Last $Max)) { $h[$e.Old] = @{ to = $e.To; at = $e.At } }
+    return $h
+}
+
+function Get-SpoolfreeDefaultRestore {
+    <#
+    .SYNOPSIS
+        Pure decision for the logon task: which queue should become the user's default again after a rename or
+        replace removed and re-created their default queue? $null when nothing should change.
+    .PARAMETER LastKnownDefault
+        The user's default as recorded at their previous logon, with the time it was recorded.
+    .PARAMETER Recreated
+        The published map {oldName: {to, at}}.
+    .PARAMETER Existing
+        Queue names that exist now.
+    #>
+    param(
+        [AllowNull()][AllowEmptyString()][string]$CurrentDefault,
+        [AllowNull()][AllowEmptyString()][string]$LastKnownDefault,
+        [AllowNull()][AllowEmptyString()][string]$LastKnownAt,
+        $Recreated,
+        [AllowEmptyCollection()][string[]]$Existing = @()
+    )
+    if (-not $LastKnownDefault -or $null -eq $Recreated) { return $null }
+    $entry = $null
+    $props = if ($Recreated -is [System.Collections.IDictionary]) { $Recreated.Keys | ForEach-Object { [pscustomobject]@{ Name = $_; Value = $Recreated[$_] } } } else { $Recreated.PSObject.Properties }
+    foreach ($p in $props) { if ([string]$p.Name -ieq $LastKnownDefault) { $entry = $p.Value; break } }
+    if (-not $entry) { return $null }
+    $to = [string](Get-SpoolfreeProperty $entry 'to')
+    $at = [string](Get-SpoolfreeProperty $entry 'at')
+    if (-not $to -or -not (@($Existing) | Where-Object { $_ -ieq $to })) { return $null }
+    # Only when the queue was re-created after we last saw it as the default: a later own choice wins.
+    if ($LastKnownAt -and $at) {
+        try {
+            $style = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+            $c = [Globalization.CultureInfo]::InvariantCulture
+            if ([datetime]::Parse($at, $c, $style) -lt [datetime]::Parse($LastKnownAt, $c, $style)) { return $null }
+        } catch { return $null }
+    }
+    if ($CurrentDefault -and $CurrentDefault -ieq $to) { return $null }
+    return $to
+}
+
+# ---------------------------------------------------------------------------
 # Default duplex (manifest printer.defaultSides, IPP "sides" keywords)
 # ---------------------------------------------------------------------------
 
@@ -794,11 +926,12 @@ function Get-SpoolfreeTakeoverState {
 
 function Set-SpoolfreeTakeoverState {
     <# Publishes legacy servers, rules and the merged removed-queue map for the logon task. #>
-    param([AllowEmptyCollection()][string[]]$Servers = @(), [AllowEmptyCollection()][object[]]$Rules = @(), [hashtable]$Removed = @{})
+    param([AllowEmptyCollection()][string[]]$Servers = @(), [AllowEmptyCollection()][object[]]$Rules = @(), [hashtable]$Removed = @{}, [hashtable]$Recreated = @{})
     Initialize-SpoolfreePublicKey
     $prev = Get-SpoolfreeTakeoverState
     $map = Merge-SpoolfreeRemovedMap -Previous (Get-SpoolfreeProperty $prev 'removedMap') -New $Removed
-    $state = [ordered]@{ servers = @($Servers); rules = @($Rules); removedMap = $map }
+    $recreated = Merge-SpoolfreeRecreatedMap -Previous (Get-SpoolfreeProperty $prev 'recreated') -New $Recreated
+    $state = [ordered]@{ servers = @($Servers); rules = @($Rules); removedMap = $map; recreated = $recreated }
     New-ItemProperty -Path $script:PublicRegistry -Name Takeover -Value ($state | ConvertTo-Json -Depth 5 -Compress) -PropertyType String -Force | Out-Null
 }
 

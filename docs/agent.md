@@ -1,6 +1,6 @@
 # Windows agent
 
-The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A GPO startup script installs it; a SYSTEM scheduled task then syncs at startup and hourly. See [deployment.md](deployment.md#4-gpo-setup-agent) for the rollout.
+The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A GPO startup script installs it; a SYSTEM scheduled task then syncs at startup and every `AGENT_SYNC_INTERVAL_MINUTES`. See [deployment.md](deployment.md#4-gpo-setup-agent) for the rollout.
 
 ## How the agent creates queues
 
@@ -48,6 +48,23 @@ For moving PCs off an old print server or hand-installed queues. It is set per p
 **Default printer.** If a user's default printer was a removed queue, the logon task makes the replacing Spoolfree queue the default. The machine keeps a map from removed queue to Spoolfree queue for this.
 
 **Report.** Each match is recorded in the agent report's `legacy` field: `{ printer, queue, reason, action: removed | would-remove | failed, scope: machine | user:<DOMAIN\user>, error? }`, at most 200 entries. Matches are also written to `sync.log`. `Invoke-SpoolfreeSync.ps1 -WhatIf` removes nothing.
+
+## Sync interval
+
+The server sends `syncIntervalMinutes` (`AGENT_SYNC_INTERVAL_MINUTES`, default 15, 5 to 240) in every manifest. When it
+differs from the value the agent applied last (`HKLM:\SOFTWARE\Spoolfree\SyncIntervalMinutes`), the agent rewrites the
+"Spoolfree Sync" task's triggers: the startup trigger (2 minutes after boot) stays, and the repeating trigger gets the new
+interval with a random delay of about 20% of it (1 to 48 minutes) so PCs spread their calls. The installer's
+`-SyncIntervalMinutes` is only the first value; later GPO runs keep the server's value. Changing the interval needs no
+GPO change; PCs pick it up at their next sync.
+
+## Default printer after a rename or replace
+
+Renaming a printer or using **Replace** removes the queue and creates it again, and Windows then drops it as the default
+for users who had it. The sync publishes which queues it re-created (old name → new name, with the time) in
+`HKLM:\SOFTWARE\Spoolfree\Public` (`Takeover.recreated`). The logon task records each user's default at every logon;
+at the next logon, if that queue was re-created since, the new queue becomes the user's default again. A default the user
+chose after the re-creation is left alone. Users who stay logged on get it back at their next logon.
 
 ## Default duplex
 

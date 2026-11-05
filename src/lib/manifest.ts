@@ -102,7 +102,7 @@ export function buildManifest(args: {
     computer: args.computer,
     printers: list,
     defaultPrinter: def,
-    syncIntervalMinutes: args.syncIntervalMinutes ?? 60,
+    syncIntervalMinutes: args.syncIntervalMinutes ?? 15,
     legacyPrintServers: args.legacyPrintServers ?? [],
   };
 }

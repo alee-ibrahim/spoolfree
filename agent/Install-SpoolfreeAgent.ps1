@@ -11,7 +11,8 @@
     3. If this PC has no machine token yet, reads the shared enrollment token
        from -EnrollmentTokenPath, enrolls, and stores the per-machine token
        encrypted with DPAPI (LocalMachine scope).
-    4. Registers the "Spoolfree Sync" task (SYSTEM; at startup and hourly,
+    4. Registers the "Spoolfree Sync" task (SYSTEM; at startup and every -SyncIntervalMinutes, later
+       the server's AGENT_SYNC_INTERVAL_MINUTES,
        with a random delay) and the "Spoolfree User Default" logon task.
 
 .PARAMETER ServerUrl
@@ -37,7 +38,7 @@ param(
     [Parameter(Mandatory)][string]$PublicKey,
     [Parameter(Mandatory)][string]$EnrollmentTokenPath,
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'Spoolfree'),
-    [ValidateRange(5, 1440)][int]$SyncIntervalMinutes = 60,
+    [ValidateRange(5, 240)][int]$SyncIntervalMinutes = 15,
     [switch]$Force
 )
 
@@ -110,16 +111,16 @@ if ($needsEnroll) {
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $syncScript = Join-Path $InstallDir 'Invoke-SpoolfreeSync.ps1'
 $syncAction = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$syncScript`""
-$startup = New-ScheduledTaskTrigger -AtStartup
-$startup.Delay = 'PT2M'
-$repeat = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(5)) `
-    -RepetitionInterval (New-TimeSpan -Minutes $SyncIntervalMinutes) `
-    -RandomDelay (New-TimeSpan -Minutes ([Math]::Min(15, [Math]::Max(1, [int]($SyncIntervalMinutes / 4)))))
+# The server's AGENT_SYNC_INTERVAL_MINUTES (applied by the sync, stored in the registry) wins over the
+# -SyncIntervalMinutes parameter, so re-running this script at every startup does not undo it.
+$serverInterval = Get-ItemProperty -Path $reg -Name SyncIntervalMinutes -ErrorAction SilentlyContinue
+$interval = if ($serverInterval) { [int]$serverInterval.SyncIntervalMinutes } else { $SyncIntervalMinutes }
+$triggers = New-SpoolfreeSyncTriggers -IntervalMinutes ((Get-SpoolfreeSyncSchedule $interval).IntervalMinutes)
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $system = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName 'Spoolfree Sync' -TaskPath '\Spoolfree\' -Action $syncAction `
-    -Trigger @($startup, $repeat) -Settings $settings -Principal $system -Force | Out-Null
+    -Trigger $triggers -Settings $settings -Principal $system -Force | Out-Null
 
 $userScript = Join-Path $InstallDir 'Set-SpoolfreeUserDefault.ps1'
 $userAction = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$userScript`""
