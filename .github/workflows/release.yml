@@ -146,12 +146,6 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.licenses=MIT
-          annotations: |
-            index:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            index:org.opencontainers.image.revision=${{ github.sha }}
-            index:org.opencontainers.image.version=${{ env.VERSION }}
-            index:org.opencontainers.image.licenses=MIT
-            index:org.opencontainers.image.description=Spoolfree: driverless IPP printer management for Active Directory
           cache-from: type=gha,scope=spoolfree
           cache-to: type=gha,scope=spoolfree,mode=max
       - name: Trivy gate (no fixable CRITICAL)
