@@ -100,12 +100,10 @@ export async function snmpStatus(
   community: string,
   timeoutMs: number,
   lowPercent: number,
+  /** For tests: a session-like object instead of a real SNMP session. */
+  makeSession: () => snmp.Session = () => snmp.createSession(host, community, { version: snmp.Version2c, timeout: timeoutMs, retries: 1 }),
 ): Promise<PrinterStatus> {
-  const session = snmp.createSession(host, community, {
-    version: snmp.Version2c,
-    timeout: timeoutMs,
-    retries: 1,
-  });
+  const session = makeSession();
   try {
     const [descr, status, errors, life] = await snmpGet(session, [
       OID.hrDeviceDescr,
@@ -113,11 +111,10 @@ export async function snmpStatus(
       OID.hrPrinterDetectedErrorState,
       OID.prtMarkerLifeCount,
     ]);
-    const [descs, maxes, levels] = await Promise.all([
-      snmpWalk(session, OID.suppliesDescription),
-      snmpWalk(session, OID.suppliesMaxCapacity),
-      snmpWalk(session, OID.suppliesLevel),
-    ]);
+    // Some devices (seen on a Brother DCP-L3551CDW) answer GETs but time out on the supplies table walk (GetBulk).
+    // The page counter and state from the GET still count; supplies are then just unknown.
+    const walk = (oid: string) => snmpWalk(session, oid).catch(() => [] as snmp.Varbind[]);
+    const [descs, maxes, levels] = await Promise.all([walk(OID.suppliesDescription), walk(OID.suppliesMaxCapacity), walk(OID.suppliesLevel)]);
     const rows: SupplyRow[] = descs.map((d, i) => ({
       description: Buffer.isBuffer(d.value) ? d.value.toString("utf8") : String(d.value),
       max: num(maxes[i]) ?? -1,
