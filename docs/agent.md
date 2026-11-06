@@ -39,7 +39,9 @@ resolved IP addresses and, from 0.4.2, the device identity the server sends in t
     A device's UUIDs are taken from its instance id and container id only; its addresses are compared as found
     (IP literals and URL hosts), without DNS lookups.
 
-  A WSD port whose device cannot be identified either way is left alone;
+  A WSD port whose device cannot be identified either way is left alone. From 0.4.5, when the server knows the
+  printer's `printer-uuid`, a WSD port that stores a **different** device UUID is never matched by address: Plug and
+  Play can keep an old address for a device after DHCP gave that IP to another printer;
 - a TCP/IP or IPP port whose host name is a default name that embeds one of the printer's MAC addresses: `BRN<mac>`,
   `BRW<mac>` (Brother wired/wireless) or the bare MAC, 12 hex digits, any case, optionally ending in `.local`. These names
   are often not in DNS. Nothing else matches: no other prefixes or suffixes, no other domains, no partial MACs;

@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.4.4'
+$script:AgentVersion = '0.4.5'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -536,14 +536,14 @@ function Get-SpoolfreeLegacyMatches {
             # Identified by the device UUID the port stores, or by the device address found for that UUID.
             $kind = if ($description -eq 'IPP Port') { 'IPP port' } else { 'WSD port' }
             if ($deviceUuid) {
-                foreach ($u in @(Get-SpoolfreeProperty $port 'Uuids')) {
-                    if ((ConvertTo-SpoolfreeUuid ([string]$u)) -eq $deviceUuid) {
-                        $out.Add([pscustomobject]@{ Queue = $name; Reason = "$prefix$kind device uuid $deviceUuid"; Kind = $kind })
-                        $kind = $null
-                        break
-                    }
+                $portUuids = @(@(Get-SpoolfreeProperty $port 'Uuids') | ForEach-Object { ConvertTo-SpoolfreeUuid ([string]$_) } | Where-Object { $_ })
+                if ($portUuids -contains $deviceUuid) {
+                    $out.Add([pscustomobject]@{ Queue = $name; Reason = "$prefix$kind device uuid $deviceUuid"; Kind = $kind })
+                    continue
                 }
-                if (-not $kind) { continue }
+                # The port names another device. The address Plug and Play recorded for it can be stale (an IP that
+                # DHCP later gave to this printer), so a known, different UUID is never matched by address.
+                if ($portUuids.Count) { continue }
             }
         } elseif ($urlHost) {
             $kind = 'IPP port'; $label = $urlHost; $hostName = $urlHost; $candidates.Add($urlHost)
@@ -585,7 +585,14 @@ function Get-SpoolfreeAddFailureMessage {
         [string]$Mode = 'off'
     )
     $base = "${Name}: $Action failed: $Message"
-    if ($Message -notmatch 'already exists|not found|was not found|cannot find' -or @($Blocking).Count -eq 0) { return $base }
+    if (@($Blocking).Count -eq 0) { return $base }
+    $known = $Message -match 'already exists|not found|was not found|cannot find'
+    # Add-Printer -IppURL sometimes reports only "An error occurred while performing the specified operation"; a
+    # WSD/IPP queue for the same device is then still the likely cause. Other errors (access denied ...) are kept.
+    $generic = $Message -match 'error occurred while performing the specified operation'
+    $wsd = @(@($Blocking) | Where-Object { @('WSD port', 'IPP port') -contains [string]$_.Kind })
+    if (-not $known -and -not ($generic -and $wsd.Count)) { return $base }
+    if (-not $known) { $Blocking = $wsd }
     $b = @($Blocking)[0]
     $what = switch ([string]$b.Kind) { 'WSD port' { 'WSD queue' } 'IPP port' { 'IPP queue' } default { 'queue' } }
     $hint = switch ($Mode) {
@@ -594,7 +601,8 @@ function Get-SpoolfreeAddFailureMessage {
         default { 'enable legacy takeover for this printer (dry-run first, then on) or remove that queue' }
     }
     $more = if (@($Blocking).Count -gt 1) { " (and $(@($Blocking).Count - 1) more)" } else { '' }
-    return "${Name}: $Action blocked by existing $what '$($b.Queue)'$more ($($b.Reason)): $hint. Windows said: $Message"
+    $verb = if ($known) { 'blocked' } else { 'failed, probably blocked' }
+    return "${Name}: $Action $verb by existing $what '$($b.Queue)'$more ($($b.Reason)): $hint. Windows said: $Message"
 }
 
 function ConvertTo-SpoolfreeDeviceIndex {

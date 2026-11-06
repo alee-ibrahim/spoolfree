@@ -55,6 +55,14 @@ Describe 'WSD and IPP ports' {
         }
         (M @((Q 'Other Brother' 'WSD-a'), (Q 'Unknown' 'WSD-b'), (Q 'Garbage' 'WSD-c'), (Q 'No port data' 'WSD-d')) $ports).Count | Should -Be 0
     }
+    It 'never matches a WSD port of another device by address when the printer-uuid is known (stale PnP address)' {
+        # Pilot finding: an HL-L5100DN's WSD device kept the IP that DHCP later gave to the DCP printer.
+        $ports = @{ $script:wsdPort = (Wsd @('e3248000-80ce-11db-8000-0011223344bb') @('192.0.2.10')) }
+        (M (Q 'Brother HL-L5100DN series Printer' $script:wsdPort) $ports).Count | Should -Be 0
+        (M (Q 'Brother HL-L5100DN series Printer' $script:wsdPort) $ports -AnyMode).Count | Should -Be 0
+        # Without a UUID on the port, the address still counts.
+        (M (Q 'W' $script:wsdPort) @{ $script:wsdPort = (Wsd @() @('192.0.2.10')) }).Count | Should -Be 1
+    }
     It 'needs the printer-uuid from the server to match by UUID' {
         (M (Q 'W' $script:wsdPort) @{ $script:wsdPort = (Wsd @($script:uuid)) } (P -uuid '')).Count | Should -Be 0
         (M (Q 'W' $script:wsdPort) @{ $script:wsdPort = (Wsd @($script:uuid)) } (P -uuid 'garbage')).Count | Should -Be 0
@@ -181,6 +189,14 @@ Describe 'Blocked queue creation' {
         $b = @([pscustomobject]@{ Queue = 'Q'; Reason = 'r'; Kind = 'WSD port' })
         Get-SpoolfreeAddFailureMessage -Name 'F' -Action 'Add' -Message 'The printer already exists.' -Blocking @() | Should -Be 'F: Add failed: The printer already exists.'
         Get-SpoolfreeAddFailureMessage -Name 'F' -Action 'Add' -Message 'Access is denied.' -Blocking $b | Should -Be 'F: Add failed: Access is denied.'
+    }
+    It 'names a WSD/IPP queue for the same device after the generic Add-Printer error' {
+        $generic = 'An error occurred while performing the specified operation.  See the error details for more information.'
+        $b = @([pscustomobject]@{ Queue = 'Brother (Copy 1)'; Reason = "WSD port device uuid $script:uuid"; Kind = 'WSD port' })
+        Get-SpoolfreeAddFailureMessage -Name 'F' -Action 'Add' -Message $generic -Blocking $b -Mode 'dry-run' |
+            Should -Match "^F: Add failed, probably blocked by existing WSD queue 'Brother \(Copy 1\)' .*dry-run; switch it to on.*Windows said: An error occurred"
+        $tcp = @([pscustomobject]@{ Queue = 'Q'; Reason = 'r'; Kind = 'TCP/IP port' })
+        Get-SpoolfreeAddFailureMessage -Name 'F' -Action 'Add' -Message $generic -Blocking $tcp | Should -Be "F: Add failed: $generic"
     }
 }
 
