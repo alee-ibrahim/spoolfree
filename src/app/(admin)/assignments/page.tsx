@@ -1,12 +1,8 @@
-import { BanIcon, FolderIcon, FolderOpenIcon, NetworkIcon } from "lucide-react";
-import Link from "next/link";
+import { NetworkIcon } from "lucide-react";
 import { DirectorySyncBadge } from "@/components/app/directory-sync-status";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { ancestorChain, isUnder, normalizeDn, parentDn } from "@/lib/dn";
 import { baseDn, directory } from "@/lib/directory";
 import { buildOuTree, flattenTree } from "@/lib/ou-tree";
@@ -14,6 +10,7 @@ import { resolvePrinters } from "@/lib/resolve";
 import { listPrinters, loadPolicy } from "@/lib/service";
 import { requireAdmin } from "@/lib/session";
 import { OuPanel } from "./ou-panel";
+import { OuTree } from "./ou-tree";
 
 export const metadata = { title: "Assignments" };
 
@@ -67,36 +64,25 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
             </CardTitle>
             <CardDescription>Printers assigned to an OU flow down to its child OUs.</CardDescription>
           </CardHeader>
-          <CardContent className="px-2">
-            <ScrollArea className="max-h-[70vh]">
-              <nav className="flex flex-col gap-0.5">
-                {flat.map((n) => {
-                  const key = normalizeDn(n.dn);
-                  const active = key === normalizeDn(sel);
-                  const count = ownCount.get(key) ?? 0;
-                  const s = settingsByOu.get(key);
-                  return (
-                    <Button
-                      key={n.dn}
-                      asChild
-                      variant={active ? "secondary" : "ghost"}
-                      size="sm"
-                      className="justify-start"
-                      style={{ paddingLeft: `${0.5 + n.depth * 1}rem` }}
-                    >
-                      <Link href={`/assignments?ou=${encodeURIComponent(n.dn)}`}>
-                        {active ? <FolderOpenIcon /> : <FolderIcon className={n.kind === "container" ? "text-muted-foreground" : undefined} />}
-                        <span className="truncate">{n.kind === "domain" ? n.dn.replace(/DC=/gi, "").replace(/,/g, ".") : n.name}</span>
-                        <span className="ml-auto flex items-center gap-1">
-                          {s?.blockInheritance && <BanIcon className="size-3 text-destructive" />}
-                          {count > 0 && <Badge variant="secondary">{count}</Badge>}
-                        </span>
-                      </Link>
-                    </Button>
-                  );
-                })}
-              </nav>
-            </ScrollArea>
+          <CardContent className="px-0">
+            <OuTree
+              selectedKey={normalizeDn(sel)}
+              items={flat.map((n) => {
+                const key = normalizeDn(n.dn);
+                const parent = parentDn(n.dn);
+                return {
+                  key,
+                  dn: n.dn,
+                  label: n.kind === "domain" ? n.dn.replace(/DC=/gi, "").replace(/,/g, ".") : n.name,
+                  depth: n.depth,
+                  kind: n.kind,
+                  parentKey: parent && n.depth > 0 ? normalizeDn(parent) : null,
+                  hasChildren: n.children.length > 0,
+                  count: ownCount.get(key) ?? 0,
+                  blocked: settingsByOu.get(key)?.blockInheritance ?? false,
+                };
+              })}
+            />
           </CardContent>
         </Card>
 
