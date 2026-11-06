@@ -10,6 +10,29 @@ The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A 
 | Older Windows 10 without `-IppURL`, WPP off | `Add-PrinterPort` (Standard TCP/IP) + `Add-Printer -DriverName "Microsoft IPP Class Driver"` | **Fallback.** Not WPP-compatible. Whether the class driver's output prints correctly over a raw TCP port depends on the printer model, so test it first. |
 | No `-IppURL` and WPP on | none | Reported as an error. |
 
+**When `-IppURL` fails** (0.4.6; any error except "already exists"), the agent does not give up on the queue:
+
+1. If the server knows the printer's `printer-uuid`, the agent removes what a removed WSD/IPP queue for that device can
+   leave behind:
+   - a WSD Port monitor port whose `Printer UUID` is the device and that **no queue uses**;
+   - Plug and Play nodes `SWD\DAFWSDProvider\urn:uuid:<uuid>[/...]` and `SWD\IPP\<uuid>` that are **no longer present**
+     (`pnputil /remove-device`).
+
+   Nothing that is in use, present, or belongs to another UUID is touched. When something was removed, the agent
+   retries `-IppURL` once.
+2. Otherwise, when Windows Protected Print Mode is off, it creates the queue with the TCP/IP fallback (row 2 above). The
+   Agents view shows "created with the TCP/IP port fallback" for that PC. Under WPP there is no fallback.
+3. If both fail, the error names both attempts.
+
+Seen on Windows 11 21H2 (build 22000): after takeover removed the PC's WSD queue for the device, `Add-Printer -IppURL`
+kept failing with "The specified WSD or IPP print device was not found". The same flow worked on 24H2.
+
+**PC left without a printer.** Takeover may have removed a legacy queue for a printer, in this or an earlier sync, while
+the Spoolfree queue for that printer still does not exist. Every sync then reports it in the report's `critical` field:
+`PC left without printer <name>: legacy queue(s) '<queue>' were removed and the Spoolfree queue could not be created
+(<error>)`. The Agents view shows a red alert at the top until it is fixed. The agent does not re-create the removed
+queue.
+
 The agent checks whether `-IppURL` is available at runtime: `(Get-Command Add-Printer).Parameters.ContainsKey('IppURL')`.
 
 ## Which queues it touches
@@ -94,7 +117,10 @@ matching queue the original Windows error is reported.
 **Manifest fields** (0.4.2): `printers[].deviceUuid` (lower-case UUID or `null`), `printers[].macAddresses` (12 lower-case
 hex digits each), `serverPrinterIds` (every printer id on the server). Older agents ignore them.
 
-**Report.** Each match is recorded in the agent report's `legacy` field: `{ printer, queue, reason, action: removed | would-remove | failed, scope: machine | user:<DOMAIN\user>, error? }`, at most 200 entries. Matches are also written to `sync.log`. `Invoke-SpoolfreeSync.ps1 -WhatIf` removes nothing.
+**Report.** From 0.4.6 the report also has `critical` (strings, see "PC left without a printer" above) and
+`fallbacks` (`{ printer, method, reason }` for queues created with the TCP/IP fallback).
+
+Each match is recorded in the agent report's `legacy` field: `{ printer, queue, reason, action: removed | would-remove | failed, scope: machine | user:<DOMAIN\user>, error? }`, at most 200 entries. Matches are also written to `sync.log`. `Invoke-SpoolfreeSync.ps1 -WhatIf` removes nothing.
 
 ## Sync interval
 

@@ -64,7 +64,11 @@ try {
 # A version installed by self-update is pending until it gets this far; the launcher then clears it.
 try { if (Confirm-SpoolfreeAgentRun) { Write-Log "Agent $(Get-SpoolfreeAgentVersion) verified a manifest after its update." } } catch { Write-Log "Confirming the agent update failed: $($_.Exception.Message)" }
 
-$method = Get-SpoolfreeInstallMethod -IppUrlSupported (Test-SpoolfreeIppUrlSupported) -ProtectedPrintMode (Test-SpoolfreeProtectedPrintMode)
+$wpp = Test-SpoolfreeProtectedPrintMode
+$method = Get-SpoolfreeInstallMethod -IppUrlSupported (Test-SpoolfreeIppUrlSupported) -ProtectedPrintMode $wpp
+# Queues created with the TCP/IP fallback after Add-Printer -IppURL failed, and printers this PC is left without.
+$fallbacks = New-Object System.Collections.Generic.List[object]
+$critical = New-Object System.Collections.Generic.List[string]
 # This server's identity: queue comments name it, so queues left by another Spoolfree server can be told apart.
 $serverId = Get-SpoolfreeServerId $cfg.PublicKey
 $serverPrinterIds = @(Get-SpoolfreeProperty $manifest 'serverPrinterIds' | Where-Object { $_ } | ForEach-Object { [string]$_ })
@@ -139,10 +143,17 @@ foreach ($step in $plan) {
     if (-not $PSCmdlet.ShouldProcess($step.Name, $step.Action)) { continue }
     try {
         switch ($step.Action) {
-            'Add' { Install-SpoolfreePrinter -Printer $step.Printer -Method $method -ServerId $serverId; $added.Add($step.Name) }
+            'Add' {
+                $r = Install-SpoolfreePrinterResilient -Printer $step.Printer -Method $method -ServerId $serverId -ProtectedPrintMode $wpp
+                foreach ($n in @($r.Notes)) { Write-Log "$($step.Name): $n" }
+                if ($r.Fallback) { $fallbacks.Add([ordered]@{ printer = $step.Name; method = $r.Method; reason = (@($r.Notes) | Select-Object -First 1) }) }
+                $added.Add($step.Name)
+            }
             'Replace' {
                 if (Get-Printer -Name $step.Name -ErrorAction SilentlyContinue) { Uninstall-SpoolfreePrinter -Name $step.Name }
-                Install-SpoolfreePrinter -Printer $step.Printer -Method $method -ServerId $serverId
+                $r = Install-SpoolfreePrinterResilient -Printer $step.Printer -Method $method -ServerId $serverId -ProtectedPrintMode $wpp
+                foreach ($n in @($r.Notes)) { Write-Log "$($step.Name): $n" }
+                if ($r.Fallback) { $fallbacks.Add([ordered]@{ printer = $step.Name; method = $r.Method; reason = (@($r.Notes) | Select-Object -First 1) }) }
                 $added.Add($step.Name)
             }
             'Remove' { Uninstall-SpoolfreePrinter -Name $step.Name; $removed.Add($step.Name) }
@@ -175,6 +186,20 @@ foreach ($step in $plan) {
         Write-Log $msg
     }
 }
+# Takeover safety: a printer whose legacy queue was removed here (this or an earlier sync) but that could not be
+# created leaves the PC without that printer. Reported as critical (Agents page) until it is fixed.
+try {
+    $orphans = @(Get-SpoolfreeOrphanedPrinters -Desired @($manifest.printers | ForEach-Object { [string]$_.name }) `
+            -Installed @(Get-SpoolfreeInstalled | ForEach-Object { [string]$_.Name }) `
+            -RemovedMap (Get-SpoolfreeProperty (Get-SpoolfreeTakeoverState) 'removedMap'))
+    foreach ($o in $orphans) {
+        $why = @($errors | Where-Object { ([string]$_).StartsWith("$($o.Printer):") }) | Select-Object -First 1
+        $msg = "PC left without printer $($o.Printer): legacy queue(s) $((@($o.Queues) | ForEach-Object { "'$_'" }) -join ', ') were removed and the Spoolfree queue could not be created$(if ($why) { " ($why)" })"
+        $critical.Add($msg)
+        Write-Log "CRITICAL: $msg"
+    }
+} catch { Write-Log "Checking for printers lost by takeover failed: $($_.Exception.Message)" }
+
 # Default duplex: applied after the queue exists, re-applied only when the manifest value changes
 # (recorded in the marker) or the queue was re-created. A failure is retried at the next sync.
 $sides = [ordered]@{}
@@ -238,6 +263,8 @@ $report = [ordered]@{
     legacy         = @($legacy | Select-Object -First 200)
     sides          = $sides
     update         = $(try { Get-SpoolfreeUpdateReport } catch { [ordered]@{ state = 'current' } })
+    critical       = @($critical)
+    fallbacks      = @($fallbacks)
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds
 }
 try {

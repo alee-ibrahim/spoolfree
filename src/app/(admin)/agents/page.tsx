@@ -1,6 +1,7 @@
 import { desc } from "drizzle-orm";
-import { ServerCogIcon } from "lucide-react";
+import { ServerCogIcon, TriangleAlertIcon } from "lucide-react";
 import { PageHeader } from "@/components/app/page-header";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -27,11 +28,32 @@ export default async function AgentsPage() {
   const latest = bundle?.version ?? null;
   const selfUpdate = config().AGENT_SELF_UPDATE;
   const outdatedCount = agents.filter((a) => !a.revokedAt && isAgentOutdated(a.lastReport?.agentVersion, latest)).length;
+  // High severity: PCs that takeover left without a printer (agents 0.4.6+ report it until it is fixed).
+  const critical = agents.filter((a) => !a.revokedAt && (a.lastReport?.critical ?? []).length > 0);
 
   return (
     <>
       <PageHeader title="Agents" />
       <div className="flex flex-col gap-6 p-6">
+        {critical.length > 0 && (
+          <Alert variant="destructive">
+            <TriangleAlertIcon />
+            <AlertTitle>
+              {critical.length} PC{critical.length > 1 ? "s" : ""} left without a printer
+            </AlertTitle>
+            <AlertDescription>
+              <ul className="list-disc pl-4">
+                {critical.flatMap((a) =>
+                  (a.lastReport?.critical ?? []).map((m) => (
+                    <li key={`${a.id}${m}`}>
+                      <span className="font-medium">{a.computerName}</span>: {m}
+                    </li>
+                  )),
+                )}
+              </ul>
+            </AlertDescription>
+          </Alert>
+        )}
         {agents.length === 0 ? (
           <Empty className="border">
             <EmptyHeader>
@@ -93,6 +115,13 @@ export default async function AgentsPage() {
                           <Badge variant="outline">Revoked</Badge>
                         ) : !r ? (
                           <Badge variant="outline">No report yet</Badge>
+                        ) : (r.critical ?? []).length ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge variant="destructive">Printer lost</Badge>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-sm">{(r.critical ?? []).join(" · ")}</TooltipContent>
+                          </Tooltip>
                         ) : errors.length ? (
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -103,6 +132,11 @@ export default async function AgentsPage() {
                         ) : (
                           <Badge variant="secondary">OK</Badge>
                         )}
+                        {(r?.fallbacks ?? []).map((f) => (
+                          <div key={`fb${f.printer}`} className="mt-1 text-xs text-amber-700 dark:text-amber-500" title={f.reason}>
+                            {f.printer}: created with the {f.method === "TcpIpPort" ? "TCP/IP port" : f.method} fallback
+                          </div>
+                        ))}
                         {legacy.length > 0 && (
                           <div className="mt-1 flex flex-col gap-0.5 text-xs">
                             {wouldRemove.map((l) => (

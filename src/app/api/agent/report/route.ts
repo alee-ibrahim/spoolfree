@@ -43,6 +43,11 @@ const Report = z.object({
     })
     .optional(),
   durationMs: z.number().int().nonnegative().optional(),
+  critical: list,
+  fallbacks: z
+    .array(z.object({ printer: z.string().max(256), method: z.string().max(32), reason: z.string().max(1000).optional() }))
+    .max(200)
+    .optional(),
 });
 
 export async function POST(req: Request) {

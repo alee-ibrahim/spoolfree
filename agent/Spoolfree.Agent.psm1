@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.4.5'
+$script:AgentVersion = '0.4.6'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -1024,6 +1024,176 @@ function Install-SpoolfreePrinter {
         }
         default { throw "No supported install method on this PC (method '$Method')." }
     }
+}
+
+function Test-SpoolfreeIppFallbackError {
+    <#
+    .SYNOPSIS
+        Pure: should a failed Add-Printer -IppURL fall back to the TCP/IP port method? Yes for every error except
+        "already exists" (a queue with that name exists: another method would fail the same way).
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Message)
+    return -not ([string]$Message -match 'already exists')
+}
+
+function Get-SpoolfreeStaleDeviceItems {
+    <#
+    .SYNOPSIS
+        Pure: leftovers of a removed WSD/IPP queue for one device (by IPP printer-uuid) that can keep
+        Add-Printer -IppURL from finding the device (seen on Windows 11 22000):
+        - WSD-monitor ports whose "Printer UUID" is the device and that no queue uses;
+        - PnP nodes that are no longer present and whose instance id names exactly this device
+          (SWD\DAFWSDProvider\urn:uuid:<uuid>[/...], SWD\IPP\<uuid>, SWD\ESCL is never touched).
+        Anything that is in use or present, or belongs to another uuid, is left alone.
+    .PARAMETER WsdPorts
+        Objects with Name and PrinterUuid (WSD Port monitor registry).
+    .PARAMETER Queues
+        Objects with Name and PortName (Get-Printer).
+    .PARAMETER PnpDevices
+        Objects with InstanceId and Present (bool).
+    #>
+    param(
+        [AllowNull()][AllowEmptyString()][string]$DeviceUuid,
+        [AllowEmptyCollection()][object[]]$WsdPorts = @(),
+        [AllowEmptyCollection()][object[]]$Queues = @(),
+        [AllowEmptyCollection()][object[]]$PnpDevices = @()
+    )
+    $uuid = ConvertTo-SpoolfreeUuid $DeviceUuid
+    $result = [pscustomobject]@{ Ports = @(); PnpIds = @() }
+    if (-not $uuid) { return $result }
+    $used = @{}
+    foreach ($q in @($Queues)) { if ($q.PortName) { $used[([string]$q.PortName).ToLowerInvariant()] = $true } }
+    $ports = @(@($WsdPorts) | Where-Object {
+            $_ -and $_.Name -and (ConvertTo-SpoolfreeUuid ([string]$_.PrinterUuid)) -eq $uuid -and -not $used[([string]$_.Name).ToLowerInvariant()]
+        } | ForEach-Object { [string]$_.Name })
+    $u = [regex]::Escape($uuid)
+    $pattern = "^SWD\\(DAFWSDPROVIDER\\URN:UUID:$u(/|$)|IPP\\$u$)"
+    $pnp = @(@($PnpDevices) | Where-Object {
+            $_ -and $_.InstanceId -and ([string]$_.InstanceId) -match $pattern -and -not [bool]$_.Present
+        } | ForEach-Object { [string]$_.InstanceId })
+    $result.Ports = $ports
+    $result.PnpIds = $pnp
+    return $result
+}
+
+function Get-SpoolfreeWsdPortRegistry {
+    <# WSD Port monitor ports with their Printer UUID (registry), for Get-SpoolfreeStaleDeviceItems. #>
+    $root = 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\WSD Port\Ports'
+    @(Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+            $v = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            [pscustomobject]@{ Name = $_.PSChildName; PrinterUuid = [string]$v.'Printer UUID' }
+        })
+}
+
+function Clear-SpoolfreeStaleDevice {
+    <#
+    .SYNOPSIS
+        Removes the unused WSD/IPP ports and non-present PnP nodes of one device (see Get-SpoolfreeStaleDeviceItems).
+        Returns a list of what was done (strings). Never throws.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([AllowNull()][AllowEmptyString()][string]$DeviceUuid)
+    $done = New-Object System.Collections.Generic.List[string]
+    try {
+        $pnp = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match '^SWD\\(DAFWSDPROVIDER|IPP)\\' } | ForEach-Object {
+                [pscustomobject]@{ InstanceId = $_.InstanceId; Present = [bool]$_.Present }
+            })
+        $items = Get-SpoolfreeStaleDeviceItems -DeviceUuid $DeviceUuid -WsdPorts (Get-SpoolfreeWsdPortRegistry) `
+            -Queues @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Name = $_.Name; PortName = $_.PortName } }) -PnpDevices $pnp
+        foreach ($port in @($items.Ports)) {
+            if (-not $PSCmdlet.ShouldProcess($port, 'Remove unused WSD/IPP port of the device')) { continue }
+            try { Remove-PrinterPort -Name $port -ErrorAction Stop; $done.Add("removed unused port $port") }
+            catch { $done.Add("could not remove unused port ${port}: $($_.Exception.Message)") }
+        }
+        foreach ($id in @($items.PnpIds)) {
+            if (-not $PSCmdlet.ShouldProcess($id, 'Remove non-present PnP node of the device')) { continue }
+            $out = & pnputil.exe /remove-device "$id" 2>&1
+            if ($LASTEXITCODE -eq 0) { $done.Add("removed stale device node $id") }
+            else { $done.Add("could not remove device node ${id}: $(($out | Out-String).Trim())") }
+        }
+    } catch {
+        $done.Add("stale device check failed: $($_.Exception.Message)")
+    }
+    return $done.ToArray()
+}
+
+function Install-SpoolfreePrinterResilient {
+    <#
+    .SYNOPSIS
+        Install-SpoolfreePrinter with recovery for Add-Printer -IppURL failures (any error but "already exists"):
+        1. remove leftovers of the device's removed WSD/IPP queue (unused port, non-present PnP nodes) and retry -IppURL
+           once when something was removed;
+        2. fall back to a Standard TCP/IP port + Microsoft IPP Class Driver queue (not when Windows Protected Print
+           Mode is enforced: that queue type is not allowed then).
+        Returns Method (the method that worked), Fallback (bool) and Notes. Throws with every error when all fail.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Printer,
+        [Parameter(Mandatory)][string]$Method,
+        [AllowNull()][AllowEmptyString()][string]$ServerId,
+        [bool]$ProtectedPrintMode = $false
+    )
+    $notes = New-Object System.Collections.Generic.List[string]
+    try {
+        Install-SpoolfreePrinter -Printer $Printer -Method $Method -ServerId $ServerId
+        return [pscustomobject]@{ Method = $Method; Fallback = $false; Notes = @() }
+    } catch {
+        $first = $_.Exception.Message
+        if ($Method -ne 'IppURL' -or -not (Test-SpoolfreeIppFallbackError $first)) { throw }
+    }
+    $notes.Add("Add-Printer -IppURL failed: $first")
+    $uuid = [string](Get-SpoolfreeProperty $Printer 'deviceUuid')
+    if ($uuid) {
+        $cleaned = @(Clear-SpoolfreeStaleDevice -DeviceUuid $uuid)
+        foreach ($c in $cleaned) { $notes.Add($c) }
+        if (@($cleaned | Where-Object { $_ -like 'removed *' }).Count) {
+            try {
+                Install-SpoolfreePrinter -Printer $Printer -Method 'IppURL' -ServerId $ServerId
+                $notes.Add('Add-Printer -IppURL worked after removing the stale device entries')
+                return [pscustomobject]@{ Method = 'IppURL'; Fallback = $false; Notes = $notes.ToArray() }
+            } catch {
+                $notes.Add("Add-Printer -IppURL retry failed: $($_.Exception.Message)")
+            }
+        }
+    }
+    if ($ProtectedPrintMode) {
+        throw "Add-Printer -IppURL failed ($first) and no fallback is possible: Windows Protected Print Mode is enforced."
+    }
+    try {
+        Install-SpoolfreePrinter -Printer $Printer -Method 'TcpIpPort' -ServerId $ServerId
+    } catch {
+        throw "Add-Printer -IppURL failed ($first); TCP/IP port fallback failed too: $($_.Exception.Message)"
+    }
+    $notes.Add('created with a Standard TCP/IP port and the Microsoft IPP Class Driver instead')
+    return [pscustomobject]@{ Method = 'TcpIpPort'; Fallback = $true; Notes = $notes.ToArray() }
+}
+
+function Get-SpoolfreeOrphanedPrinters {
+    <#
+    .SYNOPSIS
+        Pure: printers this PC should have, does not have, and whose legacy queue(s) takeover removed here: the PC is
+        left without that printer. Returns objects with Printer and Queues (the removed legacy queues).
+    .PARAMETER RemovedMap
+        Removed legacy queue name -> Spoolfree printer name (takeover state, all syncs).
+    #>
+    param(
+        [AllowEmptyCollection()][string[]]$Desired = @(),
+        [AllowEmptyCollection()][string[]]$Installed = @(),
+        $RemovedMap
+    )
+    $have = @{}
+    foreach ($n in @($Installed)) { if ($n) { $have[$n.ToLowerInvariant()] = $true } }
+    $pairs = @()
+    if ($RemovedMap -is [System.Collections.IDictionary]) { foreach ($k in $RemovedMap.Keys) { $pairs += , @([string]$k, [string]$RemovedMap[$k]) } }
+    elseif ($null -ne $RemovedMap) { foreach ($p in $RemovedMap.PSObject.Properties) { $pairs += , @($p.Name, [string]$p.Value) } }
+    $out = @()
+    foreach ($d in @($Desired)) {
+        if (-not $d -or $have[$d.ToLowerInvariant()]) { continue }
+        $queues = @($pairs | Where-Object { $_[1] -and $_[1].ToLowerInvariant() -eq $d.ToLowerInvariant() } | ForEach-Object { $_[0] } | Sort-Object)
+        if ($queues.Count) { $out += [pscustomobject]@{ Printer = $d; Queues = $queues } }
+    }
+    return $out
 }
 
 function Uninstall-SpoolfreePrinter {

@@ -142,6 +142,10 @@ export interface AgentReport {
   durationMs?: number;
   /** Self-update state (agents 0.4.3+). */
   update?: AgentUpdateStatus;
+  /** High-severity problems (agents 0.4.6+), e.g. "PC left without printer X" after a takeover. */
+  critical?: string[];
+  /** Queues created with the TCP/IP port fallback because Add-Printer -IppURL failed (agents 0.4.6+). */
+  fallbacks?: { printer: string; method: string; reason?: string }[];
 }
 
 export const AGENT_UPDATE_STATES = ["current", "pending", "updated", "rolled-back", "failed", "skipped"] as const;
