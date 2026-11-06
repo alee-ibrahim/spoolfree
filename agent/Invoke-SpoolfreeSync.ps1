@@ -263,8 +263,8 @@ $report = [ordered]@{
     legacy         = @($legacy | Select-Object -First 200)
     sides          = $sides
     update         = $(try { Get-SpoolfreeUpdateReport } catch { [ordered]@{ state = 'current' } })
-    critical       = @($critical)
-    fallbacks      = @($fallbacks)
+    critical       = $critical.ToArray()
+    fallbacks      = $fallbacks.ToArray()
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds
 }
 try {
