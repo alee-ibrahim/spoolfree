@@ -13,7 +13,18 @@ import { detectIppPath, IppDetectError, type DetectedPath } from "@/lib/ipp/dete
 import { checkDriverless, printerUri, TEST_ATTRIBUTES, type DriverlessCheck } from "@/lib/ipp/interpret";
 import { requireAdmin } from "@/lib/session";
 import { refreshIdentity } from "@/lib/status/identity";
-import { audit } from "@/lib/service";
+import { audit, loadPolicy } from "@/lib/service";
+import {
+  applyOuChanges,
+  auditWith,
+  loadPrinterOus,
+  NEW_PRINTER_ID,
+  planOuChanges,
+  PrinterOusField,
+  printerReach,
+  type OuChangePlan,
+  type PrinterOu,
+} from "@/lib/printer-ous";
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
 
@@ -100,44 +111,114 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
   const parsed = PrinterInput.safeParse(formObject(fd));
   if (!parsed.success) return { ok: false, error: firstError(parsed.error) };
   const id = fd.get("id")?.toString() || null;
+  // OU assignments from the form. Absent field = leave assignments alone (older clients, the CLI).
+  const ousRaw = fd.get("ous");
+  let desiredOus: PrinterOu[] | null = null;
+  if (typeof ousRaw === "string") {
+    const ous = PrinterOusField.safeParse(ousRaw);
+    if (!ous.success) return { ok: false, error: firstError(ous.error) };
+    desiredOus = ous.data;
+  }
   const d = db();
   let sidesWarning = "";
   let ippNote = "";
+  let ouNote = "";
   try {
     const { ippPathOverride, ...rest } = parsed.data;
-    if (id) {
-      const [before] = await d.select().from(schema.printers).where(eq(schema.printers.id, id));
-      if (!before) return { ok: false, error: "Printer not found" };
-      sidesWarning = sidesSupportWarning(rest.defaultSides, before.lastTest?.sidesSupported);
-      const ipp = await resolveIppPath({ ...rest, ippPathOverride }, before);
-      ippNote = ipp.note;
-      const values = { ...rest, ippPath: ipp.ippPath, ippPathAuto: ipp.ippPathAuto };
-      const deviceChanged = before.host !== values.host || before.port !== values.port || before.useTls !== values.useTls;
-      const endpointChanged = deviceChanged || before.ippPath !== values.ippPath;
-      await d
-        .update(schema.printers)
-        .set({
-          ...values,
-          updatedAt: new Date(),
-          revision: endpointChanged ? before.revision + 1 : before.revision,
-          ...(deviceChanged ? NO_IDENTITY : {}),
-        })
-        .where(eq(schema.printers.id, id));
-      await audit(admin.email, "printer.update", "printer", id, { before: pick(before), after: values });
-    } else {
-      const ipp = await resolveIppPath({ ...rest, ippPathOverride }, null);
-      ippNote = ipp.note;
-      const values = { ...rest, ippPath: ipp.ippPath, ippPathAuto: ipp.ippPathAuto };
-      const [row] = await d.insert(schema.printers).values(values).returning({ id: schema.printers.id });
-      await audit(admin.email, "printer.create", "printer", row.id, values);
+    const before = id ? (await d.select().from(schema.printers).where(eq(schema.printers.id, id)))[0] : null;
+    if (id && !before) return { ok: false, error: "Printer not found" };
+    if (desiredOus) {
+      const current = id ? await loadPrinterOus(d, id) : { assigned: [], defaults: [] };
+      const unknown = await unknownOus(planOuChanges(current.assigned, current.defaults, desiredOus).added);
+      if (unknown) return { ok: false, error: unknown };
     }
+    if (before) sidesWarning = sidesSupportWarning(rest.defaultSides, before.lastTest?.sidesSupported);
+    // IPP detection talks to the device, so it runs before the transaction opens.
+    const ipp = await resolveIppPath({ ...rest, ippPathOverride }, before ?? null);
+    ippNote = ipp.note;
+    const values = { ...rest, ippPath: ipp.ippPath, ippPathAuto: ipp.ippPathAuto };
+
+    await d.transaction(async (tx) => {
+      let printerId: string;
+      if (before) {
+        printerId = before.id;
+        const deviceChanged = before.host !== values.host || before.port !== values.port || before.useTls !== values.useTls;
+        const endpointChanged = deviceChanged || before.ippPath !== values.ippPath;
+        await tx
+          .update(schema.printers)
+          .set({
+            ...values,
+            updatedAt: new Date(),
+            revision: endpointChanged ? before.revision + 1 : before.revision,
+            ...(deviceChanged ? NO_IDENTITY : {}),
+          })
+          .where(eq(schema.printers.id, printerId));
+        await auditWith(tx, admin.email, "printer.update", "printer", printerId, { before: pick(before), after: values });
+      } else {
+        const [row] = await tx.insert(schema.printers).values(values).returning({ id: schema.printers.id });
+        printerId = row.id;
+        await auditWith(tx, admin.email, "printer.create", "printer", printerId, values);
+      }
+      if (desiredOus) {
+        const current = await loadPrinterOus(tx, printerId);
+        const plan = planOuChanges(current.assigned, current.defaults, desiredOus);
+        await applyOuChanges(tx, admin.email, { id: printerId, name: values.name }, plan);
+        ouNote = ouSummary(plan);
+      }
+    });
   } catch (e) {
-    if (String((e as Error).message).includes("printers_name_unique") || (e as { code?: string }).code === "23505")
-      return { ok: false, error: "A printer with that name already exists" };
+    if (isUniqueViolation(e)) return { ok: false, error: "A printer with that name already exists" };
     throw e;
   }
   revalidateAll();
-  return { ok: true, message: (id ? "Printer updated" : "Printer added") + ippNote + sidesWarning };
+  return { ok: true, message: (id ? "Printer updated" : "Printer added") + ouNote + ippNote + sidesWarning };
+}
+
+function isUniqueViolation(e: unknown): boolean {
+  const err = e as { message?: string; code?: string; cause?: { code?: string; message?: string } };
+  return (
+    String(err.message).includes("printers_name_unique") ||
+    err.code === "23505" ||
+    err.cause?.code === "23505" ||
+    String(err.cause?.message).includes("printers_name_unique")
+  );
+}
+
+/** Error text when an OU to add is not in the directory, else null. */
+async function unknownOus(added: string[]): Promise<string | null> {
+  if (!added.length) return null;
+  let containers;
+  try {
+    containers = await directory().listContainers();
+  } catch (e) {
+    return `Cannot check the OUs against the directory: ${(e as Error).message}`;
+  }
+  const known = new Set(containers.map((c) => normalizeDn(c.dn)));
+  const missing = added.filter((dn) => !known.has(normalizeDn(dn)));
+  return missing.length ? `Not in the directory: ${missing.join("; ")}` : null;
+}
+
+function ouSummary(p: OuChangePlan): string {
+  const parts = [
+    p.added.length ? `${p.added.length} OU${p.added.length === 1 ? "" : "s"} added` : "",
+    p.removed.length ? `${p.removed.length} removed` : "",
+    p.defaultSet.length || p.defaultCleared.length ? "defaults updated" : "",
+  ].filter(Boolean);
+  return parts.length ? `. ${parts.join(", ")}` : "";
+}
+
+/** Live "will reach N computers" hint for the OU picker in the printer form. */
+export async function previewPrinterReach(printerId: string | null, ous: string[]): Promise<{ ok: true; computers: number } | { ok: false; error: string }> {
+  await requireAdmin();
+  const list = z.array(z.string().max(2000)).max(5000).safeParse(ous);
+  if (!list.success) return { ok: false, error: "Invalid OU list" };
+  try {
+    const [policy, computers] = await Promise.all([loadPolicy(), directory().listComputers()]);
+    const id = printerId && z.string().uuid().safeParse(printerId).success ? printerId : NEW_PRINTER_ID;
+    return { ok: true, computers: printerReach(policy, computers, id, list.data).computers };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
 }
 
 /** Warns (but saves) when the printer's last IPP test did not list the chosen duplex mode. */

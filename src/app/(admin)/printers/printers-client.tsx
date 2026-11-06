@@ -42,7 +42,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { deletePrinter, replacePrinter, savePrinter, testPrinter, type ActionResult, type TestResult } from "../actions";
+import { OuPicker, type OuOption, type PickedOu } from "@/components/app/ou-picker";
+import { deletePrinter, previewPrinterReach, replacePrinter, savePrinter, testPrinter, type ActionResult, type TestResult } from "../actions";
 
 export interface PrinterView {
   id: string;
@@ -71,6 +72,8 @@ export interface PrinterView {
   lastTestOk: boolean | null;
   lastTestFormats: string[];
   assignedOus: number;
+  /** OU assignments, with whether this printer is the OU's default. */
+  ous: PickedOu[];
 }
 
 function useResultToast(state: ActionResult | null, onOk: () => void) {
@@ -174,12 +177,50 @@ function SidesField({ printer }: { printer?: PrinterView }) {
   );
 }
 
-export function PrinterFormDialog({ printer, trigger }: { printer?: PrinterView; trigger?: React.ReactNode }) {
+/** OU picker state plus the debounced "will reach N computers" preview. */
+function useOuSelection(printer: PrinterView | undefined, open: boolean) {
+  const [ous, setOus] = useState<PickedOu[]>(printer?.ous ?? []);
+  const [reach, setReach] = useState<{ key: string; result: { computers: number } | { error: string } } | null>(null);
+  const dns = JSON.stringify(ous.map((o) => o.ouDn));
+  useEffect(() => {
+    if (!open || dns === "[]") return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const r = await previewPrinterReach(printer?.id ?? null, JSON.parse(dns) as string[]).catch((e: Error) => ({ ok: false as const, error: e.message }));
+      if (!cancelled) setReach({ key: dns, result: r.ok ? { computers: r.computers } : { error: r.error } });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [open, dns, printer?.id]);
+  /** Start from the stored assignments each time the dialog opens. */
+  const reset = () => setOus(printer?.ous ?? []);
+  return { ous, setOus, reset, reach: reach?.result ?? null, reachPending: reach?.key !== dns };
+}
+
+export function PrinterFormDialog({
+  printer,
+  trigger,
+  ouOptions,
+}: {
+  printer?: PrinterView;
+  trigger?: React.ReactNode;
+  /** Directory OUs for the picker; null when the directory cannot be read. */
+  ouOptions: OuOption[] | null;
+}) {
   const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState(savePrinter, null);
+  const { ous, setOus, reset, reach, reachPending } = useOuSelection(printer, open);
   useResultToast(state, () => setOpen(false));
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (o) reset();
+        setOpen(o);
+      }}
+    >
       <DialogTrigger asChild>
         {trigger ?? (
           <Button size="sm">
@@ -202,6 +243,15 @@ export function PrinterFormDialog({ printer, trigger }: { printer?: PrinterView;
               <Input id="name" name="name" required defaultValue={printer?.name} placeholder="Staff Room Copier" />
             </Field>
             <EndpointFields p={printer} />
+            {ouOptions && <input type="hidden" name="ous" value={JSON.stringify(ous)} />}
+            <OuPicker
+              options={ouOptions}
+              value={ous}
+              onChange={setOus}
+              printerId={printer?.id ?? null}
+              reach={reach}
+              reachPending={reachPending}
+            />
             <div className="grid gap-3 sm:grid-cols-2">
               <Field>
                 <FieldLabel htmlFor="location">Location</FieldLabel>
@@ -409,12 +459,14 @@ function DetectionNote({ d }: { d: NonNullable<TestResult["detection"]> }) {
 
 function PrinterActions({
   p,
+  ouOptions,
   pending,
   onTest,
   onReplace,
   onDelete,
 }: {
   p: PrinterView;
+  ouOptions: OuOption[] | null;
   pending: boolean;
   onTest: () => void;
   onReplace: () => void;
@@ -431,7 +483,7 @@ function PrinterActions({
         <DropdownMenuItem disabled={pending} onSelect={onTest}>
           Test (IPP)
         </DropdownMenuItem>
-        <PrinterFormDialog printer={p} trigger={<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>} />
+        <PrinterFormDialog printer={p} ouOptions={ouOptions} trigger={<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>} />
         <DropdownMenuItem onSelect={onReplace}>Replace device…</DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onSelect={onDelete}>
@@ -448,7 +500,7 @@ function DriverlessBadge({ p }: { p: PrinterView }) {
   return <Badge variant="destructive">Unsupported</Badge>;
 }
 
-export function PrintersTable({ printers }: { printers: PrinterView[] }) {
+export function PrintersTable({ printers, ouOptions }: { printers: PrinterView[]; ouOptions: OuOption[] | null }) {
   const [replacing, setReplacing] = useState<PrinterView | null>(null);
   const [deleting, setDeleting] = useState<PrinterView | null>(null);
   const [testResult, setTestResult] = useState<(TestResult & { name: string }) | null>(null);
@@ -494,7 +546,7 @@ export function PrintersTable({ printers }: { printers: PrinterView[] }) {
               </div>
             </ItemContent>
             <ItemActions>
-              <PrinterActions p={p} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+              <PrinterActions p={p} ouOptions={ouOptions} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
             </ItemActions>
           </Item>
         ))}
@@ -534,7 +586,7 @@ export function PrintersTable({ printers }: { printers: PrinterView[] }) {
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{p.assignedOus}</TableCell>
                 <TableCell className="pr-4">
-                  <PrinterActions p={p} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+                  <PrinterActions p={p} ouOptions={ouOptions} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
                 </TableCell>
               </TableRow>
             ))}

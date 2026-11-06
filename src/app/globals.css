@@ -155,7 +155,9 @@
   [data-slot="toggle-group-item"],
   [data-slot="tabs-trigger"],
   [data-slot="sidebar-menu-button"],
-  [data-slot="popover-trigger"] {
+  [data-slot="popover-trigger"],
+  [data-slot="command-item"],
+  [data-slot="command-input-wrapper"] [data-slot="input-group"] {
     min-height: 44px;
   }
   [data-slot="button"][data-size^="icon"] {
