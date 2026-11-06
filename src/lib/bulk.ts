@@ -5,8 +5,9 @@ import { db, schema } from "./db";
 import { normalizeDn } from "./dn";
 
 /**
- * Bulk import/export of printers, OU assignments and OU default printers (scripts/printers.ts).
- * Idempotent: printers are matched by name (case-insensitive); running the same file twice changes nothing.
+ * Bulk import/export of printers, OU assignments, OU default printers and per-computer overrides
+ * (scripts/printers.ts). Idempotent: printers are matched by name (case-insensitive) and computers by name
+ * or DN; running the same file twice changes nothing.
  */
 
 export const HOST_RE =
@@ -62,6 +63,40 @@ export const PrinterSpec = z
     ippPath: p.ippPath ?? "/ipp/print",
   }));
 export type PrinterSpec = z.output<typeof PrinterSpec>;
+
+const printerNames = list.pipe(z.array(z.string().min(1).max(100)));
+
+/**
+ * Per-computer overrides (YAML only): `add` adds printers to this computer, `block` removes inherited ones,
+ * `default` makes one of them the computer's default (it is added if not listed in `add`).
+ */
+export const ComputerSpec = z
+  .object({
+    name: z.string().trim().min(1).max(64).regex(/^[^\\/,=]+$/, "a computer name, without domain or DN").optional(),
+    dn: z.string().trim().max(2048).regex(/^CN=.+/i, "not a computer distinguished name (CN=...)").optional(),
+    add: printerNames,
+    block: printerNames,
+    default: optText(100),
+  })
+  .strict()
+  .refine((c) => c.name || c.dn, { message: "name or dn is required" })
+  .superRefine((c, ctx) => {
+    const add = new Set(c.add.map((n) => n.toLowerCase()));
+    if (c.default) add.add(c.default.toLowerCase());
+    const both = c.block.filter((n) => add.has(n.toLowerCase()));
+    if (both.length) ctx.addIssue({ code: "custom", message: `printer both added and blocked: ${both.join(", ")}` });
+    const seen = new Set<string>();
+    for (const n of [...c.add, ...c.block]) {
+      if (seen.has(n.toLowerCase())) ctx.addIssue({ code: "custom", message: `printer listed twice: ${n}` });
+      seen.add(n.toLowerCase());
+    }
+  });
+export type ComputerSpec = z.output<typeof ComputerSpec>;
+
+export interface ImportDocument {
+  printers: PrinterSpec[];
+  computers: ComputerSpec[];
+}
 
 // --- Parsing ------------------------------------------------------------------------------------------
 
@@ -121,10 +156,16 @@ const CSV_COLUMNS: Record<string, string> = {
 };
 
 export function parseInput(text: string, format: "yaml" | "csv"): PrinterSpec[] {
+  return parseDocument(text, format).printers;
+}
+
+/** Printers and (YAML only) a `computers:` list of per-computer overrides. */
+export function parseDocument(text: string, format: "yaml" | "csv"): ImportDocument {
   let raw: unknown[];
+  let rawComputers: unknown = [];
   if (format === "csv") {
     const [header, ...rows] = parseCsv(text.replace(/^﻿/, ""));
-    if (!header) return [];
+    if (!header) return { printers: [], computers: [] };
     const keys = header.map((h) => {
       const k = CSV_COLUMNS[h.trim().toLowerCase().replace(/[\s-]+/g, "_")];
       if (!k) throw new Error(`unknown CSV column "${h}"`);
@@ -134,8 +175,10 @@ export function parseInput(text: string, format: "yaml" | "csv"): PrinterSpec[] 
   } else {
     const doc = parseYaml(text) as unknown;
     raw = Array.isArray(doc) ? doc : ((doc as { printers?: unknown[] } | null)?.printers ?? []);
-    if (!Array.isArray(raw)) throw new Error("YAML must be a list of printers or { printers: [...] }");
+    if (!Array.isArray(raw)) throw new Error("YAML must be a list of printers or { printers: [...], computers: [...] }");
+    rawComputers = Array.isArray(doc) ? [] : ((doc as { computers?: unknown } | null)?.computers ?? []);
   }
+  if (!Array.isArray(rawComputers)) throw new Error("computers: must be a list");
   const out: PrinterSpec[] = [];
   const seen = new Set<string>();
   raw.forEach((r, i) => {
@@ -149,7 +192,20 @@ export function parseInput(text: string, format: "yaml" | "csv"): PrinterSpec[] 
     seen.add(key);
     out.push(p.data);
   });
-  return out;
+  const computers: ComputerSpec[] = [];
+  const seenComputers = new Set<string>();
+  rawComputers.forEach((r: unknown, i: number) => {
+    const c = ComputerSpec.safeParse(r);
+    if (!c.success) {
+      const label = (r as { name?: unknown } | null)?.name ?? (r as { dn?: unknown } | null)?.dn;
+      throw new Error(`computers entry ${i + 1}${label ? ` (${String(label)})` : ""}: ${c.error.issues.map((x) => `${x.path.join(".") || "entry"}: ${x.message}`).join("; ")}`);
+    }
+    const key = c.data.dn ? `dn:${normalizeDn(c.data.dn)}` : `name:${c.data.name!.toLowerCase()}`;
+    if (seenComputers.has(key)) throw new Error(`duplicate computer: ${c.data.dn ?? c.data.name}`);
+    seenComputers.add(key);
+    computers.push(c.data);
+  });
+  return { printers: out, computers };
 }
 
 // --- Planning (pure) -----------------------------------------------------------------------------------
@@ -158,6 +214,23 @@ export interface CurrentState {
   printers: (typeof schema.printers.$inferSelect)[];
   assignments: { ouDn: string; printerId: string }[];
   ouSettings: { ouDn: string; defaultPrinterId: string | null }[];
+  /** Per-computer overrides (absent: treated as none). */
+  overrides?: OverrideRow[];
+}
+
+export interface OverrideRow {
+  computerGuid: string;
+  computerName: string;
+  printerId: string;
+  action: "add" | "block";
+  makeDefault: boolean;
+}
+
+/** A computer as the directory knows it (name/DN lookup for `computers:` entries). */
+export interface DirectoryComputer {
+  objectGuid: string;
+  dn: string;
+  name: string;
 }
 
 export type Step =
@@ -166,7 +239,9 @@ export type Step =
   | { kind: "unchanged"; name: string }
   | { kind: "assign"; name: string; ouDn: string }
   | { kind: "unassign"; name: string; id: string; ouDn: string }
-  | { kind: "default"; name: string; ouDn: string; previous: string | null };
+  | { kind: "default"; name: string; ouDn: string; previous: string | null }
+  | { kind: "override"; name: string; computer: string; computerGuid: string; action: "add" | "block"; makeDefault: boolean; previous: string | null }
+  | { kind: "unoverride"; name: string; computer: string; computerGuid: string; printerId: string };
 
 const FIELDS = ["host", "port", "ippPath", "useTls", "location", "model", "notes", "legacyTakeover", "legacyShares", "defaultSides"] as const;
 const ENDPOINT = new Set(["host", "port", "ippPath", "useTls"]);
@@ -217,6 +292,83 @@ export function plan(specs: PrinterSpec[], cur: CurrentState, opts: { pruneAssig
   return steps;
 }
 
+/**
+ * Per-computer overrides. Computers are found in the directory by DN or by name (case-insensitive; an
+ * ambiguous name is an error). Printer names must exist or be created by the same file (newPrinters). With
+ * pruneOverrides, overrides of the listed computers that the file does not mention are removed.
+ */
+export function planComputers(
+  computers: ComputerSpec[],
+  cur: CurrentState,
+  directoryComputers: DirectoryComputer[],
+  opts: { pruneOverrides?: boolean; newPrinters?: string[] } = {},
+): Step[] {
+  const steps: Step[] = [];
+  const byName = new Map(cur.printers.map((p) => [p.name.toLowerCase(), p]));
+  const nameById = new Map(cur.printers.map((p) => [p.id, p.name]));
+  const created = new Set((opts.newPrinters ?? []).map((n) => n.toLowerCase()));
+  const overrides = cur.overrides ?? [];
+  const printerRef = (n: string, label: string): { name: string; id: string | null } => {
+    const p = byName.get(n.toLowerCase());
+    if (p) return { name: p.name, id: p.id };
+    if (created.has(n.toLowerCase())) return { name: n, id: null };
+    throw new Error(`computer ${label}: unknown printer "${n}"`);
+  };
+  const seenGuids = new Set<string>();
+
+  for (const c of computers) {
+    const label = c.dn ?? c.name!;
+    let matches = directoryComputers.filter((d) =>
+      c.dn ? normalizeDn(d.dn) === normalizeDn(c.dn) : d.name.toLowerCase() === c.name!.toLowerCase(),
+    );
+    if (c.dn && c.name) matches = matches.filter((d) => d.name.toLowerCase() === c.name!.toLowerCase());
+    if (matches.length === 0) throw new Error(`computer ${label}: not found in the directory${c.dn && c.name ? " (or its name does not match the DN)" : ""}`);
+    if (matches.length > 1) throw new Error(`computer ${label}: ${matches.length} computers have this name; use dn instead`);
+    const comp = matches[0];
+    const guid = comp.objectGuid.toLowerCase();
+    if (seenGuids.has(guid)) throw new Error(`computer ${label}: listed twice`);
+    seenGuids.add(guid);
+
+    const want = new Map<string, { name: string; id: string | null; action: "add" | "block"; makeDefault: boolean }>();
+    for (const n of c.add) {
+      const p = printerRef(n, label);
+      want.set(p.name.toLowerCase(), { ...p, action: "add", makeDefault: false });
+    }
+    if (c.default) {
+      const p = printerRef(c.default, label);
+      want.set(p.name.toLowerCase(), { ...p, action: "add", makeDefault: true });
+    }
+    for (const n of c.block) {
+      const p = printerRef(n, label);
+      want.set(p.name.toLowerCase(), { ...p, action: "block", makeDefault: false });
+    }
+    const mine = overrides.filter((o) => o.computerGuid.toLowerCase() === guid);
+    const before = steps.length;
+    for (const w of want.values()) {
+      const have = w.id ? mine.find((o) => o.printerId === w.id) : undefined;
+      if (have && have.action === w.action && have.makeDefault === w.makeDefault) continue;
+      steps.push({
+        kind: "override",
+        name: w.name,
+        computer: comp.name,
+        computerGuid: guid,
+        action: w.action,
+        makeDefault: w.makeDefault,
+        previous: have ? `${have.action}${have.makeDefault ? " (default)" : ""}` : null,
+      });
+    }
+    if (opts.pruneOverrides) {
+      const wantedIds = new Set([...want.values()].map((w) => w.id).filter((id): id is string => id !== null));
+      for (const o of mine) {
+        if (!wantedIds.has(o.printerId))
+          steps.push({ kind: "unoverride", name: nameById.get(o.printerId) ?? o.printerId, computer: comp.name, computerGuid: guid, printerId: o.printerId });
+      }
+    }
+    if (steps.length === before) steps.push({ kind: "unchanged", name: `computer ${comp.name}` });
+  }
+  return steps;
+}
+
 export function describe(s: Step): string {
   switch (s.kind) {
     case "create":
@@ -231,6 +383,10 @@ export function describe(s: Step): string {
       return `unassign ${s.name} -x ${s.ouDn}`;
     case "default":
       return `default  ${s.ouDn}: ${s.previous ?? "(none)"} -> ${s.name}`;
+    case "override":
+      return `${s.action === "add" ? "add     " : "block   "} ${s.computer}: ${s.name}${s.makeDefault ? " (default)" : ""}${s.previous ? ` (was: ${s.previous})` : ""}`;
+    case "unoverride":
+      return `unset    ${s.computer}: ${s.name}`;
   }
 }
 
@@ -238,12 +394,21 @@ export function describe(s: Step): string {
 
 export async function loadState(): Promise<CurrentState> {
   const d = db();
-  const [printers, assignments, ouSettings] = await Promise.all([
+  const [printers, assignments, ouSettings, overrides] = await Promise.all([
     d.select().from(schema.printers),
     d.select({ ouDn: schema.ouAssignments.ouDn, printerId: schema.ouAssignments.printerId }).from(schema.ouAssignments),
     d.select({ ouDn: schema.ouSettings.ouDn, defaultPrinterId: schema.ouSettings.defaultPrinterId }).from(schema.ouSettings),
+    d
+      .select({
+        computerGuid: schema.computerOverrides.computerGuid,
+        computerName: schema.computerOverrides.computerName,
+        printerId: schema.computerOverrides.printerId,
+        action: schema.computerOverrides.action,
+        makeDefault: schema.computerOverrides.makeDefault,
+      })
+      .from(schema.computerOverrides),
   ]);
-  return { printers, assignments, ouSettings };
+  return { printers, assignments, ouSettings, overrides };
 }
 
 /** Applies a plan in one transaction; every change gets an audit entry with actor "cli". */
@@ -267,7 +432,12 @@ export async function apply(steps: Step[], actor = "cli"): Promise<void> {
         const [before] = await tx.select({ revision: schema.printers.revision }).from(schema.printers).where(eqId(s.id));
         await tx
           .update(schema.printers)
-          .set({ ...s.changes, updatedAt: new Date(), ...(s.bumpRevision ? { revision: before.revision + 1 } : {}) })
+          .set({
+            ...s.changes,
+            updatedAt: new Date(),
+            // A new endpoint may be another device: its printer-uuid/MACs are read again by Test or the poller.
+            ...(s.bumpRevision ? { revision: before.revision + 1, deviceUuid: null, macAddresses: [], identityCheckedAt: null } : {}),
+          })
           .where(eqId(s.id));
         await audit("printer.update", "printer", s.id, { changes: s.changes, source: "bulk import" });
       } else if (s.kind === "assign") {
@@ -284,6 +454,22 @@ export async function apply(steps: Step[], actor = "cli"): Promise<void> {
           .values({ ouDn: s.ouDn, defaultPrinterId: id })
           .onConflictDoUpdate({ target: schema.ouSettings.ouDn, set: { defaultPrinterId: id, updatedAt: new Date() } });
         await audit("ou.default", "ou", s.ouDn, { printerId: id, printer: s.name, source: "bulk import" });
+      } else if (s.kind === "override") {
+        const id = ids.get(key)!;
+        const values = { computerGuid: s.computerGuid, computerName: s.computer, printerId: id, action: s.action, makeDefault: s.makeDefault };
+        await tx
+          .insert(schema.computerOverrides)
+          .values(values)
+          .onConflictDoUpdate({
+            target: [schema.computerOverrides.computerGuid, schema.computerOverrides.printerId],
+            set: { action: s.action, makeDefault: s.makeDefault, computerName: s.computer },
+          });
+        await audit(`override.${s.action}`, "computer", s.computerGuid, { computer: s.computer, printerId: id, printer: s.name, makeDefault: s.makeDefault, source: "bulk import" });
+      } else if (s.kind === "unoverride") {
+        await tx
+          .delete(schema.computerOverrides)
+          .where(and(eq(schema.computerOverrides.computerGuid, s.computerGuid), eq(schema.computerOverrides.printerId, s.printerId)));
+        await audit("override.remove", "computer", s.computerGuid, { computer: s.computer, printerId: s.printerId, printer: s.name, source: "bulk import" });
       }
     }
   });
@@ -318,8 +504,33 @@ export function toSpecs(cur: CurrentState): Record<string, unknown>[] {
   return out;
 }
 
+/** Per-computer overrides as `computers:` entries (by computer name), sorted by name. */
+export function toComputerSpecs(cur: CurrentState): Record<string, unknown>[] {
+  const nameById = new Map(cur.printers.map((p) => [p.id, p.name]));
+  const byGuid = new Map<string, OverrideRow[]>();
+  for (const o of cur.overrides ?? []) {
+    const k = o.computerGuid.toLowerCase();
+    byGuid.set(k, [...(byGuid.get(k) ?? []), o]);
+  }
+  const out: Record<string, unknown>[] = [];
+  for (const rows of byGuid.values()) {
+    const names = (pred: (o: OverrideRow) => boolean) =>
+      rows
+        .filter(pred)
+        .map((o) => nameById.get(o.printerId))
+        .filter((n): n is string => !!n)
+        .sort();
+    const add = names((o) => o.action === "add" && !o.makeDefault);
+    const block = names((o) => o.action === "block");
+    const def = names((o) => o.action === "add" && o.makeDefault)[0];
+    out.push({ name: rows[0].computerName, ...(add.length ? { add } : {}), ...(block.length ? { block } : {}), ...(def ? { default: def } : {}) });
+  }
+  return out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
 export function exportYaml(cur: CurrentState): string {
-  return stringifyYaml({ printers: toSpecs(cur) }, { lineWidth: 0 });
+  const computers = toComputerSpecs(cur);
+  return stringifyYaml({ printers: toSpecs(cur), ...(computers.length ? { computers } : {}) }, { lineWidth: 0 });
 }
 
 const csvField = (v: unknown) => {

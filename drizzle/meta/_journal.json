@@ -29,6 +29,13 @@
       "when": 1793922142766,
       "tag": "0003_printer_takeover_duplex",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793949187060,
+      "tag": "0004_printer_identity",
+      "breakpoints": true
     }
   ]
 }

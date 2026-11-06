@@ -59,6 +59,8 @@ export function toManifestInput(p: typeof schema.printers.$inferSelect): Manifes
     legacyTakeover: p.legacyTakeover,
     legacyShares: p.legacyShares,
     defaultSides: p.defaultSides,
+    deviceUuid: p.deviceUuid,
+    macAddresses: p.macAddresses,
   };
 }
 

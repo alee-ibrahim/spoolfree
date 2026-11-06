@@ -10,6 +10,7 @@ import { normalizeDn } from "@/lib/dn";
 import { getPrinterAttributes } from "@/lib/ipp/client";
 import { checkDriverless, printerUri, TEST_ATTRIBUTES, type DriverlessCheck } from "@/lib/ipp/interpret";
 import { requireAdmin } from "@/lib/session";
+import { refreshIdentity } from "@/lib/status/identity";
 import { audit } from "@/lib/service";
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
@@ -71,7 +72,12 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
         before.useTls !== parsed.data.useTls;
       await d
         .update(schema.printers)
-        .set({ ...parsed.data, updatedAt: new Date(), revision: endpointChanged ? before.revision + 1 : before.revision })
+        .set({
+          ...parsed.data,
+          updatedAt: new Date(),
+          revision: endpointChanged ? before.revision + 1 : before.revision,
+          ...(endpointChanged ? NO_IDENTITY : {}),
+        })
         .where(eq(schema.printers.id, id));
       await audit(admin.email, "printer.update", "printer", id, { before: pick(before), after: parsed.data });
     } else {
@@ -110,6 +116,9 @@ function pick(p: typeof schema.printers.$inferSelect) {
   };
 }
 
+/** Another device may answer at a new endpoint: forget its identity until Test or the poller reads it again. */
+const NO_IDENTITY = { deviceUuid: null, macAddresses: [] as string[], identityCheckedAt: null };
+
 const ReplaceInput = z.object({
   id: z.string().uuid(),
   host: PrinterInput.shape.host,
@@ -130,7 +139,7 @@ export async function replacePrinter(_prev: ActionResult | null, fd: FormData): 
   const { id, ...rest } = parsed.data;
   await d
     .update(schema.printers)
-    .set({ ...rest, revision: before.revision + 1, updatedAt: new Date(), lastTest: null, lastTestAt: null })
+    .set({ ...rest, revision: before.revision + 1, updatedAt: new Date(), lastTest: null, lastTestAt: null, ...NO_IDENTITY })
     .where(eq(schema.printers.id, id));
   await d.delete(schema.printerStatus).where(eq(schema.printerStatus.printerId, id));
   await audit(admin.email, "printer.replace", "printer", id, { before: pick(before), after: rest, revision: before.revision + 1 });
@@ -167,6 +176,8 @@ export async function testPrinter(id: string): Promise<TestResult> {
     const attrs = await getPrinterAttributes(uri, TEST_ATTRIBUTES, Math.max(config().POLL_TIMEOUT_MS, 8000));
     result = { ok: true, check: checkDriverless(attrs), uri };
     await d.update(schema.printers).set({ lastTest: result.check, lastTestAt: new Date() }).where(eq(schema.printers.id, id));
+    // printer-uuid and MAC addresses go into the manifest for legacy queue matching on PCs.
+    await refreshIdentity(p, { uuid: result.check.uuid, model: result.check.model }).catch(() => undefined);
   } catch (e) {
     result = { ok: false, error: (e as Error).message, uri };
   }

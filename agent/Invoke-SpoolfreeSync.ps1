@@ -62,6 +62,9 @@ try {
 }
 
 $method = Get-SpoolfreeInstallMethod -IppUrlSupported (Test-SpoolfreeIppUrlSupported) -ProtectedPrintMode (Test-SpoolfreeProtectedPrintMode)
+# This server's identity: queue comments name it, so queues left by another Spoolfree server can be told apart.
+$serverId = Get-SpoolfreeServerId $cfg.PublicKey
+$serverPrinterIds = @(Get-SpoolfreeProperty $manifest 'serverPrinterIds' | Where-Object { $_ } | ForEach-Object { [string]$_ })
 
 # Legacy queue takeover (opt-in per printer): remove non-Spoolfree queues for the same device BEFORE
 # creating the Spoolfree queue (Windows allows one IPP queue per device). Dry-run only reports.
@@ -79,7 +82,7 @@ foreach ($p in @($manifest.printers)) {
         $shares = @(Get-SpoolfreeProperty (Get-SpoolfreeProperty $p 'legacy') 'shares' | Where-Object { $_ } | ForEach-Object { [string]$_ })
         $legacyRules.Add([ordered]@{ printer = [string]$p.name; mode = $mode; shares = $shares; addresses = @($addresses) })
         if ($null -eq $queues) { $queues = Get-SpoolfreeQueueInventory; $ports = Get-SpoolfreePortInventory }
-        $found = @(Get-SpoolfreeLegacyMatches -Printer $p -Queues $queues -Ports $ports -PrinterAddresses $addresses -LegacyServers $legacyServers -Installed $installedNames)
+        $found = @(Get-SpoolfreeLegacyMatches -Printer $p -Queues $queues -Ports $ports -PrinterAddresses $addresses -LegacyServers $legacyServers -Installed $installedNames -ServerId $serverId -ServerPrinterIds $serverPrinterIds)
         foreach ($m in $found) {
             $entry = [ordered]@{ printer = [string]$p.name; queue = $m.Queue; reason = $m.Reason; action = 'would-remove'; scope = 'machine' }
             if ($mode -eq 'on' -and $PSCmdlet.ShouldProcess($m.Queue, "Remove legacy queue (replaced by $($p.name))")) {
@@ -133,10 +136,10 @@ foreach ($step in $plan) {
     if (-not $PSCmdlet.ShouldProcess($step.Name, $step.Action)) { continue }
     try {
         switch ($step.Action) {
-            'Add' { Install-SpoolfreePrinter -Printer $step.Printer -Method $method; $added.Add($step.Name) }
+            'Add' { Install-SpoolfreePrinter -Printer $step.Printer -Method $method -ServerId $serverId; $added.Add($step.Name) }
             'Replace' {
                 if (Get-Printer -Name $step.Name -ErrorAction SilentlyContinue) { Uninstall-SpoolfreePrinter -Name $step.Name }
-                Install-SpoolfreePrinter -Printer $step.Printer -Method $method
+                Install-SpoolfreePrinter -Printer $step.Printer -Method $method -ServerId $serverId
                 $added.Add($step.Name)
             }
             'Remove' { Uninstall-SpoolfreePrinter -Name $step.Name; $removed.Add($step.Name) }
@@ -145,7 +148,7 @@ foreach ($step in $plan) {
             'Keep' {
                 $q = Get-Printer -Name $step.Name -ErrorAction SilentlyContinue
                 if ($q) {
-                    $update = Get-SpoolfreeQueueUpdate -Printer $step.Printer -Queue $q
+                    $update = Get-SpoolfreeQueueUpdate -Printer $step.Printer -Queue $q -ServerId $serverId
                     if ($update.Count) {
                         Set-Printer -Name $step.Name @update -ErrorAction Stop
                         Write-Log "$($step.Name): updated $(@($update.Keys) -join ', ')."
@@ -155,6 +158,16 @@ foreach ($step in $plan) {
         }
     } catch {
         $msg = "$($step.Name): $($step.Action) failed: $($_.Exception.Message)"
+        if ($step.Action -eq 'Add' -or $step.Action -eq 'Replace') {
+            # Windows allows one WSD/IPP queue per device: name the queue that holds it, if there is one.
+            try {
+                $winError = $_.Exception.Message
+                $q2 = Get-SpoolfreeQueueInventory
+                $p2 = Get-SpoolfreePortInventory
+                $blocking = @(Get-SpoolfreeLegacyMatches -Printer $step.Printer -Queues $q2 -Ports $p2 -PrinterAddresses (Get-SpoolfreePrinterAddressSet -Printer $step.Printer) -LegacyServers $legacyServers -Installed @(Get-SpoolfreeInstalled | ForEach-Object { [string]$_.Name }) -ServerId $serverId -ServerPrinterIds $serverPrinterIds -AnyMode)
+                $msg = Get-SpoolfreeAddFailureMessage -Name $step.Name -Action $step.Action -Message $winError -Blocking $blocking -Mode (Get-SpoolfreeLegacyMode $step.Printer)
+            } catch { Write-Log "$($step.Name): could not check for a blocking queue: $($_.Exception.Message)" }
+        }
         $errors.Add($msg)
         Write-Log $msg
     }

@@ -11,6 +11,7 @@ export const OID = {
   suppliesDescription: "1.3.6.1.2.1.43.11.1.1.6.1",
   suppliesMaxCapacity: "1.3.6.1.2.1.43.11.1.1.8.1",
   suppliesLevel: "1.3.6.1.2.1.43.11.1.1.9.1",
+  ifPhysAddress: "1.3.6.1.2.1.2.2.1.6",
 } as const;
 
 const ERROR_BITS: [number, string][] = [
@@ -134,6 +135,17 @@ export async function snmpStatus(
       source: "snmp",
       error: null,
     };
+  } finally {
+    session.close();
+  }
+}
+
+/** Raw ifPhysAddress values of the printer's interfaces (IF-MIB); callers validate them (normalizeMac). */
+export async function snmpPhysAddresses(host: string, community: string, timeoutMs: number): Promise<Buffer[]> {
+  const session = snmp.createSession(host, community, { version: snmp.Version2c, timeout: timeoutMs, retries: 1 });
+  try {
+    const vbs = await snmpWalk(session, OID.ifPhysAddress);
+    return vbs.map((vb) => vb.value).filter((v): v is Buffer => Buffer.isBuffer(v));
   } finally {
     session.close();
   }

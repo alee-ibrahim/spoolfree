@@ -122,9 +122,9 @@ docker run --rm --read-only --tmpfs /tmp -v /path/to/pw:/run/pw:ro \
 
 ## Bulk import and export
 
-`spoolfree-cli printers` creates or updates printers, OU assignments and OU default printers from a YAML or CSV file.
-It is idempotent: printers are matched by name (case-insensitive), only changed fields are written, and running the
-same file twice changes nothing. Every change is in the audit log with actor `cli`. A host/port/path/TLS change bumps the
+`spoolfree-cli printers` creates or updates printers, OU assignments, OU default printers and (YAML only) per-computer
+overrides from a YAML or CSV file. It is idempotent: printers are matched by name (case-insensitive), only changed
+fields are written, and running the same file twice changes nothing. Every change is in the audit log with actor `cli`. A host/port/path/TLS change bumps the
 printer's revision, so PCs re-create the queue.
 
 ```yaml
@@ -139,14 +139,26 @@ printers:
     legacyShares: [StaffRoom]           # share names on LEGACY_PRINT_SERVERS
     assignments: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
     defaultFor: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
+
+computers:                            # per-computer overrides (YAML only)
+  - name: LAB-PC7                     # computer name, or dn: "CN=LAB-PC7,OU=Lab,DC=example,DC=org"
+    add: [Staff Room Copier]          # printers added to this computer on top of its OU's
+    block: [Lab Printer]              # inherited printers removed from this computer
+    default: Staff Room Copier        # optional: this computer's default (added if not in add)
 ```
+
+`computers:` entries are looked up in the directory (in snapshot mode, the last AD snapshot): by `dn`, or by `name`
+(case-insensitive; a name that several computers share is refused, use `dn`). Giving both checks that they agree.
+Printer names must exist or be created by the same file. Unknown computers or printers stop the import before
+anything is written. `export` writes the overrides back as `computers:` (by computer name).
 
 CSV uses the columns `name,host` (or `ip`)`,port,ipp_path,tls,location,model,notes,duplex,takeover,shares,assignments,default_for`;
 lists are separated by `;` and DNs must be quoted (they contain commas). `export --format csv` writes this layout.
 
 Options: `--dry-run` prints the plan and writes nothing; `--prune-assignments` also removes assignments of the listed
-printers that are not in the file (otherwise assignments are only added); `--format yaml|csv` (default: by file
-extension); `-` reads the file from stdin.
+printers that are not in the file (otherwise assignments are only added); `--prune-overrides` also removes overrides of
+the listed computers that the file does not mention (other computers' overrides are never touched); `--format yaml|csv`
+(default: by file extension); `-` reads the file from stdin. CSV files carry printers only and never change overrides.
 
 In the container image the CLI is one bundled file (no tsx or `scripts/` needed), using the pod's `DATABASE_URL`:
 

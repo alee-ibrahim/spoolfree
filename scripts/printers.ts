@@ -1,23 +1,48 @@
 /**
- * Bulk printers, OU assignments and OU default printers.
+ * Bulk printers, OU assignments, OU default printers and per-computer overrides.
  *
- *   printers import <file.yaml|file.csv|-> [--format yaml|csv] [--dry-run] [--prune-assignments]
+ *   printers import <file.yaml|file.csv|-> [--format yaml|csv] [--dry-run] [--prune-assignments] [--prune-overrides]
  *   printers export [--format yaml|csv]
  *
  * Idempotent: printers are matched by name (case-insensitive) and only changed fields are written;
  * assignments are added (and with --prune-assignments, assignments of the listed printers that are not
- * in the file are removed). Every change is audit-logged with actor "cli". "-" reads stdin.
+ * in the file are removed). A YAML `computers:` list sets per-computer overrides (computers by name or
+ * DN, looked up in the directory; --prune-overrides removes overrides of the listed computers that the
+ * file does not mention). Every change is audit-logged with actor "cli". "-" reads stdin.
  *
  * Development:  npx tsx scripts/printers.ts import printers.yaml --dry-run   (DATABASE_URL from env/.env)
  * In the image: kubectl exec -i -n <ns> deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers import - --dry-run < printers.yaml
  */
 import { readFileSync } from "node:fs";
-import { apply, describe, exportCsv, exportYaml, loadState, parseInput, plan } from "../src/lib/bulk";
-import { sqlClient } from "../src/lib/db";
+import { apply, describe, exportCsv, exportYaml, loadState, parseDocument, plan, planComputers, type DirectoryComputer } from "../src/lib/bulk";
+import { config, directoryMode } from "../src/lib/config";
+import { db, schema, sqlClient } from "../src/lib/db";
 
 const USAGE = `usage:
-  printers import <file.yaml|file.csv|-> [--format yaml|csv] [--dry-run] [--prune-assignments]
+  printers import <file.yaml|file.csv|-> [--format yaml|csv] [--dry-run] [--prune-assignments] [--prune-overrides]
   printers export [--format yaml|csv]`;
+
+/**
+ * Computers for name/DN lookup. Snapshot mode reads the snapshot tables directly (the app's snapshot store
+ * is server-only); LDAP and the development fake directory go through their Directory implementation.
+ */
+async function directoryComputers(): Promise<DirectoryComputer[]> {
+  const mode = directoryMode();
+  if (mode === "snapshot") {
+    const rows = await db()
+      .select({ objectGuid: schema.directoryComputers.objectGuid, dn: schema.directoryComputers.dn, name: schema.directoryComputers.name })
+      .from(schema.directoryComputers);
+    if (rows.length === 0) throw new Error("no directory snapshot yet: computers cannot be looked up");
+    return rows;
+  }
+  if (mode === "fake") {
+    const { FakeDirectory, loadFakeDirectoryFile } = await import("../src/lib/directory/fake");
+    const file = config().DEV_FAKE_AD_FILE;
+    return (file ? loadFakeDirectoryFile(file) : new FakeDirectory()).listComputers();
+  }
+  const { LdapDirectory } = await import("../src/lib/directory/ldap");
+  return new LdapDirectory().listComputers();
+}
 
 export async function printersCli(argv: string[]): Promise<number> {
   const args = argv.filter((a) => !a.startsWith("--"));
@@ -38,11 +63,18 @@ export async function printersCli(argv: string[]): Promise<number> {
   }
   const text = readFileSync(file === "-" ? 0 : file, "utf8");
   const fmt = (format ?? (/\.csv$/i.test(file) ? "csv" : "yaml")) as "yaml" | "csv";
-  const specs = parseInput(text, fmt);
-  const steps = plan(specs, await loadState(), { pruneAssignments: flag("prune-assignments") });
+  const doc = parseDocument(text, fmt);
+  const state = await loadState();
+  const steps = plan(doc.printers, state, { pruneAssignments: flag("prune-assignments") });
+  if (doc.computers.length) {
+    const newPrinters = steps.flatMap((s) => (s.kind === "create" ? [s.name] : []));
+    steps.push(...planComputers(doc.computers, state, await directoryComputers(), { pruneOverrides: flag("prune-overrides"), newPrinters }));
+  }
   const changes = steps.filter((s) => s.kind !== "unchanged");
   for (const s of steps) console.log(describe(s));
-  console.log(`${specs.length} printer(s) in the file, ${changes.length} change(s)${flag("dry-run") ? " (dry run: nothing written)" : ""}.`);
+  console.log(
+    `${doc.printers.length} printer(s) and ${doc.computers.length} computer(s) in the file, ${changes.length} change(s)${flag("dry-run") ? " (dry run: nothing written)" : ""}.`,
+  );
   if (!flag("dry-run") && changes.length) {
     await apply(changes);
     console.log("applied.");

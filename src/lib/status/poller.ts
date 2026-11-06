@@ -2,6 +2,7 @@ import { config } from "../config";
 import { db, schema, sqlClient } from "../db";
 import { getPrinterAttributes } from "../ipp/client";
 import { lowMarkers, needsAttention, offlineStatus, printerUri, STATUS_ATTRIBUTES, statusFromIpp, type PrinterStatus } from "../ipp/interpret";
+import { identityDue, refreshIdentity } from "./identity";
 import { snmpStatus } from "./snmp";
 
 type PrinterRow = typeof schema.printers.$inferSelect;
@@ -98,6 +99,10 @@ export async function pollAll(): Promise<number> {
     };
     await d.insert(schema.printerStatus).values({ printerId: p.id, ...values }).onConflictDoUpdate({ target: schema.printerStatus.printerId, set: values });
     if (prev && (prev.alertKey ?? null) !== key) await sendWebhook(p, s, key, prev.alertKey ?? null);
+    // Device identity (printer-uuid, MACs) for legacy queue matching on PCs: once a day per printer.
+    if (s.online && identityDue(p, now)) {
+      await refreshIdentity(p).catch((e) => console.warn(`[spoolfree] identity of ${p.name}: ${(e as Error).message}`));
+    }
   });
   return printers.length;
 }

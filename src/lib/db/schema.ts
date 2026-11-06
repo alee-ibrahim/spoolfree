@@ -55,6 +55,15 @@ export const printers = pgTable(
     legacyShares: jsonb("legacy_shares").$type<string[]>().notNull().default([]),
     /** Default duplex for the PC queue (agents run Set-PrintConfiguration -DuplexingMode). */
     defaultSides: text("default_sides").$type<DefaultSides>().notNull().default("auto"),
+    /**
+     * Device identity used by agents to recognise legacy queues for this printer: the IPP printer-uuid
+     * (WSD/IPP ports carry it) and MAC addresses (SNMP ifPhysAddress; Brother: the printer-uuid node), which
+     * Brother-style default host names embed (BRN/BRW + MAC). Filled by Test and the poller; reset on an
+     * endpoint change.
+     */
+    deviceUuid: text("device_uuid"),
+    macAddresses: jsonb("mac_addresses").$type<string[]>().notNull().default([]),
+    identityCheckedAt: timestamp("identity_checked_at", { withTimezone: true }),
     lastTestAt: timestamp("last_test_at", { withTimezone: true }),
     lastTest: jsonb("last_test").$type<DriverlessCheck & { error?: string | null }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

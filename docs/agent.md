@@ -24,12 +24,47 @@ It only changes queues it created. Each one is recorded under `HKLM:\SOFTWARE\Sp
 
 For moving PCs off an old print server or hand-installed queues. It is set per printer: **off** (the default), **dry-run** or **on**.
 
-**What counts as the same printer.** The agent matches non-Spoolfree queues against the printer's host name and its resolved IP addresses:
+**What counts as the same printer.** The agent matches non-Spoolfree queues against the printer's host name, its
+resolved IP addresses and, from 0.4.2, the device identity the server sends in the manifest (`deviceUuid`: the IPP
+`printer-uuid`; `macAddresses`):
 
 - a Standard TCP/IP port whose host address, or what it resolves to, is the printer's;
 - an IPP or URL port (`http`, `https`, `ipp`, `ipps`) for the same host;
-- a WSD port, but only when the device's address can be read from the WSD port's registry data. Otherwise it is left alone;
+- a WSD port, or an IPP port of the WSD port monitor (what `Add-Printer -IppURL` and Windows' own IPP discovery
+  create), when either
+  - the device UUID the port stores (`HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\WSD Port\Ports\<port>`,
+    value `Printer UUID`) is the printer's `printer-uuid`, or
+  - the address Plug and Play recorded for that device UUID is the printer's: `LocationInformation` and the PnP-X
+    address/URL properties of `SWD\DAFWSDProvider\*` and `SWD\IPP\*` devices (registry and `Get-PnpDeviceProperty`).
+    A device's UUIDs are taken from its instance id and container id only; its addresses are compared as found
+    (IP literals and URL hosts), without DNS lookups.
+
+  A WSD port whose device cannot be identified either way is left alone;
+- a TCP/IP or IPP port whose host name is a default name that embeds one of the printer's MAC addresses: `BRN<mac>`,
+  `BRW<mac>` (Brother wired/wireless) or the bare MAC, 12 hex digits, any case, optionally ending in `.local`. These names
+  are often not in DNS. Nothing else matches: no other prefixes or suffixes, no other domains, no partial MACs;
 - a `\\server\share` connection, when the server is one of the configured legacy print servers (a short name and an FQDN are treated as equal) and the share is listed for the printer.
+
+**Where the identity comes from.** **Test** in the UI and the status poller (once a day per printer, while it is
+online) read the printer's IPP `printer-uuid` and its SNMP `ifPhysAddress` values (IF-MIB, community
+`SNMP_COMMUNITY`). For Brother models the MAC is also taken from the node field of the version-1 `printer-uuid`
+(`e3248000-80ce-11db-8000-<mac>`). Failed reads keep the stored values; zero, broadcast and multicast MACs are ignored.
+Changing a printer's host, port, path or TLS (edit, **Replace** or the bulk CLI) clears the identity until it is read
+again. Until the server knows the identity, only address matching applies, so run **Test** after adding a printer.
+
+**Queues of another Spoolfree server.** From 0.4.2 a queue's comment names the server that created it:
+`Managed by Spoolfree [<printer id> rev <n> server <server id>]`, where the server id is the first 16 hex digits of the
+SHA-256 of the pinned manifest public key (the `keyId` the server shows). The agent rewrites older comments of its own
+queues to this form at the next sync. A queue with a Spoolfree comment counts as legacy, and can be taken over like any
+other queue for the same device, only when it belongs to a **different** server:
+
+- its comment names another server id; or
+- its comment has no server id (agents before 0.4.2) and its printer id is not one of this server's printers (the
+  manifest lists them all in `serverPrinterIds`).
+
+Queues of this server are never legacy: a queue with this server's id, with a printer id this server knows, or with an
+unreadable comment is left alone, and so is everything when the agent has no pinned key. Another server's queue with
+the printer's own name is taken over too; a hand-made queue with that name is still reported as a conflict.
 
 **Never touched:**
 
@@ -39,13 +74,23 @@ For moving PCs off an old print server or hand-installed queues. It is set per p
 - queues whose device cannot be identified;
 - Spoolfree's own queues.
 
-**Order.** Matching queues are removed before the Spoolfree queue is created, because Windows allows only one IPP queue per device.
+**Order.** Matching queues are removed before the Spoolfree queue is created, because Windows allows only one WSD/IPP queue per device.
+
+**Blocked queue creation.** When creating or re-creating a queue fails with "printer already exists" or "WSD or IPP
+print device was not found", the agent looks for a queue that holds the device, using the rules above whatever the
+printer's takeover mode, and reports it, e.g. `Finance Laser: Add blocked by existing WSD queue 'Brother (Copy 1)'
+(WSD port device uuid ...): enable legacy takeover for this printer (dry-run first, then on) or remove that queue.
+Windows said: ...`. In dry-run the hint is to switch takeover on; in on mode, to check the legacy report. Without a
+matching queue the original Windows error is reported.
 
 **Dry-run** removes nothing. Each match is reported as `would-remove`, and the Agents view shows it, so you can check the list before switching to **on**.
 
 **Per-user connections.** `\\server\share` connections added by a user are invisible to SYSTEM. The sync task publishes the rules in `HKLM:\SOFTWARE\Spoolfree\Public` (value `Takeover`). The *Spoolfree User Default* logon task then matches the user's own connections at the next logon and removes them in **on** mode. It writes its results to `%ProgramData%\Spoolfree\UserTakeover\<SID>.json`. Users can create files in that folder but cannot read or change other users' files. The next sync report includes the results, with the scope taken from the file's owner.
 
 **Default printer.** If a user's default printer was a removed queue, the logon task makes the replacing Spoolfree queue the default. The machine keeps a map from removed queue to Spoolfree queue for this.
+
+**Manifest fields** (0.4.2): `printers[].deviceUuid` (lower-case UUID or `null`), `printers[].macAddresses` (12 lower-case
+hex digits each), `serverPrinterIds` (every printer id on the server). Older agents ignore them.
 
 **Report.** Each match is recorded in the agent report's `legacy` field: `{ printer, queue, reason, action: removed | would-remove | failed, scope: machine | user:<DOMAIN\user>, error? }`, at most 200 entries. Matches are also written to `sync.log`. `Invoke-SpoolfreeSync.ps1 -WhatIf` removes nothing.
 

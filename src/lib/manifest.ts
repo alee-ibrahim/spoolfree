@@ -1,4 +1,5 @@
 import type { KeyObject } from "node:crypto";
+import { normalizeMac, normalizeUuid } from "./identity";
 import { printerUri } from "./ipp/interpret";
 import type { Resolution } from "./resolve";
 import { keyId, publicKeyRaw, randomToken, signBytes } from "./crypto/signing";
@@ -18,6 +19,8 @@ export interface ManifestPrinterInput {
   legacyTakeover?: "off" | "dry-run" | "on";
   legacyShares?: string[];
   defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
+  deviceUuid?: string | null;
+  macAddresses?: string[];
 }
 
 export interface ManifestPrinter {
@@ -38,6 +41,12 @@ export interface ManifestPrinter {
   legacy?: { mode: "off" | "dry-run" | "on"; shares: string[] };
   /** Default duplex for the queue (agents 0.4+): auto | one-sided | two-sided-long-edge | two-sided-short-edge. */
   defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
+  /**
+   * Device identity for legacy queue takeover (agents 0.4.2+): the IPP printer-uuid (bare, lower-case), which
+   * WSD/IPP ports store, and MAC addresses (12 lower-case hex digits), which Brother default host names embed.
+   */
+  deviceUuid?: string | null;
+  macAddresses?: string[];
 }
 
 export interface ManifestPayload {
@@ -51,6 +60,11 @@ export interface ManifestPayload {
   syncIntervalMinutes: number;
   /** Print servers whose \\server\share connections count as legacy queues (LEGACY_PRINT_SERVERS). */
   legacyPrintServers?: string[];
+  /**
+   * Ids of every printer on this server (agents 0.4.2+). A queue with a "Managed by Spoolfree" comment whose
+   * printer id is not in this list, and that carries no server key, was created by another Spoolfree server.
+   */
+  serverPrinterIds?: string[];
 }
 
 export interface SignedManifest {
@@ -90,6 +104,8 @@ export function buildManifest(args: {
       revision: p.revision,
       isDefault: r.printerId === args.resolution.defaultPrinterId,
       defaultSides: p.defaultSides ?? "auto",
+      deviceUuid: normalizeUuid(p.deviceUuid ?? null),
+      macAddresses: [...new Set((p.macAddresses ?? []).map((m) => normalizeMac(m)).filter((m): m is string => m !== null))].sort(),
       legacy: { mode: p.legacyTakeover ?? "off", shares: p.legacyTakeover && p.legacyTakeover !== "off" ? (p.legacyShares ?? []) : [] },
     });
   }
@@ -104,6 +120,7 @@ export function buildManifest(args: {
     defaultPrinter: def,
     syncIntervalMinutes: args.syncIntervalMinutes ?? 15,
     legacyPrintServers: args.legacyPrintServers ?? [],
+    serverPrinterIds: [...args.printers.keys()].sort(),
   };
 }
 
