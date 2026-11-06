@@ -22,7 +22,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Root = $PSScriptRoot,
+    # Default: this script's folder. (Not $PSScriptRoot as the default: Windows PowerShell 5.1 leaves it empty there.)
+    [string]$Root,
     [string]$StateKey = 'HKLM:\SOFTWARE\Spoolfree\Update',
     [string]$LogPath = (Join-Path $env:ProgramData 'Spoolfree\Logs\sync.log'),
     [int]$TimeoutMinutes = 12
@@ -170,5 +171,12 @@ function Invoke-SpoolfreeLauncher {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    exit (Invoke-SpoolfreeLauncher -Root $Root -Key $StateKey -LogFile $LogPath -TimeoutMinutes $TimeoutMinutes)
+    try {
+        if (-not $Root) { $Root = Split-Path -Parent $MyInvocation.MyCommand.Path }
+        $code = Invoke-SpoolfreeLauncher -Root $Root -Key $StateKey -LogFile $LogPath -TimeoutMinutes $TimeoutMinutes
+        exit ([int]$code)
+    } catch {
+        Write-LauncherLog $LogPath "failed: $($_.Exception.Message)"
+        exit 10
+    }
 }

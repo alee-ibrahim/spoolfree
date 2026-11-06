@@ -253,6 +253,16 @@ Describe 'Launcher: confirm and roll back' {
         (Get-LauncherState $key)['LastState'] | Should -BeNullOrEmpty
         Get-Content $runs | Should -Be @('old')
     }
+    It 'runs as a script (powershell -File, no -Root): finds current\ next to itself and returns the sync exit code' {
+        # The scheduled task runs it this way; Windows PowerShell 5.1 leaves $PSScriptRoot empty in param defaults.
+        Copy-Item $launcher (Join-Path $lr 'Start-SpoolfreeSync.ps1')
+        Write-Agent (Join-Path $lr 'current') '0.4.3' "Add-Content -Path '$runs' -Value ran; exit 1"
+        Set-LauncherState $key @{ PendingVersion = $null; PendingSha256 = $null; FromVersion = $null; Failures = $null }
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $lr 'Start-SpoolfreeSync.ps1') -StateKey $key -LogPath $log
+        $LASTEXITCODE | Should -Be 1
+        Get-Content $runs | Should -Be @('ran')
+    }
     It 'reports a failed update when there is nothing to roll back to' {
         Remove-Item (Join-Path $lr 'previous') -Recurse -Force
         Write-Agent (Join-Path $lr 'current') '9.9.9' 'exit 9'
