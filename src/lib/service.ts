@@ -4,6 +4,7 @@ import { db, schema } from "./db";
 import { baseDn, directory, type ComputerObject } from "./directory";
 import { buildManifest, type ManifestPrinterInput } from "./manifest";
 import { resolvePrinters, type Policy } from "./resolve";
+import { agentUpdateForManifest } from "./agent-update";
 import { config } from "./config";
 
 export async function audit(
@@ -75,6 +76,7 @@ export async function manifestForComputer(computer: ComputerObject) {
     ttlHours: config().MANIFEST_TTL_HOURS,
     legacyPrintServers: config().LEGACY_PRINT_SERVERS,
     syncIntervalMinutes: config().AGENT_SYNC_INTERVAL_MINUTES,
+    agentUpdate: agentUpdateForManifest(),
   });
 }
 

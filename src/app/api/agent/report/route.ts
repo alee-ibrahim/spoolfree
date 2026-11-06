@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { AgentAuthError, authenticateAgent } from "@/lib/agent-auth";
 import { db, schema } from "@/lib/db";
+import { AGENT_UPDATE_STATES } from "@/lib/db/schema";
 
 const list = z.array(z.string().max(512)).max(200).optional();
 
@@ -33,6 +34,14 @@ const Report = z.object({
     .optional()
     .refine((v) => !v || Object.keys(v).length <= 200),
   method: z.string().max(32).optional(),
+  update: z
+    .object({
+      state: z.enum(AGENT_UPDATE_STATES),
+      target: z.string().max(32).optional(),
+      error: z.string().max(1000).optional(),
+      at: z.string().max(40).optional(),
+    })
+    .optional(),
   durationMs: z.number().int().nonnegative().optional(),
 });
 

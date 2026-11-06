@@ -30,7 +30,7 @@ Run `pnpm keygen` once:
 
 ## 4. GPO setup (agent)
 
-1. Copy the files from `agent/` (`Install-SpoolfreeAgent.ps1`, `Invoke-SpoolfreeSync.ps1`, `Set-SpoolfreeUserDefault.ps1`, `Spoolfree.Agent.psm1`) to a share that computers can read, for example `\\example.org\NETLOGON\spoolfree\`.
+1. Copy the files from `agent/` (`Install-SpoolfreeAgent.ps1`, `Start-SpoolfreeSync.ps1`, `Invoke-SpoolfreeSync.ps1`, `Set-SpoolfreeUserDefault.ps1`, `Spoolfree.Agent.psm1`) to a share that computers can read, for example `\\example.org\NETLOGON\spoolfree\`.
 2. Write the enrollment token to a file on a **restricted** share, for example `\\fs01.example.org\spoolfree$\enroll.token`:
    - share and NTFS permissions: **Domain Computers: Read**, Domain Admins: Full. **Not** Authenticated Users or Domain Users.
    - **Do not use SYSVOL or NETLOGON for the token.** Every user can read those.
@@ -42,7 +42,9 @@ Run `pnpm keygen` once:
    - Sync log: `C:\ProgramData\Spoolfree\Logs\sync.log`.
    - Scheduled tasks: under `\Spoolfree\`.
 
-The installer is idempotent, so leaving it as a startup script is fine. It also updates the agent files when you update the share.
+The installer is idempotent, so leaving it as a startup script is fine. It installs the agent in `%ProgramFiles%\Spoolfree\current` and the launcher `Start-SpoolfreeSync.ps1` next to it.
+
+**Updating agents.** From 0.4.3 agents update themselves from the server (see [agent.md](agent.md#self-update)), so a release only needs the server upgraded. The share still matters for new PCs and for the launcher. The installer installs the share's version when it is newer than the PC's, and never replaces a newer version that the PC installed itself (unless you pass `-Force`). PCs on 0.4.2 or older need the 0.4.3 files on the share and one installer run: the next startup, or the GPO's immediate task again.
 
 ## AD sync sidecar (Kerberos)
 

@@ -94,6 +94,7 @@ flowchart LR
 3. The server looks the PC up in AD by `objectGUID` (the OU always comes from AD, never the client), resolves inheritance and overrides, and signs the manifest with **Ed25519**.
 4. The agent checks the signature against its pinned public key, the computer identity and the expiry.
 5. It creates, re-points or removes the queues it owns, records the default printer, and reports back.
+6. When the server ships a different agent version, the agent downloads it, checks its hash and signature against the same pinned key, and swaps it in. The new version runs at the next sync and is rolled back if it fails twice.
 
 ## Quick start
 
@@ -159,6 +160,9 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `AGENT_SYNC_INTERVAL_MINUTES` | `15` | How often agents sync (5-240); agents update their own task, no GPO change. |
 | `MANIFEST_TTL_HOURS` | `24` | Manifest validity (replay protection). |
 | `AGENT_STALE_HOURS` | `26` | Agents without a report for this long show as stale. |
+| `AGENT_SELF_UPDATE` | `1` | Offer the agent scripts in the image to agents (0.4.3+), which install them themselves. See [docs/agent.md](docs/agent.md#self-update). |
+| `AGENT_ALLOW_DOWNGRADE` | `0` | Let agents install an older bundled version than they run (for rolling back a release). |
+| `AGENT_BUNDLE_DIR` | `./agent` | Directory with the agent scripts served as the bundle (`/app/agent` in the image). |
 | `POLLER_ENABLED` | `1` | Run the status poller. |
 | `POLL_INTERVAL_SECONDS` | `120` | Poll interval. |
 | `POLL_TIMEOUT_MS` | `5000` | Per-printer timeout. |

@@ -10,7 +10,7 @@ Please report vulnerabilities privately using GitHub's **"Report a vulnerability
 
 | Asset | Where | Impact if compromised |
 |---|---|---|
-| Manifest signing key (Ed25519 seed) | Server secret `MANIFEST_SIGNING_KEY` | Attacker could make agents install printer queues pointing at an attacker-controlled IPP endpoint. Jobs sent there could be read. |
+| Manifest signing key (Ed25519 seed) | Server secret `MANIFEST_SIGNING_KEY` | Attacker could make agents install printer queues pointing at an attacker-controlled IPP endpoint, and jobs sent there could be read. **From 0.4.3 the attacker can also push agent code that runs as SYSTEM on every enrolled PC** (self-update). |
 | Enrollment token | Server secret + restricted share | Attacker can enroll as any **existing, enabled** computer and read that computer's printer list. |
 | Per-machine token | PC registry, DPAPI LocalMachine | Attacker can read that one computer's printer list and file fake reports for it. |
 | Admin session | Browser cookie (Auth.js JWT, encrypted with `AUTH_SECRET`) | Full control of printer policy. |
@@ -40,6 +40,21 @@ Please report vulnerabilities privately using GitHub's **"Report a vulnerability
   - `expiresAt` has passed (default TTL 24 h). This limits replay of old manifests.
 - Compromising TLS or the network therefore cannot redirect printers. Only the signing key can.
 
+**Agent self-update (0.4.3+)**
+- **Threat model, plainly:** whoever can sign with the manifest key can run code as SYSTEM on every enrolled PC. In practice that means the key itself, or anyone who controls the Spoolfree server or its image, because the server holds the key. This is the same trust the manifest already needs, and the same as the GPO share the agent was installed from. Treat the server, its image and `MANIFEST_SIGNING_KEY` like a software-deployment system, not like a printer list.
+- Agents accept a bundle only if all of these hold:
+  - its SHA-256 matches the signed manifest;
+  - a detached Ed25519 signature over the exact bundle bytes verifies with the **pinned** key;
+  - its file names come from a fixed list of four (no paths);
+  - every file matches its hash;
+  - its version is the one offered.
+- An unsigned or mismatched bundle is never installed, and neither is a downgrade, unless the signed manifest sets `agentAllowDowngrade` (`AGENT_ALLOW_DOWNGRADE`).
+- The bundle is downloaded with the machine token. TLS or a network attacker can at most block an update, not change it.
+- Installing stages the files and then swaps folders. The staged folder must not be writable by anyone but SYSTEM and Administrators, or the swap is refused.
+- A launcher that self-update never replaces rolls back a version that fails twice, and never re-installs that bundle on the PC.
+- `AGENT_SELF_UPDATE=0` turns it off (the manifest stops offering a bundle and `/api/agent/bundle` answers 404). That does not reduce what a key holder could do, because the key also controls the printers. It only stops updates.
+- The bundle and the manifest are signed with one key. They cannot be swapped for each other: a manifest needs `schema: 1` and this PC's `objectGuid`, and a bundle needs `type: "spoolfree-agent-bundle"`.
+
 **Agent authentication (agent → server)**
 - *Enrollment.* The GPO startup script, running as SYSTEM, reads a shared enrollment token from a file on a share readable only by Domain Computers. The token is never on the command line, because GPO script parameters are readable by every user. The server then:
   - checks the token (constant-time);
@@ -60,7 +75,7 @@ Please report vulnerabilities privately using GitHub's **"Report a vulnerability
 | Ordinary domain user on a PC | See which printers exist (as today) | Read the machine token (DPAPI + ACL), read the enrollment token (share ACL), change queues |
 | Local admin on one PC | Read that PC's machine token and the enrollment token (it runs as the computer account); enroll as **other** computers and read their printer lists; file fake reports | Change any PC's printers (no signing key); affect other PCs' queues |
 | Network attacker (MITM) | Block syncs (PCs keep their current queues) | Inject printers (signature) |
-| Holder of the signing key | Redirect printing anywhere | (rotate the key: see below) |
+| Holder of the signing key (or of the server) | Redirect printing anywhere; from 0.4.3 run code as SYSTEM on enrolled PCs (self-update) | (rotate the key: see below) |
 
 Printer lists are low-sensitivity, so the residual risk of the shared enrollment token is accepted for v0.1. A planned stronger mode binds enrollment to the computer account itself, either with Kerberos/Negotiate (the agent authenticates as `COMPUTER$`) or with AD CS machine certificates over mutual TLS. Either would remove the shared secret.
 
@@ -80,5 +95,5 @@ Printer lists are low-sensitivity, so the residual risk of the shared enrollment
 ### Key rotation
 
 1. `pnpm keygen`, and deploy the new `MANIFEST_SIGNING_KEY`.
-2. Update the GPO parameters with the new public key and add `-Force` for one boot cycle. (v0.1 does not support two keys at once, so expect a short window of rejected manifests. PCs keep their existing queues during it.)
+2. Update the GPO parameters with the new public key and add `-Force` for one boot cycle. (`-Force` also re-installs the share's agent files over a self-updated version; put the current release's files on the share first.) (v0.1 does not support two keys at once, so expect a short window of rejected manifests. PCs keep their existing queues during it.)
 3. Rotating the enrollment token only needs the server secret and the share file updated. Already-enrolled PCs are unaffected.

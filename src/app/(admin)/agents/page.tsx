@@ -6,6 +6,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { isAgentOutdated } from "@/lib/agent-bundle";
+import { currentAgentBundle } from "@/lib/agent-update";
 import { agentStaleCutoff, config } from "@/lib/config";
 import { db, schema } from "@/lib/db";
 import { shortDn, timeAgo } from "@/lib/format";
@@ -21,6 +23,10 @@ export default async function AgentsPage() {
   const staleBefore = agentStaleCutoff();
   const key = signingKeyInfo();
   const publicUrl = config().PUBLIC_URL;
+  const bundle = currentAgentBundle();
+  const latest = bundle?.version ?? null;
+  const selfUpdate = config().AGENT_SELF_UPDATE;
+  const outdatedCount = agents.filter((a) => !a.revokedAt && isAgentOutdated(a.lastReport?.agentVersion, latest)).length;
 
   return (
     <>
@@ -122,7 +128,31 @@ export default async function AgentsPage() {
                       <TableCell className="text-xs text-muted-foreground">
                         {r?.agentVersion ? `v${r.agentVersion}` : "—"}
                         {r?.method ? ` · ${r.method}` : ""}
+                        {!a.revokedAt && isAgentOutdated(r?.agentVersion, latest) && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge variant="outline" className="ml-1">
+                                Outdated
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {selfUpdate ? `The server ships v${latest}; the agent updates itself at its next sync.` : `The server ships v${latest}; self-update is off (AGENT_SELF_UPDATE).`}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
                         <div>{r?.osVersion ?? ""}</div>
+                        {r?.update && r.update.state === "pending" && <div>Update to v{r.update.target} installed, runs at the next sync</div>}
+                        {r?.update && (r.update.state === "rolled-back" || r.update.state === "failed") && (
+                          <div className="text-destructive" title={r.update.error}>
+                            {r.update.state === "rolled-back" ? `v${r.update.target} rolled back` : `Update to v${r.update.target} failed`}
+                            {r.update.error ? `: ${r.update.error}` : ""}
+                          </div>
+                        )}
+                        {r?.update?.state === "skipped" && (
+                          <div className="text-amber-700 dark:text-amber-500" title={r.update.error}>
+                            Update to v{r.update.target} skipped{r.update.error ? `: ${r.update.error}` : ""}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="pr-4">{!a.revokedAt && <RevokeButton id={a.id} name={a.computerName} />}</TableCell>
                     </TableRow>
@@ -146,6 +176,23 @@ export default async function AgentsPage() {
                 <div>
                   <span className="text-muted-foreground">Key ID </span>
                   <code className="font-mono">{key.keyId}</code>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Agent bundle </span>
+                  {bundle ? (
+                    <>
+                      <code className="font-mono">v{bundle.version}</code>
+                      <span className="text-muted-foreground"> · sha256 </span>
+                      <code className="font-mono">{bundle.sha256.slice(0, 16)}</code>
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · self-update {selfUpdate ? "on" : "off"}
+                        {outdatedCount ? ` · ${outdatedCount} outdated agent${outdatedCount > 1 ? "s" : ""}` : ""}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-muted-foreground">not available (agent scripts not found in AGENT_BUNDLE_DIR)</span>
+                  )}
                 </div>
                 <pre className="overflow-x-auto rounded-lg bg-muted p-4 text-xs">{`powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install-SpoolfreeAgent.ps1 \`
   -ServerUrl "${publicUrl}" \`

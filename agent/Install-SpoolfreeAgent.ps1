@@ -5,7 +5,10 @@
     computer startup script (it is idempotent and quick when nothing changed).
 
 .DESCRIPTION
-    1. Copies the agent files to %ProgramFiles%\Spoolfree.
+    1. Installs the agent files in %ProgramFiles%\Spoolfree\current (staged, then swapped in; the replaced
+       version is kept in previous\) and the launcher Start-SpoolfreeSync.ps1 in %ProgramFiles%\Spoolfree.
+       A newer agent that the PC installed by self-update is kept: this script never downgrades it (unless -Force).
+       Files from agents before 0.4.3 (directly in %ProgramFiles%\Spoolfree) are removed.
     2. Stores the server URL and pins the manifest public key in
        HKLM:\SOFTWARE\Spoolfree (ACL: SYSTEM and Administrators only).
     3. If this PC has no machine token yet, reads the shared enrollment token
@@ -44,7 +47,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $source = $PSScriptRoot
-$files = 'Spoolfree.Agent.psm1', 'Invoke-SpoolfreeSync.ps1', 'Set-SpoolfreeUserDefault.ps1'
+$files = 'Spoolfree.Agent.psm1', 'Invoke-SpoolfreeSync.ps1', 'Set-SpoolfreeUserDefault.ps1', 'Install-SpoolfreeAgent.ps1'
+$launcherName = 'Start-SpoolfreeSync.ps1'
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -59,22 +63,53 @@ try {
 } catch { throw 'PublicKey must be the base64 Ed25519 public key from `pnpm keygen` (32 bytes).' }
 
 # 1. Files ---------------------------------------------------------------------
-if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
-foreach ($f in $files) {
-    $src = Join-Path $source $f
-    $dst = Join-Path $InstallDir $f
-    if (-not (Test-Path $dst) -or (Get-FileHash $src).Hash -ne (Get-FileHash $dst).Hash) {
-        Copy-Item -Path $src -Destination $dst -Force
-    }
-}
-Import-Module (Join-Path $InstallDir 'Spoolfree.Agent.psm1') -Force
-
-# 2. Configuration ---------------------------------------------------------------
+# This installer's own module (from the share) does the install; the sync later uses current\.
+Import-Module (Join-Path $source 'Spoolfree.Agent.psm1') -Force
+# Configuration key first (SYSTEM and Administrators only), before anything creates its subkeys.
 $reg = 'HKLM:\SOFTWARE\Spoolfree'
 if (-not (Test-Path $reg)) {
     New-Item -Path $reg -Force | Out-Null
     Set-SpoolfreeRegistryAcl -Path $reg
 }
+if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    Set-SpoolfreeInstallAcl -Path $InstallDir
+} elseif (-not (Test-SpoolfreeInstallAcl -Path $InstallDir)) {
+    Set-SpoolfreeInstallAcl -Path $InstallDir
+}
+$currentDir = Join-Path $InstallDir 'current'
+$sourceVersion = Get-SpoolfreeFileAgentVersion -Path (Join-Path $source 'Spoolfree.Agent.psm1')
+$installedVersion = Get-SpoolfreeFileAgentVersion -Path (Join-Path $currentDir 'Spoolfree.Agent.psm1')
+$install = $Force -or -not $installedVersion
+if (-not $install) {
+    $cmp = ([version]$sourceVersion).CompareTo([version]$installedVersion)
+    $missing = @($files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $currentDir $_)) })
+    $install = $cmp -gt 0 -or ($cmp -eq 0 -and $missing.Count -gt 0)
+    if ($cmp -lt 0) { Write-Output "Keeping agent $installedVersion (installed by self-update; this installer has $sourceVersion)." }
+}
+if ($install) {
+    $bytes = [ordered]@{}
+    foreach ($f in $files) { $bytes[$f] = [IO.File]::ReadAllBytes((Join-Path $source $f)) }
+    try {
+        Install-SpoolfreeAgentFiles -Root $InstallDir -Files $bytes | Out-Null
+        # A version installed from the GPO share is not a pending self-update.
+        Set-SpoolfreeUpdateState -Values @{ PendingVersion = $null; PendingSha256 = $null; FromVersion = $null; Failures = $null; ConfirmedVersion = $null }
+    } catch {
+        if (-not $installedVersion) { throw }
+        Write-Warning "Installing agent $sourceVersion failed; keeping $($installedVersion): $($_.Exception.Message)"
+    }
+}
+$launcherSrc = Join-Path $source $launcherName
+$launcher = Join-Path $InstallDir $launcherName
+if (-not (Test-Path $launcher) -or (Get-FileHash $launcherSrc).Hash -ne (Get-FileHash $launcher).Hash) {
+    Copy-Item -Path $launcherSrc -Destination $launcher -Force
+}
+# Agents before 0.4.3 ran from files directly in the install directory.
+foreach ($f in 'Spoolfree.Agent.psm1', 'Invoke-SpoolfreeSync.ps1', 'Set-SpoolfreeUserDefault.ps1') {
+    Remove-Item -LiteralPath (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
+}
+
+# 2. Configuration ---------------------------------------------------------------
 $current = Get-ItemProperty -Path $reg
 New-ItemProperty -Path $reg -Name ServerUrl -Value $ServerUrl.TrimEnd('/') -PropertyType String -Force | Out-Null
 if (-not $current.PSObject.Properties['PublicKey'] -or $Force) {
@@ -109,20 +144,20 @@ if ($needsEnroll) {
 
 # 4. Scheduled tasks ------------------------------------------------------------------
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$syncScript = Join-Path $InstallDir 'Invoke-SpoolfreeSync.ps1'
-$syncAction = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$syncScript`""
+# The task runs the launcher, which runs current\Invoke-SpoolfreeSync.ps1 and rolls back a failing self-update.
+$syncAction = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcher`""
 # The server's AGENT_SYNC_INTERVAL_MINUTES (applied by the sync, stored in the registry) wins over the
 # -SyncIntervalMinutes parameter, so re-running this script at every startup does not undo it.
 $serverInterval = Get-ItemProperty -Path $reg -Name SyncIntervalMinutes -ErrorAction SilentlyContinue
 $interval = if ($serverInterval) { [int]$serverInterval.SyncIntervalMinutes } else { $SyncIntervalMinutes }
 $triggers = New-SpoolfreeSyncTriggers -IntervalMinutes ((Get-SpoolfreeSyncSchedule $interval).IntervalMinutes)
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $system = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName 'Spoolfree Sync' -TaskPath '\Spoolfree\' -Action $syncAction `
     -Trigger $triggers -Settings $settings -Principal $system -Force | Out-Null
 
-$userScript = Join-Path $InstallDir 'Set-SpoolfreeUserDefault.ps1'
+$userScript = Join-Path $currentDir 'Set-SpoolfreeUserDefault.ps1'
 $userAction = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$userScript`""
 $logon = New-ScheduledTaskTrigger -AtLogOn
 $logon.Delay = 'PT1M'
@@ -132,4 +167,4 @@ Register-ScheduledTask -TaskName 'Spoolfree User Default' -TaskPath '\Spoolfree\
     -Principal $users -Force | Out-Null
 
 if ($needsEnroll) { Start-ScheduledTask -TaskName 'Spoolfree Sync' -TaskPath '\Spoolfree\' }
-Write-Output "Spoolfree agent $(Get-SpoolfreeAgentVersion) installed for $($identity.Name)."
+Write-Output "Spoolfree agent $(Get-SpoolfreeFileAgentVersion -Path (Join-Path $currentDir 'Spoolfree.Agent.psm1')) installed for $($identity.Name)."

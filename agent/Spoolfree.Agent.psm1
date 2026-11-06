@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.4.2'
+$script:AgentVersion = '0.4.3'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -1262,6 +1262,329 @@ function Get-SpoolfreeUserDefaultQueue {
     $parts = ([string]$v.Device).Split(',')
     if ($parts.Count -ge 3) { return ($parts[0..($parts.Count - 3)] -join ',') }
     return $parts[0]
+}
+
+# ---------------------------------------------------------------------------
+# Self-update (0.4.3+): signed agent bundle from /api/agent/bundle.
+# Layout: <InstallDir>\Start-SpoolfreeSync.ps1 (launcher, installer-managed),
+#         <InstallDir>\current (running version), \previous (rollback copy), \staging (transient).
+# ---------------------------------------------------------------------------
+
+$script:UpdateRegistry = 'HKLM:\SOFTWARE\Spoolfree\Update'
+$script:BundleFiles = @('Spoolfree.Agent.psm1', 'Invoke-SpoolfreeSync.ps1', 'Set-SpoolfreeUserDefault.ps1', 'Install-SpoolfreeAgent.ps1')
+$script:BundleRequired = @('Spoolfree.Agent.psm1', 'Invoke-SpoolfreeSync.ps1', 'Set-SpoolfreeUserDefault.ps1')
+$script:BundleMaxBytes = 4MB
+# May write to the install directory: SYSTEM, Administrators, TrustedInstaller, CREATOR OWNER (inherit-only).
+$script:InstallWriters = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0')
+
+function Get-SpoolfreeSha256 {
+    <# Pure: lower-case hex SHA-256 of bytes. #>
+    param([AllowEmptyCollection()][byte[]]$Bytes)
+    if ($null -eq $Bytes) { $Bytes = [byte[]]@() }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return (-join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') })) } finally { $sha.Dispose() }
+}
+
+function ConvertTo-SpoolfreeVersion {
+    <# Pure: 'x.y.z' -> [version]; anything else -> $null. #>
+    param($Value)
+    $s = [string]$Value
+    if ($s -notmatch '^\d{1,5}\.\d{1,5}\.\d{1,5}$') { return $null }
+    return [version]$s
+}
+
+function Get-SpoolfreeFileAgentVersion {
+    <# The version a Spoolfree.Agent.psm1 declares ($script:AgentVersion = 'x.y.z'), from -Path or -Text; $null if none. #>
+    param([string]$Path, [string]$Text)
+    if ($Path) {
+        if (-not (Test-Path -LiteralPath $Path)) { return $null }
+        $Text = [IO.File]::ReadAllText($Path)
+    }
+    $m = [regex]::Match([string]$Text, '(?m)^\$script:AgentVersion\s*=\s*''(\d+\.\d+\.\d+)''')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+
+function Get-SpoolfreeUpdateDecision {
+    <#
+    .SYNOPSIS
+        Pure: whether to install the agent the manifest offers. Action: none | update | skip, with Version and Reason.
+        Never a downgrade unless the manifest sets agentAllowDowngrade = true; never a bundle that was rolled back here.
+    #>
+    param(
+        [Parameter(Mandatory)]$Manifest,
+        [Parameter(Mandatory)][string]$CurrentVersion,
+        [string]$BadSha256
+    )
+    $target = [string](Get-SpoolfreeProperty $Manifest 'agentVersion')
+    $bundle = Get-SpoolfreeProperty $Manifest 'agentBundle'
+    $out = { param($a, $r) [pscustomobject]@{ Action = $a; Version = $target; Reason = $r } }
+    if (-not $target -or $null -eq $bundle) { return (& $out 'none' 'the server offers no agent bundle') }
+    $t = ConvertTo-SpoolfreeVersion $target
+    if (-not $t) { return (& $out 'skip' "the server offers an invalid agent version '$target'") }
+    $sha = ([string](Get-SpoolfreeProperty $bundle 'sha256')).ToLowerInvariant()
+    if ($sha -notmatch '^[0-9a-f]{64}$') { return (& $out 'skip' 'the manifest has no valid bundle hash') }
+    $c = ConvertTo-SpoolfreeVersion $CurrentVersion
+    if ($c -and $t -eq $c) { return (& $out 'none' 'up to date') }
+    $allow = Get-SpoolfreeProperty $Manifest 'agentAllowDowngrade'
+    if ($c -and $t -lt $c -and -not ($allow -is [bool] -and $allow)) {
+        return (& $out 'skip' "downgrade from $CurrentVersion to $target is not allowed")
+    }
+    if ($BadSha256 -and $sha -eq $BadSha256.ToLowerInvariant()) { return (& $out 'skip' "agent $target was rolled back on this PC") }
+    return (& $out 'update' "agent $target is offered (this is $CurrentVersion)")
+}
+
+function Test-SpoolfreeAgentBundle {
+    <#
+    .SYNOPSIS
+        Verifies a downloaded agent bundle and returns its files (ordered name -> bytes). Throws unless the SHA-256
+        matches the signed manifest, the Ed25519 signature over the exact bytes verifies with the pinned key, and the
+        content is a bundle of exactly the offered version with only known file names and matching file hashes.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Sha256,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Signature,
+        [Parameter(Mandatory)][string]$PublicKey,
+        [Parameter(Mandatory)][string]$Version
+    )
+    if ($Bytes.Length -eq 0 -or $Bytes.Length -gt $script:BundleMaxBytes) { throw "Agent bundle has a bad size ($($Bytes.Length) bytes)." }
+    $hash = Get-SpoolfreeSha256 $Bytes
+    if (-not $Sha256 -or $hash -ne $Sha256.ToLowerInvariant()) { throw "Agent bundle hash mismatch (got $hash, the manifest says '$Sha256'). Refusing to install it." }
+    if (-not $Signature -or -not (Test-SpoolfreeSignature -PublicKey $PublicKey -Message $Bytes -Signature $Signature)) {
+        throw 'Agent bundle signature is invalid. Refusing to install it.'
+    }
+    try { $b = [Text.Encoding]::UTF8.GetString($Bytes) | ConvertFrom-Json } catch { throw 'Agent bundle is not valid JSON.' }
+    if ((Get-SpoolfreeProperty $b 'type') -ne 'spoolfree-agent-bundle' -or (Get-SpoolfreeProperty $b 'format') -ne 1) { throw 'Not a Spoolfree agent bundle.' }
+    if ([string](Get-SpoolfreeProperty $b 'version') -ne $Version) { throw "Agent bundle is version '$(Get-SpoolfreeProperty $b 'version')', the manifest offers '$Version'." }
+    $files = [ordered]@{}
+    foreach ($f in @(Get-SpoolfreeProperty $b 'files')) {
+        $name = [string](Get-SpoolfreeProperty $f 'name')
+        if ($script:BundleFiles -cnotcontains $name) { throw "Unexpected file '$name' in the agent bundle." }
+        if ($files.Contains($name)) { throw "Duplicate file '$name' in the agent bundle." }
+        try { $content = [Convert]::FromBase64String([string](Get-SpoolfreeProperty $f 'content')) } catch { throw "Agent bundle file '$name' is not base64." }
+        if ((Get-SpoolfreeSha256 $content) -ne ([string](Get-SpoolfreeProperty $f 'sha256')).ToLowerInvariant()) { throw "Agent bundle file '$name' does not match its hash." }
+        $files[$name] = $content
+    }
+    foreach ($r in $script:BundleRequired) { if (-not $files.Contains($r)) { throw "Agent bundle lacks $r." } }
+    $declared = Get-SpoolfreeFileAgentVersion -Text ([Text.Encoding]::UTF8.GetString($files['Spoolfree.Agent.psm1']))
+    if ($declared -ne $Version) { throw "Agent bundle module declares version '$declared', not '$Version'." }
+    return $files
+}
+
+function Test-SpoolfreeWriteRules {
+    <# Pure: $true when no Allow rule grants write, delete or permission changes to anyone but SYSTEM, Administrators, TrustedInstaller or CREATOR OWNER. #>
+    param([AllowEmptyCollection()]$Rules)
+    $mask = [int64][Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+    $mask = $mask -bor 0x10000000 -bor 0x40000000   # GENERIC_ALL, GENERIC_WRITE (raw, inherit-only ACEs)
+    foreach ($r in @($Rules)) {
+        if ($null -eq $r) { continue }
+        if ([string]$r.AccessControlType -ne 'Allow') { continue }
+        if (([int64]$r.FileSystemRights -band $mask) -eq 0) { continue }
+        $sid = try { $r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { [string]$r.IdentityReference }
+        if ($script:InstallWriters -notcontains $sid) { return $false }
+    }
+    return $true
+}
+
+function Test-SpoolfreeInstallAcl {
+    <# $true when only SYSTEM/Administrators (and TrustedInstaller) can write to the directory or anything in it. #>
+    param([Parameter(Mandatory)][string]$Path)
+    $items = @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue)
+    foreach ($i in $items) {
+        $rules = $i.GetAccessControl('Access').GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+        if (-not (Test-SpoolfreeWriteRules @($rules))) { return $false }
+    }
+    return $true
+}
+
+function Set-SpoolfreeInstallAcl {
+    <# Install directory: SYSTEM and Administrators full control, Users read and execute (the logon task runs as the user); not inherited. #>
+    param([Parameter(Mandatory)][string]$Path)
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($e in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $id = New-Object System.Security.Principal.SecurityIdentifier $e[0]
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, $e[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    (Get-Item -LiteralPath $Path -Force).SetAccessControl($acl)
+}
+
+function Copy-SpoolfreeDirectoryAcl {
+    <# Gives -To the DACL of -From (access rules and protection only; the owner is not touched). #>
+    param([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To)
+    $sddl = (Get-Item -LiteralPath $From -Force).GetAccessControl('Access').GetSecurityDescriptorSddlForm('Access')
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetSecurityDescriptorSddlForm($sddl, 'Access')
+    (Get-Item -LiteralPath $To -Force).SetAccessControl($acl)
+}
+
+function Install-SpoolfreeAgentFiles {
+    <#
+    .SYNOPSIS
+        Installs agent files atomically: writes them to <Root>\staging and checks them, then swaps folders
+        (current -> previous, the rollback copy; staging -> current). The staged folder gets the DACL of the current
+        one (or the default install ACL), and the swap is refused if anyone but SYSTEM/Administrators could write to
+        it. If the second rename fails the first is undone. Returns the version that was replaced (or $null).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Files,
+        [switch]$SkipAcl
+    )
+    $current = Join-Path $Root 'current'
+    $staging = Join-Path $Root 'staging'
+    $previous = Join-Path $Root 'previous'
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+    try {
+        if (-not $SkipAcl) {
+            if (Test-Path -LiteralPath $current) { Copy-SpoolfreeDirectoryAcl -From $current -To $staging } else { Set-SpoolfreeInstallAcl -Path $staging }
+        }
+        foreach ($name in @($Files.Keys)) {
+            if ($script:BundleFiles -cnotcontains $name) { throw "Unexpected agent file '$name'." }
+            $bytes = [byte[]]$Files[$name]
+            $dst = Join-Path $staging $name
+            [IO.File]::WriteAllBytes($dst, $bytes)
+            if ((Get-SpoolfreeSha256 ([IO.File]::ReadAllBytes($dst))) -ne (Get-SpoolfreeSha256 $bytes)) { throw "Staged file '$name' does not match what was written." }
+        }
+        foreach ($r in $script:BundleRequired) { if (-not (Test-Path -LiteralPath (Join-Path $staging $r))) { throw "Agent files lack $r." } }
+        if (-not $SkipAcl -and -not (Test-SpoolfreeInstallAcl -Path $staging)) {
+            throw 'The install directory ACL lets accounts other than SYSTEM and Administrators write to it; not installing.'
+        }
+    } catch {
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    $replaced = Get-SpoolfreeFileAgentVersion -Path (Join-Path $current 'Spoolfree.Agent.psm1')
+    if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
+    $hadCurrent = Test-Path -LiteralPath $current
+    if ($hadCurrent) { [IO.Directory]::Move($current, $previous) }
+    try {
+        [IO.Directory]::Move($staging, $current)
+    } catch {
+        if ($hadCurrent -and -not (Test-Path -LiteralPath $current)) { [IO.Directory]::Move($previous, $current) }
+        throw "Swapping in the new agent failed: $($_.Exception.Message)"
+    }
+    return $replaced
+}
+
+function Get-SpoolfreeUpdateState {
+    <# Self-update state (HKLM:\SOFTWARE\Spoolfree\Update), shared with the launcher. #>
+    param([string]$Key = $script:UpdateRegistry)
+    $s = [ordered]@{ PendingVersion = $null; PendingSha256 = $null; FromVersion = $null; Failures = 0; ConfirmedVersion = $null
+        BadSha256 = $null; LastState = $null; LastVersion = $null; LastError = $null; LastAt = $null }
+    if (Test-Path $Key) {
+        $p = Get-ItemProperty -Path $Key
+        foreach ($n in @($s.Keys)) { if ($p.PSObject.Properties[$n]) { $s[$n] = $p.$n } }
+    }
+    return [pscustomobject]$s
+}
+
+function Set-SpoolfreeUpdateState {
+    <# Sets values ($null removes one). Integers are stored as DWORD. #>
+    param([Parameter(Mandatory)][hashtable]$Values, [string]$Key = $script:UpdateRegistry)
+    if (-not (Test-Path $Key)) { New-Item -Path $Key -Force | Out-Null }
+    foreach ($n in @($Values.Keys)) {
+        $v = $Values[$n]
+        if ($null -eq $v) { Remove-ItemProperty -Path $Key -Name $n -ErrorAction SilentlyContinue }
+        elseif ($v -is [int]) { New-ItemProperty -Path $Key -Name $n -Value $v -PropertyType DWord -Force | Out-Null }
+        else { New-ItemProperty -Path $Key -Name $n -Value ([string]$v) -PropertyType String -Force | Out-Null }
+    }
+}
+
+function Confirm-SpoolfreeAgentRun {
+    <# Called by the sync once a manifest verified: tells the launcher that a just-installed version runs. #>
+    param([string]$Key = $script:UpdateRegistry, [string]$Version = $script:AgentVersion)
+    $s = Get-SpoolfreeUpdateState -Key $Key
+    if ($s.PendingVersion -and $s.PendingVersion -eq $Version -and $s.ConfirmedVersion -ne $Version) {
+        Set-SpoolfreeUpdateState -Key $Key -Values @{ ConfirmedVersion = $Version }
+        return $true
+    }
+    return $false
+}
+
+function Get-SpoolfreeUpdateReport {
+    <# The report's "update" field: state current | pending | updated | rolled-back | failed | skipped, target, error, at. #>
+    param([string]$Key = $script:UpdateRegistry)
+    $s = Get-SpoolfreeUpdateState -Key $Key
+    $r = [ordered]@{ state = 'current' }
+    if ($s.PendingVersion) { $r.state = 'pending'; $r['target'] = [string]$s.PendingVersion }
+    elseif ($s.LastState) { $r.state = [string]$s.LastState; if ($s.LastVersion) { $r['target'] = [string]$s.LastVersion } }
+    if ($s.LastError -and @('rolled-back', 'failed', 'skipped') -contains $r.state) {
+        $e = [string]$s.LastError
+        $r['error'] = $e.Substring(0, [Math]::Min(1000, $e.Length))
+    }
+    if ($s.LastAt) { $r['at'] = [string]$s.LastAt }
+    return $r
+}
+
+function Get-SpoolfreeBundleBytes {
+    <# Downloads the agent bundle with the machine token. #>
+    param([Parameter(Mandatory)][string]$Uri, [Parameter(Mandatory)][string]$Token)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $wc = New-Object Net.WebClient
+    try {
+        $wc.Headers['Authorization'] = "Bearer $Token"
+        $wc.Headers['User-Agent'] = "Spoolfree-Agent/$script:AgentVersion"
+        return , $wc.DownloadData($Uri)
+    } finally { $wc.Dispose() }
+}
+
+function Invoke-SpoolfreeAgentUpdate {
+    <#
+    .SYNOPSIS
+        Installs the agent version a verified manifest offers when it differs from this one: downloads the bundle
+        (machine token), verifies it (Test-SpoolfreeAgentBundle), installs it (Install-SpoolfreeAgentFiles) and marks
+        it pending; the launcher runs it at the next sync and rolls back if it fails twice. Returns a log line or
+        $null when there is nothing to do; throws when the update failed (the state records it for the report).
+    #>
+    param(
+        [Parameter(Mandatory)]$Manifest,
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [Parameter(Mandatory)][string]$Token,
+        [Parameter(Mandatory)][string]$PublicKey,
+        [Parameter(Mandatory)][string]$Root,
+        [string]$Key = $script:UpdateRegistry,
+        [string]$CurrentVersion = $script:AgentVersion,
+        [scriptblock]$Download,
+        [switch]$SkipAcl
+    )
+    $state = Get-SpoolfreeUpdateState -Key $Key
+    $d = Get-SpoolfreeUpdateDecision -Manifest $Manifest -CurrentVersion $CurrentVersion -BadSha256 $state.BadSha256
+    if ($d.Action -eq 'none') { return $null }
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    if ($d.Action -eq 'skip') {
+        $keepRollback = $state.LastState -eq 'rolled-back' -and $state.LastVersion -eq $d.Version
+        if (-not $keepRollback -and ($state.LastState -ne 'skipped' -or $state.LastError -ne $d.Reason)) {
+            Set-SpoolfreeUpdateState -Key $Key -Values @{ LastState = 'skipped'; LastVersion = $d.Version; LastError = $d.Reason; LastAt = $now }
+        }
+        return "Agent update skipped: $($d.Reason)."
+    }
+    if ($state.PendingVersion) { return "Agent $($state.PendingVersion) is installed and waiting for its first run." }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'current'))) { return "Agent update skipped: $Root\current not found (re-run Install-SpoolfreeAgent.ps1)." }
+    $bundle = Get-SpoolfreeProperty $Manifest 'agentBundle'
+    try {
+        $uri = "$($BaseUrl.TrimEnd('/'))/api/agent/bundle"
+        $bytes = if ($Download) { & $Download $uri $Token } else { Get-SpoolfreeBundleBytes -Uri $uri -Token $Token }
+        $files = Test-SpoolfreeAgentBundle -Bytes ([byte[]]$bytes) -Sha256 ([string](Get-SpoolfreeProperty $bundle 'sha256')) `
+            -Signature ([string](Get-SpoolfreeProperty $bundle 'signature')) -PublicKey $PublicKey -Version $d.Version
+        # Pending before the swap: the launcher forgets it if the swap did not happen (current is not this version).
+        Set-SpoolfreeUpdateState -Key $Key -Values @{ PendingVersion = $d.Version; PendingSha256 = (Get-SpoolfreeSha256 ([byte[]]$bytes))
+            FromVersion = $CurrentVersion; Failures = 0; ConfirmedVersion = $null; LastAt = $now }
+        try {
+            Install-SpoolfreeAgentFiles -Root $Root -Files $files -SkipAcl:$SkipAcl | Out-Null
+        } catch {
+            Set-SpoolfreeUpdateState -Key $Key -Values @{ PendingVersion = $null; PendingSha256 = $null; FromVersion = $null; Failures = $null }
+            throw
+        }
+        return "Agent $($d.Version) installed (was $CurrentVersion); it runs at the next sync."
+    } catch {
+        $msg = $_.Exception.Message
+        Set-SpoolfreeUpdateState -Key $Key -Values @{ LastState = 'failed'; LastVersion = $d.Version; LastError = $msg; LastAt = $now }
+        throw "Agent update to $($d.Version) failed: $msg"
+    }
 }
 
 function Invoke-SpoolfreeHttp {

@@ -1,6 +1,6 @@
 # Windows agent
 
-The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A GPO startup script installs it; a SYSTEM scheduled task then syncs at startup and every `AGENT_SYNC_INTERVAL_MINUTES`. See [deployment.md](deployment.md#4-gpo-setup-agent) for the rollout.
+The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A GPO startup script installs it; a SYSTEM scheduled task then syncs at startup and every `AGENT_SYNC_INTERVAL_MINUTES`. From 0.4.3 it [updates itself](#self-update) from the server. See [deployment.md](deployment.md#4-gpo-setup-agent) for the rollout.
 
 ## How the agent creates queues
 
@@ -102,6 +102,83 @@ differs from the value the agent applied last (`HKLM:\SOFTWARE\Spoolfree\SyncInt
 interval with a random delay of about 20% of it (1 to 48 minutes) so PCs spread their calls. The installer's
 `-SyncIntervalMinutes` is only the first value; later GPO runs keep the server's value. Changing the interval needs no
 GPO change; PCs pick it up at their next sync.
+
+## Self-update
+
+From 0.4.3 the agent updates itself from the server. A new release only needs the server upgraded: no new files on
+the share, no re-install.
+
+**Layout on the PC.**
+
+| Path | What |
+|---|---|
+| `%ProgramFiles%\Spoolfree\Start-SpoolfreeSync.ps1` | Launcher. The "Spoolfree Sync" task runs it. Only the installer (GPO) writes it; a self-update never does. |
+| `%ProgramFiles%\Spoolfree\current\` | The running agent: `Spoolfree.Agent.psm1`, `Invoke-SpoolfreeSync.ps1`, `Set-SpoolfreeUserDefault.ps1`, `Install-SpoolfreeAgent.ps1`. |
+| `%ProgramFiles%\Spoolfree\previous\` | The version before the last update, kept for rollback. |
+| `HKLM:\SOFTWARE\Spoolfree\Update` | Update state: pending version, failures, last result, the hash of a rolled-back bundle. |
+
+The install directory is writable only by SYSTEM and Administrators. Users can read and run the files, because the
+*Spoolfree User Default* logon task runs as the user.
+
+**What the server sends.** The image carries the agent scripts in `/app/agent` (`AGENT_BUNDLE_DIR`). The server packs
+them into one bundle: a UTF-8 JSON document `{ type: "spoolfree-agent-bundle", format: 1, version, files: [{ name,
+sha256, content }] }`, where `content` is base64 and `version` is the one `Spoolfree.Agent.psm1` declares. The server
+signs the bundle bytes with the manifest key (Ed25519, a detached signature) and adds these fields to every signed
+manifest:
+
+- `agentVersion`
+- `agentBundle`: `{ sha256, size, signature }`
+- `agentAllowDowngrade` (`AGENT_ALLOW_DOWNGRADE`, default `false`)
+
+`GET /api/agent/bundle` returns the bundle bytes. It needs the machine token, like the manifest. `AGENT_SELF_UPDATE=0`
+takes the fields out of the manifest and makes the endpoint answer 404.
+
+**What the agent does.** After it has applied printers, a sync compares `agentVersion` with its own version. It does
+nothing when they are equal. It does not update when:
+
+- the offered version is lower and `agentAllowDowngrade` is not `true`;
+- the bundle's hash is one that was rolled back on this PC.
+
+Otherwise it downloads the bundle and refuses it unless all of these hold:
+
+- the SHA-256 of the bytes equals `agentBundle.sha256`;
+- the Ed25519 signature over the exact bytes verifies with the **pinned** public key;
+- the bundle's type, format and version match the offer;
+- every file name is one of the four above (no paths);
+- every file matches its own hash;
+- the module declares the offered version.
+
+It then installs the files in two steps:
+
+1. **Stage.** It writes the files to `staging\`, gives that folder the DACL of `current\`, reads the files back and checks them. It refuses to go on if anyone but SYSTEM, Administrators or TrustedInstaller could write there.
+2. **Swap.** It renames `current\` to `previous\` and `staging\` to `current\`. If the second rename fails, it undoes the first.
+
+The new version is now *pending*. It runs at the next sync. The current sync keeps running the old code.
+
+**Rollback.** The launcher runs `current\Invoke-SpoolfreeSync.ps1` in a child process, with a 12-minute limit:
+
+- A pending version confirms itself when one of its syncs verifies a signed manifest. The launcher then clears the
+  pending state and the report says `updated`.
+- A run that ends without confirmation counts as a failure: a crash, a script error, a rejected manifest or a
+  timeout. Exit codes 3 (not enrolled) and 4 (server unreachable) are not counted.
+- After two failures, the launcher puts `previous\` back as `current\` and runs the previous version at once.
+  It records the failed bundle's hash, so that bundle is never installed again on this PC. A server with a fixed
+  build (a new hash) is offered normally.
+
+The launcher also repairs an interrupted swap. If `current\` is missing, it uses `previous\` (or a complete
+`staging\`). It forgets a pending version that is not the one in `current\`.
+
+**Report and UI.** The report's `agentVersion` and `update` field (`{ state: current | pending | updated |
+rolled-back | failed | skipped, target, error, at }`) show on **Agents**. An agent older than the server's bundle is
+marked **Outdated**. The deployment card shows the bundle version, its hash, and whether self-update is on.
+
+**GPO installer and self-update together.** The startup script still runs at every boot. It installs the share's
+version only when it is newer than the one in `current\` (or with `-Force`). It never replaces a newer version that
+the PC installed itself. Upgrading from 0.4.2 or older needs the 0.4.3 files on the share and one installer run. That
+run moves the agent into `current\`, installs the launcher, points the task at it and removes the old top-level files.
+
+**Trust.** A self-update is code that runs as SYSTEM, signed with the manifest key. Whoever controls that key, or the
+server that holds it, can push code to every PC. See [SECURITY.md](../SECURITY.md).
 
 ## Default printer after a rename or replace
 

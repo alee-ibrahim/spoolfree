@@ -30,6 +30,8 @@ COPY --from=build --chown=node:node /app/drizzle ./drizzle
 # Admin CLI (printers import/export, break-glass local users), bundled into one file:
 #   node cli/spoolfree-cli.mjs printers import - --dry-run < printers.yaml
 COPY --from=build --chown=node:node /app/cli ./cli
+# Agent scripts, served to enrolled PCs as the signed self-update bundle (/api/agent/bundle). Root-owned, read-only.
+COPY --from=build /app/agent/Spoolfree.Agent.psm1 /app/agent/Invoke-SpoolfreeSync.ps1 /app/agent/Set-SpoolfreeUserDefault.ps1 /app/agent/Install-SpoolfreeAgent.ps1 /app/agent/Start-SpoolfreeSync.ps1 ./agent/
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \

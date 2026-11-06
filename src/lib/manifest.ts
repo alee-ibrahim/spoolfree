@@ -2,6 +2,7 @@ import type { KeyObject } from "node:crypto";
 import { normalizeMac, normalizeUuid } from "./identity";
 import { printerUri } from "./ipp/interpret";
 import type { Resolution } from "./resolve";
+import type { AgentUpdateOffer } from "./agent-bundle";
 import { keyId, publicKeyRaw, randomToken, signBytes } from "./crypto/signing";
 
 export const MANIFEST_SCHEMA = 1;
@@ -65,6 +66,12 @@ export interface ManifestPayload {
    * printer id is not in this list, and that carries no server key, was created by another Spoolfree server.
    */
   serverPrinterIds?: string[];
+  /** Agent self-update (agents 0.4.3+): the agent version the server ships ... */
+  agentVersion?: string;
+  /** ... its bundle's SHA-256 and size, and the detached Ed25519 signature over the bundle bytes (same key). */
+  agentBundle?: { sha256: string; size: number; signature: string };
+  /** Agents install an older agentVersion only when this is true (AGENT_ALLOW_DOWNGRADE). */
+  agentAllowDowngrade?: boolean;
 }
 
 export interface SignedManifest {
@@ -88,6 +95,7 @@ export function buildManifest(args: {
   syncIntervalMinutes?: number;
   serial?: string;
   legacyPrintServers?: string[];
+  agentUpdate?: AgentUpdateOffer;
 }): ManifestPayload {
   const list: ManifestPrinter[] = [];
   for (const r of args.resolution.printers) {
@@ -121,6 +129,13 @@ export function buildManifest(args: {
     syncIntervalMinutes: args.syncIntervalMinutes ?? 15,
     legacyPrintServers: args.legacyPrintServers ?? [],
     serverPrinterIds: [...args.printers.keys()].sort(),
+    ...(args.agentUpdate
+      ? {
+          agentVersion: args.agentUpdate.version,
+          agentBundle: { sha256: args.agentUpdate.sha256, size: args.agentUpdate.size, signature: args.agentUpdate.signature },
+          agentAllowDowngrade: args.agentUpdate.allowDowngrade,
+        }
+      : {}),
   };
 }
 

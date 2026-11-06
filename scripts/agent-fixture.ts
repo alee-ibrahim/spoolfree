@@ -5,6 +5,7 @@
 import { writeFileSync } from "node:fs";
 import { privateKeyFromSeed, publicKeyRaw } from "../src/lib/crypto/signing";
 import { signManifest, type ManifestPayload } from "../src/lib/manifest";
+import { encodeAgentBundle, sha256, signAgentBundle } from "../src/lib/agent-bundle";
 
 const seed = Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex").toString("base64");
 const key = privateKeyFromSeed(seed);
@@ -27,3 +28,42 @@ writeFileSync(
   JSON.stringify({ publicKey: publicKeyRaw(key).toString("base64"), valid: signManifest(payload, key), expired: signManifest(expired, key) }, null, 2) + "\n",
 );
 console.log("wrote agent/tests/fixtures/signed-manifest.json");
+
+// Self-update bundles (agents 0.4.3+), signed with the same test key. "other" uses the RFC 8032 test-vector-2 key.
+const otherKey = privateKeyFromSeed(Buffer.from("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb", "hex").toString("base64"));
+const file = (name: string, text: string) => ({ name, content: Buffer.from(text, "utf8") });
+const files = (version: string) => [
+  file("Spoolfree.Agent.psm1", `Set-StrictMode -Version 2.0\n$script:AgentVersion = '${version}'\nfunction Get-SpoolfreeAgentVersion { return $script:AgentVersion }\n`),
+  file("Invoke-SpoolfreeSync.ps1", "exit 0\n"),
+  file("Set-SpoolfreeUserDefault.ps1", "# user default\n"),
+];
+const entry = (b: ReturnType<typeof encodeAgentBundle>, k = key) => {
+  const s = signAgentBundle(b, k);
+  return { version: s.version, sha256: s.sha256, signature: s.signature, bytes: s.bytes.toString("base64") };
+};
+// A bundle whose JSON names a file outside the allowed list (hand-built: encodeAgentBundle refuses it).
+const evilDoc = Buffer.from(
+  JSON.stringify({
+    type: "spoolfree-agent-bundle",
+    format: 1,
+    version: "9.9.9",
+    files: [...files("9.9.9"), file("evil.ps1", "calc\n")].map((f) => ({ name: f.name, sha256: sha256(f.content), content: f.content.toString("base64") })),
+  }),
+  "utf8",
+);
+const evil = { version: "9.9.9", bytes: evilDoc, sha256: sha256(evilDoc), size: evilDoc.length, files: [] };
+writeFileSync(
+  "agent/tests/fixtures/signed-bundle.json",
+  JSON.stringify(
+    {
+      publicKey: publicKeyRaw(key).toString("base64"),
+      valid: entry(encodeAgentBundle("9.9.9", files("9.9.9"))),
+      otherKey: entry(encodeAgentBundle("9.9.9", files("9.9.9")), otherKey),
+      wrongModuleVersion: entry(encodeAgentBundle("9.9.9", files("9.9.8"))),
+      unknownFile: entry(evil),
+    },
+    null,
+    2,
+  ) + "\n",
+);
+console.log("wrote agent/tests/fixtures/signed-bundle.json");

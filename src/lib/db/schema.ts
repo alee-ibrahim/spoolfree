@@ -140,6 +140,19 @@ export interface AgentReport {
   sides?: Record<string, string>;
   method?: string;
   durationMs?: number;
+  /** Self-update state (agents 0.4.3+). */
+  update?: AgentUpdateStatus;
+}
+
+export const AGENT_UPDATE_STATES = ["current", "pending", "updated", "rolled-back", "failed", "skipped"] as const;
+
+export interface AgentUpdateStatus {
+  /** current: nothing happened; pending: installed, not run yet; updated: ran after an update; rolled-back; failed; skipped (e.g. downgrade refused). */
+  state: (typeof AGENT_UPDATE_STATES)[number];
+  /** The version the state is about (installed, rolled back, refused). */
+  target?: string;
+  error?: string;
+  at?: string;
 }
 
 export const agents = pgTable(

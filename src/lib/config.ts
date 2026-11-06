@@ -70,6 +70,18 @@ const schema = z.object({
   /** How often agents sync (sent in the manifest; agents update their own scheduled task). 5-240. */
   AGENT_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(240).default(15),
   AGENT_STALE_HOURS: z.coerce.number().positive().default(26),
+  /** Agent self-update (0.4.3+): offer the bundled agent scripts in the manifest. On unless "0"/"false". */
+  AGENT_SELF_UPDATE: z
+    .string()
+    .optional()
+    .transform((v) => v !== "0" && v?.toLowerCase() !== "false"),
+  /** Let agents install an older bundled version than they run (rolling back a release). Off unless "1"/"true". */
+  AGENT_ALLOW_DOWNGRADE: z
+    .string()
+    .optional()
+    .transform((v) => v === "1" || v?.toLowerCase() === "true"),
+  /** Directory with the agent scripts served as the self-update bundle. Default: ./agent (in the image: /app/agent). */
+  AGENT_BUNDLE_DIR: z.string().optional(),
 
   // Poller
   POLLER_ENABLED: z

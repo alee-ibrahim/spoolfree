@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Runs as SYSTEM from the "Spoolfree Sync" scheduled task (at startup and
-    hourly). Only queues this agent created (registry marker under
+    every AGENT_SYNC_INTERVAL_MINUTES), started by Start-SpoolfreeSync.ps1. Only queues this agent created (registry marker under
     HKLM:\SOFTWARE\Spoolfree\Printers plus a "Managed by Spoolfree" comment)
     are ever modified or removed.
 
@@ -60,6 +60,9 @@ try {
     Write-Log "Rejected manifest: $($_.Exception.Message)"
     exit 5
 }
+
+# A version installed by self-update is pending until it gets this far; the launcher then clears it.
+try { if (Confirm-SpoolfreeAgentRun) { Write-Log "Agent $(Get-SpoolfreeAgentVersion) verified a manifest after its update." } } catch { Write-Log "Confirming the agent update failed: $($_.Exception.Message)" }
 
 $method = Get-SpoolfreeInstallMethod -IppUrlSupported (Test-SpoolfreeIppUrlSupported) -ProtectedPrintMode (Test-SpoolfreeProtectedPrintMode)
 # This server's identity: queue comments name it, so queues left by another Spoolfree server can be told apart.
@@ -208,6 +211,18 @@ if ($PSCmdlet.ShouldProcess('default printer', 'set')) {
     Set-SpoolfreeDefaultPrinter -Name ([string]$manifest.defaultPrinter)
 }
 
+# Self-update (0.4.3+): install the agent version the server offers; it runs at the next sync. Only from the
+# installed layout (<InstallDir>\current, run by the launcher), never from a copy run by hand.
+if ((Split-Path $PSScriptRoot -Leaf) -eq 'current' -and $PSCmdlet.ShouldProcess('Spoolfree agent', 'self-update')) {
+    try {
+        $msg = Invoke-SpoolfreeAgentUpdate -Manifest $manifest -BaseUrl $base -Token $cfg.MachineToken -PublicKey $cfg.PublicKey -Root (Split-Path $PSScriptRoot -Parent)
+        if ($msg) { Write-Log $msg }
+    } catch {
+        $errors.Add("agent update: $($_.Exception.Message)")
+        Write-Log $_.Exception.Message
+    }
+}
+
 $applied = @(Get-SpoolfreeInstalled | ForEach-Object { $_.Name })
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 $report = [ordered]@{
@@ -222,6 +237,7 @@ $report = [ordered]@{
     method         = $method
     legacy         = @($legacy | Select-Object -First 200)
     sides          = $sides
+    update         = $(try { Get-SpoolfreeUpdateReport } catch { [ordered]@{ state = 'current' } })
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds
 }
 try {
