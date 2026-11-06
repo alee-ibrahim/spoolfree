@@ -97,3 +97,21 @@ Printer lists are low-sensitivity, so the residual risk of the shared enrollment
 1. `pnpm keygen`, and deploy the new `MANIFEST_SIGNING_KEY`.
 2. Update the GPO parameters with the new public key and add `-Force` for one boot cycle. (`-Force` also re-installs the share's agent files over a self-updated version; put the current release's files on the share first.) (v0.1 does not support two keys at once, so expect a short window of rejected manifests. PCs keep their existing queues during it.)
 3. Rotating the enrollment token only needs the server secret and the share file updated. Already-enrolled PCs are unaffected.
+
+### Print analytics and privacy (0.5.0+)
+
+Print analytics is **off by default** (`ANALYTICS_ENABLED`). When it is on, agents send the PC's PrintService
+"document printed" events (event 307) to `/api/agent/jobs`. That endpoint is authenticated like every agent endpoint:
+a per-machine token, then a live directory check. Each event carries the time, user, PC, queue, port host, pages and
+size. Document names are sent and stored only with `ANALYTICS_COLLECT_DOCUMENT_NAMES=1`; otherwise the agent never
+sends them, and the server drops any it receives.
+
+- **What is kept.** Jobs are kept for `ANALYTICS_RETENTION_DAYS` (default 365), and an hourly purge deletes older
+  rows. Database backups keep data until they expire.
+- **Who can see it.** Only admins can see the Analytics page and download the CSV export. The export neutralises
+  spreadsheet formulas.
+- **What is never collected.** Document contents, page images, file paths and print settings.
+- **Tell staff.** Print logs are personal data. Tell staff that printing is logged, what is kept and for how long,
+  before you turn analytics on.
+
+How to turn it off and delete the data: [docs/analytics.md](docs/analytics.md#privacy).

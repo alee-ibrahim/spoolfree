@@ -11,10 +11,11 @@ export async function getPrinterAttributes(
   uri: string,
   requested: string[],
   timeoutMs: number,
+  version: [number, number] = [2, 0],
 ): Promise<Record<string, IppValue[]>> {
   const url = new URL(uri);
   const secure = url.protocol === "ipps:" || url.protocol === "https:";
-  const body = getPrinterAttributesRequest(uri, requested, Math.floor(Math.random() * 0x7fffffff) || 1);
+  const body = getPrinterAttributesRequest(uri, requested, Math.floor(Math.random() * 0x7fffffff) || 1, version);
   const port = url.port ? Number(url.port) : 631;
   const lib = secure ? https : http;
 
@@ -32,7 +33,7 @@ export async function getPrinterAttributes(
       (res) => {
         if (res.statusCode !== 200) {
           res.resume();
-          reject(new Error(`HTTP ${res.statusCode} from ${url.host}${url.pathname}`));
+          reject(new IppHttpError(res.statusCode ?? 0, `HTTP ${res.statusCode} from ${url.host}${url.pathname}`));
           return;
         }
         const chunks: Buffer[] = [];
@@ -56,7 +57,27 @@ export async function getPrinterAttributes(
 
   const res = decodeResponse(buf);
   if (!isSuccess(res.statusCode)) {
-    throw new Error(`IPP status 0x${res.statusCode.toString(16).padStart(4, "0")}`);
+    throw new IppStatusError(res.statusCode, `IPP status 0x${res.statusCode.toString(16).padStart(4, "0")}`);
   }
   return printerAttributes(res);
+}
+
+/** The device answered HTTP, but not with 200 (wrong path, IPP not served there). */
+export class IppHttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** The device answered IPP with an error status (e.g. 0x0503 version not supported, 0x0400 bad request). */
+export class IppStatusError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
 }

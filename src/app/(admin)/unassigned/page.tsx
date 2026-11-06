@@ -5,7 +5,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from "@/components/ui/item";
 import { isUnder, normalizeDn, parentDn } from "@/lib/dn";
 import { directory } from "@/lib/directory";
 import { shortDn } from "@/lib/format";
@@ -24,7 +24,7 @@ export default async function UnassignedPage() {
     return (
       <>
         <PageHeader title="Unassigned PCs" actions={<DirectorySyncBadge />} />
-        <div className="p-6">
+        <div className="p-4 md:p-6">
           <Alert variant="destructive">
             <AlertTitle>Cannot read Active Directory</AlertTitle>
             <AlertDescription>{(e as Error).message}</AlertDescription>
@@ -48,12 +48,12 @@ export default async function UnassignedPage() {
   return (
     <>
       <PageHeader title="Unassigned PCs" actions={<DirectorySyncBadge />} />
-      <div className="grid gap-6 p-6 xl:grid-cols-2">
+      <div className="grid gap-4 p-4 md:gap-6 md:p-6 xl:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle>In the default Computers container</CardTitle>
             <CardDescription>
-              <span className="font-mono text-xs">{defaultContainer}</span> — new PCs land here when nobody moves them to an OU.
+              <span className="font-mono text-xs break-all">{defaultContainer}</span> — new PCs land here when nobody moves them to an OU.
               Group Policy for OUs does not reach them, so the agent may not be installed either.
             </CardDescription>
           </CardHeader>
@@ -70,37 +70,30 @@ export default async function UnassignedPage() {
             {byOu.size === 0 ? (
               <p className="text-sm text-muted-foreground">Every computer in an OU gets at least one printer.</p>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>OU</TableHead>
-                    <TableHead>Computers</TableHead>
-                    <TableHead />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {[...byOu.values()].map((list) => {
-                    const ou = parentDn(list[0].dn) ?? "";
-                    return (
-                      <TableRow key={ou}>
-                        <TableCell className="font-medium">{shortDn(ou)}</TableCell>
-                        <TableCell className="flex flex-wrap gap-1">
+              <ItemGroup className="gap-2">
+                {[...byOu.values()].map((list) => {
+                  const ou = parentDn(list[0].dn) ?? "";
+                  return (
+                    <Item key={ou} variant="outline" size="sm" className="items-start">
+                      <ItemContent className="min-w-0">
+                        <ItemTitle>{shortDn(ou)}</ItemTitle>
+                        <div className="flex flex-wrap gap-1 pt-1">
                           {list.map((c) => (
                             <Badge key={c.objectGuid} variant="outline">
                               {c.name}
                             </Badge>
                           ))}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button size="sm" variant="outline" asChild>
-                            <Link href={`/assignments?ou=${encodeURIComponent(ou)}`}>Assign</Link>
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+                        </div>
+                      </ItemContent>
+                      <ItemActions>
+                        <Button size="sm" variant="outline" asChild>
+                          <Link href={`/assignments?ou=${encodeURIComponent(ou)}`}>Assign</Link>
+                        </Button>
+                      </ItemActions>
+                    </Item>
+                  );
+                })}
+              </ItemGroup>
             )}
           </CardContent>
         </Card>
@@ -112,27 +105,20 @@ export default async function UnassignedPage() {
 function ComputerTable({ list }: { list: { name: string; objectGuid: string; operatingSystem?: string | null }[] }) {
   if (list.length === 0) return <p className="text-sm text-muted-foreground">None. Good housekeeping.</p>;
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Computer</TableHead>
-          <TableHead>OS</TableHead>
-          <TableHead />
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {list.map((c) => (
-          <TableRow key={c.objectGuid}>
-            <TableCell className="font-medium">{c.name}</TableCell>
-            <TableCell className="text-muted-foreground">{c.operatingSystem ?? "—"}</TableCell>
-            <TableCell className="text-right">
-              <Button size="sm" variant="ghost" asChild>
-                <Link href={`/preview?computer=${c.objectGuid}`}>Preview</Link>
-              </Button>
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <ItemGroup className="gap-2">
+      {list.map((c) => (
+        <Item key={c.objectGuid} variant="outline" size="sm">
+          <ItemContent className="min-w-0">
+            <ItemTitle>{c.name}</ItemTitle>
+            <ItemDescription>{c.operatingSystem ?? "Unknown OS"}</ItemDescription>
+          </ItemContent>
+          <ItemActions>
+            <Button size="sm" variant="ghost" asChild>
+              <Link href={`/preview?computer=${c.objectGuid}`}>Preview</Link>
+            </Button>
+          </ItemActions>
+        </Item>
+      ))}
+    </ItemGroup>
   );
 }

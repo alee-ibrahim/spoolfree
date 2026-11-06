@@ -14,6 +14,7 @@ import { db, schema } from "@/lib/db";
 import { shortDn, timeAgo } from "@/lib/format";
 import { signingKeyInfo } from "@/lib/keys";
 import { requireAdmin } from "@/lib/session";
+import { Item, ItemActions, ItemContent, ItemGroup, ItemTitle } from "@/components/ui/item";
 import { RevokeButton } from "./revoke-button";
 
 export const metadata = { title: "Agents" };
@@ -29,12 +30,13 @@ export default async function AgentsPage() {
   const selfUpdate = config().AGENT_SELF_UPDATE;
   const outdatedCount = agents.filter((a) => !a.revokedAt && isAgentOutdated(a.lastReport?.agentVersion, latest)).length;
   // High severity: PCs that takeover left without a printer (agents 0.4.6+ report it until it is fixed).
+  const ctx: AgentCtx = { staleBefore, latest, selfUpdate };
   const critical = agents.filter((a) => !a.revokedAt && (a.lastReport?.critical ?? []).length > 0);
 
   return (
     <>
       <PageHeader title="Agents" />
-      <div className="flex flex-col gap-6 p-6">
+      <div className="flex flex-col gap-4 p-4 md:gap-6 md:p-6">
         {critical.length > 0 && (
           <Alert variant="destructive">
             <TriangleAlertIcon />
@@ -65,7 +67,28 @@ export default async function AgentsPage() {
             </EmptyHeader>
           </Empty>
         ) : (
-          <Card className="py-0">
+          <>
+          {/* Phones: one card per PC. */}
+          <ItemGroup className="gap-3 md:hidden">
+            {agents.map((a) => {
+              const x = agentParts(a, ctx);
+              return (
+                <Item key={a.id} variant="outline" className={a.revokedAt ? "items-start opacity-50" : "items-start"}>
+                  <ItemContent className="min-w-0 gap-2">
+                    <ItemTitle className="w-full justify-between">
+                      <span className="min-w-0">{x.computer}</span>
+                    </ItemTitle>
+                    <div className="text-xs text-muted-foreground">Last check-in {x.checkin}</div>
+                    <div>{x.applied}</div>
+                    <div>{x.result}</div>
+                    <div className="text-xs text-muted-foreground">{x.version}</div>
+                  </ItemContent>
+                  <ItemActions>{x.revoke}</ItemActions>
+                </Item>
+              );
+            })}
+          </ItemGroup>
+          <Card className="hidden py-0 md:flex">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -79,29 +102,104 @@ export default async function AgentsPage() {
               </TableHeader>
               <TableBody>
                 {agents.map((a) => {
-                  const r = a.lastReport;
+                  const x = agentParts(a, ctx);
+                  return (
+                    <TableRow key={a.id} className={a.revokedAt ? "opacity-50" : undefined}>
+                      <TableCell className="pl-4">{x.computer}</TableCell>
+                      <TableCell>{x.checkin}</TableCell>
+                      <TableCell>{x.applied}</TableCell>
+                      <TableCell>{x.result}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{x.version}</TableCell>
+                      <TableCell className="pr-4">{x.revoke}</TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </Card>
+          </>
+        )}
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Agent deployment</CardTitle>
+            <CardDescription>Pin this public key in the GPO startup script. Agents reject manifests not signed by it.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3 text-sm">
+            {"error" in key ? (
+              <Badge variant="destructive">{key.error}</Badge>
+            ) : (
+              <>
+                <div>
+                  <span className="text-muted-foreground">Key ID </span>
+                  <code className="font-mono">{key.keyId}</code>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Agent bundle </span>
+                  {bundle ? (
+                    <>
+                      <code className="font-mono">v{bundle.version}</code>
+                      <span className="text-muted-foreground"> · sha256 </span>
+                      <code className="font-mono">{bundle.sha256.slice(0, 16)}</code>
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · self-update {selfUpdate ? "on" : "off"}
+                        {outdatedCount ? ` · ${outdatedCount} outdated agent${outdatedCount > 1 ? "s" : ""}` : ""}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-muted-foreground">not available (agent scripts not found in AGENT_BUNDLE_DIR)</span>
+                  )}
+                </div>
+                <pre className="overflow-x-auto rounded-lg bg-muted p-3 text-xs md:p-4">{`powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install-SpoolfreeAgent.ps1 \`
+  -ServerUrl "${publicUrl}" \`
+  -PublicKey "${key.publicKey}" \`
+  -EnrollmentTokenPath "\\\\fs01.example.org\\spoolfree$\\enroll.token"`}</pre>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </>
+  );
+}
+
+type AgentRow = typeof schema.agents.$inferSelect;
+interface AgentCtx {
+  staleBefore: number;
+  latest: string | null;
+  selfUpdate: boolean;
+}
+
+/** The pieces of one agent's row, shared by the phone cards and the table. */
+function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) {
+  const r = a.lastReport;
                   const stale = !a.lastReportAt || a.lastReportAt.getTime() < staleBefore;
                   const errors = r?.errors ?? [];
                   const legacy = r?.legacy ?? [];
                   const wouldRemove = legacy.filter((l) => l.action === "would-remove");
                   const removedLegacy = legacy.filter((l) => l.action === "removed");
                   const failedLegacy = legacy.filter((l) => l.action === "failed");
-                  return (
-                    <TableRow key={a.id} className={a.revokedAt ? "opacity-50" : undefined}>
-                      <TableCell className="pl-4">
-                        <div className="font-medium">{a.computerName}</div>
+  return {
+    computer: (
+      <>
+        <div className="font-medium">{a.computerName}</div>
                         <div className="text-xs text-muted-foreground">{shortDn(a.dn.slice(a.dn.indexOf(",") + 1))}</div>
-                      </TableCell>
-                      <TableCell>
-                        <div>{timeAgo(a.lastReportAt)}</div>
+      </>
+    ),
+    checkin: (
+      <>
+        <div>{timeAgo(a.lastReportAt)}</div>
                         {stale && !a.revokedAt && (
                           <Badge variant="outline" className="mt-1">
                             Stale
                           </Badge>
                         )}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex max-w-md flex-wrap gap-1">
+      </>
+    ),
+    applied: (
+      <>
+        <div className="flex max-w-md flex-wrap gap-1">
                           {(r?.applied ?? []).map((n) => (
                             <Badge key={n} variant={n === r?.defaultPrinter ? "default" : "secondary"}>
                               {n}
@@ -109,9 +207,11 @@ export default async function AgentsPage() {
                           ))}
                           {(r?.applied ?? []).length === 0 && <span className="text-muted-foreground">—</span>}
                         </div>
-                      </TableCell>
-                      <TableCell>
-                        {a.revokedAt ? (
+      </>
+    ),
+    result: (
+      <>
+        {a.revokedAt ? (
                           <Badge variant="outline">Revoked</Badge>
                         ) : !r ? (
                           <Badge variant="outline">No report yet</Badge>
@@ -158,9 +258,11 @@ export default async function AgentsPage() {
                             ))}
                           </div>
                         )}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {r?.agentVersion ? `v${r.agentVersion}` : "—"}
+      </>
+    ),
+    version: (
+      <>
+        {r?.agentVersion ? `v${r.agentVersion}` : "—"}
                         {r?.method ? ` · ${r.method}` : ""}
                         {!a.revokedAt && isAgentOutdated(r?.agentVersion, latest) && (
                           <Tooltip>
@@ -187,56 +289,8 @@ export default async function AgentsPage() {
                             Update to v{r.update.target} skipped{r.update.error ? `: ${r.update.error}` : ""}
                           </div>
                         )}
-                      </TableCell>
-                      <TableCell className="pr-4">{!a.revokedAt && <RevokeButton id={a.id} name={a.computerName} />}</TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </Card>
-        )}
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Agent deployment</CardTitle>
-            <CardDescription>Pin this public key in the GPO startup script. Agents reject manifests not signed by it.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3 text-sm">
-            {"error" in key ? (
-              <Badge variant="destructive">{key.error}</Badge>
-            ) : (
-              <>
-                <div>
-                  <span className="text-muted-foreground">Key ID </span>
-                  <code className="font-mono">{key.keyId}</code>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">Agent bundle </span>
-                  {bundle ? (
-                    <>
-                      <code className="font-mono">v{bundle.version}</code>
-                      <span className="text-muted-foreground"> · sha256 </span>
-                      <code className="font-mono">{bundle.sha256.slice(0, 16)}</code>
-                      <span className="text-muted-foreground">
-                        {" "}
-                        · self-update {selfUpdate ? "on" : "off"}
-                        {outdatedCount ? ` · ${outdatedCount} outdated agent${outdatedCount > 1 ? "s" : ""}` : ""}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="text-muted-foreground">not available (agent scripts not found in AGENT_BUNDLE_DIR)</span>
-                  )}
-                </div>
-                <pre className="overflow-x-auto rounded-lg bg-muted p-4 text-xs">{`powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install-SpoolfreeAgent.ps1 \`
-  -ServerUrl "${publicUrl}" \`
-  -PublicKey "${key.publicKey}" \`
-  -EnrollmentTokenPath "\\\\fs01.example.org\\spoolfree$\\enroll.token"`}</pre>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-    </>
-  );
+      </>
+    ),
+    revoke: <>{!a.revokedAt && <RevokeButton id={a.id} name={a.computerName} />}</>,
+  };
 }

@@ -59,6 +59,7 @@ export function toManifestInput(p: typeof schema.printers.$inferSelect): Manifes
     revision: p.revision,
     legacyTakeover: p.legacyTakeover,
     legacyShares: p.legacyShares,
+    legacyAliases: p.legacyAliases,
     defaultSides: p.defaultSides,
     deviceUuid: p.deviceUuid,
     macAddresses: p.macAddresses,
@@ -77,6 +78,10 @@ export async function manifestForComputer(computer: ComputerObject) {
     legacyPrintServers: config().LEGACY_PRINT_SERVERS,
     syncIntervalMinutes: config().AGENT_SYNC_INTERVAL_MINUTES,
     agentUpdate: agentUpdateForManifest(),
+    analytics: {
+      enabled: config().ANALYTICS_ENABLED,
+      collectDocumentNames: config().ANALYTICS_ENABLED && config().ANALYTICS_COLLECT_DOCUMENT_NAMES,
+    },
   });
 }
 

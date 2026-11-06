@@ -27,6 +27,7 @@ function printerRow(over: Partial<CurrentState["printers"][number]> = {}): Curre
     host: "192.0.2.10",
     port: 631,
     ippPath: "/ipp/print",
+    ippPathAuto: true,
     useTls: false,
     location: "Block A",
     model: null,
@@ -35,6 +36,7 @@ function printerRow(over: Partial<CurrentState["printers"][number]> = {}): Curre
     legacyTakeover: "dry-run",
     legacyShares: ["StaffRoom", "StaffRoom2"],
     defaultSides: "two-sided-long-edge",
+    legacyAliases: [],
     deviceUuid: null,
     macAddresses: [],
     identityCheckedAt: null,
@@ -49,7 +51,7 @@ function printerRow(over: Partial<CurrentState["printers"][number]> = {}): Curre
 group("bulk import parsing", () => {
   it("reads YAML with ip/host aliases and defaults", () => {
     const [a, b] = parseInput(YAML, "yaml");
-    expect(a).toMatchObject({ name: "Staff Room Copier", host: "192.0.2.10", port: 631, ippPath: "/ipp/print", useTls: false, defaultSides: "two-sided-long-edge", legacyTakeover: "dry-run", legacyShares: ["StaffRoom", "StaffRoom2"], assignments: [OU_A], defaultFor: [OU_A] });
+    expect(a).toMatchObject({ name: "Staff Room Copier", host: "192.0.2.10", port: 631, ippPathAuto: true, useTls: false, defaultSides: "two-sided-long-edge", legacyTakeover: "dry-run", legacyShares: ["StaffRoom", "StaffRoom2"], assignments: [OU_A], defaultFor: [OU_A] });
     expect(b).toMatchObject({ host: "lab-printer.example.org", useTls: true, port: 443, defaultSides: "auto", legacyTakeover: "off", assignments: [] });
   });
 

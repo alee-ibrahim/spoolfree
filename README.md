@@ -31,12 +31,14 @@ Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** th
 | | |
 |---|---|
 | **Entra ID login** | OIDC sign-in (automatic by default), limited to admins; optional break-glass local accounts. |
-| **Printers** | Add, edit, delete, [bulk import/export](docs/deployment.md#bulk-import-and-export). **Test** checks driverless support over IPP; **Replace** swaps the device and keeps the name; default duplex; opt-in takeover of old queues. |
+| **Printers** | Add, edit, delete, [bulk import/export](docs/deployment.md#bulk-import-and-export). **Test** checks driverless support over IPP and detects the IPP path (`/ipp/print`, `/ipp`, `/ipp/printer`, `/printers/lp1`, `/`; manual override possible); **Replace** swaps the device and keeps the name; default duplex; opt-in takeover of old queues, including old host names that are no longer in DNS. |
 | **OU assignments** | Read-only LDAP(S) view of AD with inheritance, block rules, per-OU defaults and per-computer overrides. |
 | **Preview** | "What will computer X get?", with a step-by-step trace and the exact manifest. |
 | **Unassigned PCs** | Computers in `CN=Computers`, or whose OU chain gets no printers. |
 | **Status dashboard** | IPP polling with SNMP fallback: online/offline, toner, jams, paper-out, page count; optional webhook alerts. |
-| **Agents view** | Last check-in, applied printers and errors per PC; revoke a PC's token. |
+| **Agents view** | Last check-in, applied printers and errors per PC; a red alert when a takeover left a PC without a printer; revoke a PC's token. |
+| **Print analytics** | Opt-in. Jobs from each PC's print log and printer page counters: pages over time; top users, PCs, printers and OUs; pages not sent from PCs; unmanaged queues; a job log with CSV export. [Privacy notes](docs/analytics.md#privacy). |
+| **Phone-friendly** | Bottom navigation, cards instead of tables, 44 px touch targets, light and dark themes. |
 | **Ops** | Audit log of every admin change, Prometheus `/metrics`, `/healthz`. |
 
 ## Screenshots
@@ -171,6 +173,10 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `LOW_TONER_PERCENT` | `15` | Low-toner threshold. |
 | `ALERT_WEBHOOK_URL` | | POST a JSON alert on offline / jam / low toner and recovery. |
 | `LEGACY_PRINT_SERVERS` | | Old print servers whose `\\server\share` queues agents may replace ([takeover](docs/agent.md#legacy-queue-takeover)). |
+| `ANALYTICS_ENABLED` | `0` | Print analytics: agents collect print jobs from the PCs' print log ([docs/analytics.md](docs/analytics.md)). |
+| `ANALYTICS_COLLECT_DOCUMENT_NAMES` | `0` | Also collect document names. Personal data: see the privacy notes first. |
+| `ANALYTICS_RETENTION_DAYS` | `365` | Print jobs and daily page counters older than this are deleted (hourly purge). |
+| `ANALYTICS_TIME_ZONE` | `UTC` | IANA time zone for daily buckets (charts, counters). |
 | `METRICS_TOKEN` | | Bearer token required to scrape `/metrics`. |
 | `DEV_FAKE_AD`, `DEV_FAKE_AD_FILE`, `DEV_LOGIN` | `0` | Development only; ignored by production builds. |
 

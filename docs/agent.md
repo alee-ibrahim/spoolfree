@@ -68,6 +68,11 @@ resolved IP addresses and, from 0.4.2, the device identity the server sends in t
 - a TCP/IP or IPP port whose host name is a default name that embeds one of the printer's MAC addresses: `BRN<mac>`,
   `BRW<mac>` (Brother wired/wireless) or the bare MAC, 12 hex digits, any case, optionally ending in `.local`. These names
   are often not in DNS. Nothing else matches: no other prefixes or suffixes, no other domains, no partial MACs;
+- (0.5.0) a Standard TCP/IP port, or an IPP/URL port, whose host is one of the printer's **legacy host names /
+  aliases** (`legacyAliases` in the manifest; "Legacy hostnames / aliases" in the printer form; `legacyAliases` or the
+  `aliases` column in the bulk CLI). They are compared case-insensitively, with a trailing dot and `.local` ignored on
+  both sides. Use this for old names that are no longer in DNS and carry no MAC, such as a NetBIOS-style name like
+  `OLD-PRN-OFFICE2`. WSD ports are never matched by alias;
 - a `\\server\share` connection, when the server is one of the configured legacy print servers (a short name and an FQDN are treated as equal) and the share is listed for the printer.
 
 **Where the identity comes from.** **Test** in the UI and the status poller (once a day per printer, while it is
@@ -207,6 +212,18 @@ run moves the agent into `current\`, installs the launcher, points the task at i
 
 **Trust.** A self-update is code that runs as SYSTEM, signed with the manifest key. Whoever controls that key, or the
 server that holds it, can push code to every PC. See [SECURITY.md](../SECURITY.md).
+
+## Print analytics
+
+From 0.5.0, when the server turns on analytics (`analytics.enabled` in the manifest), each sync does the following:
+
+1. It enables the `Microsoft-Windows-PrintService/Operational` log and makes it at least 20 MB.
+2. It reads new event 307 records after a registry bookmark (`HKLM:\SOFTWARE\Spoolfree\Analytics`, `LastRecordId`).
+3. It sends them to `/api/agent/jobs` in batches of up to 500. Document names are sent only when
+   `analytics.collectDocumentNames` is set.
+
+Failures are logged and never fail the sync. What is collected, retention and privacy:
+[analytics.md](analytics.md).
 
 ## Default printer after a rename or replace
 

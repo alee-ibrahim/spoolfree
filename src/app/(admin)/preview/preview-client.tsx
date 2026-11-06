@@ -25,7 +25,7 @@ export function ComputerPicker({
   for (const c of computers) groups.set(c.ou, [...(groups.get(c.ou) ?? []), c]);
   return (
     <Select value={selected ?? undefined} onValueChange={(v) => router.push(`/preview?computer=${v}`)}>
-      <SelectTrigger className="w-64" aria-label="Computer">
+      <SelectTrigger className="w-full sm:w-64" aria-label="Computer">
         <SelectValue placeholder="Choose a computer" />
       </SelectTrigger>
       <SelectContent>
@@ -104,7 +104,7 @@ export function OverridesEditor({
             </SelectContent>
           </Select>
           <Select value={printerId} onValueChange={setPrinterId}>
-            <SelectTrigger className="w-56" aria-label="Printer">
+            <SelectTrigger className="w-full sm:w-56" aria-label="Printer">
               <SelectValue placeholder="Choose a printer" />
             </SelectTrigger>
             <SelectContent>

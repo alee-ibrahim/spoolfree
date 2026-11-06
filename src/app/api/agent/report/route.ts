@@ -48,6 +48,14 @@ const Report = z.object({
     .array(z.object({ printer: z.string().max(256), method: z.string().max(32), reason: z.string().max(1000).optional() }))
     .max(200)
     .optional(),
+  analytics: z
+    .object({
+      enabled: z.boolean(),
+      logEnabled: z.boolean().nullable().optional(),
+      sent: z.number().int().nonnegative().optional(),
+      error: z.string().max(1000).nullable().optional(),
+    })
+    .optional(),
 });
 
 export async function POST(req: Request) {

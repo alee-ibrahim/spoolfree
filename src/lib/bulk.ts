@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 import { db, schema } from "./db";
+import { aliasList } from "./aliases";
 import { normalizeDn } from "./dn";
 
 /**
@@ -41,7 +42,13 @@ export const PrinterSpec = z
     host: z.string().trim().min(1).max(253).regex(HOST_RE, "not a valid hostname or IP").optional(),
     ip: z.string().trim().min(1).max(253).regex(HOST_RE, "not a valid hostname or IP").optional(),
     port: z.coerce.number().int().min(1).max(65535).optional(),
-    ippPath: z.string().trim().min(1).max(200).optional(),
+    /** Omitted, empty or "auto": detected by Test. A path: manual override. */
+    ippPath: z
+      .string()
+      .trim()
+      .max(200)
+      .optional()
+      .transform((v) => (!v || v.toLowerCase() === "auto" ? undefined : v.startsWith("/") ? v : `/${v}`)),
     useTls: bool,
     location: optText(200),
     model: optText(200),
@@ -52,6 +59,7 @@ export const PrinterSpec = z
       .transform((v) => (v === true ? "on" : v === false || v === undefined ? "off" : v)),
     defaultSides: z.enum(["auto", "one-sided", "two-sided-long-edge", "two-sided-short-edge"]).default("auto"),
     legacyShares: list.pipe(z.array(z.string().max(80).regex(/^[^\\/]+$/, "share names only, without \\\\server\\"))),
+    legacyAliases: aliasList,
     assignments: dnList,
     defaultFor: dnList,
   })
@@ -60,7 +68,7 @@ export const PrinterSpec = z
     ...p,
     host: (p.host ?? ip)!,
     port: p.port ?? 631,
-    ippPath: p.ippPath ?? "/ipp/print",
+    ippPathAuto: p.ippPath === undefined,
   }));
 export type PrinterSpec = z.output<typeof PrinterSpec>;
 
@@ -147,6 +155,9 @@ const CSV_COLUMNS: Record<string, string> = {
   legacy_takeover: "legacyTakeover",
   shares: "legacyShares",
   legacy_shares: "legacyShares",
+  aliases: "legacyAliases",
+  legacy_aliases: "legacyAliases",
+  legacy_hostnames: "legacyAliases",
   duplex: "defaultSides",
   sides: "defaultSides",
   default_sides: "defaultSides",
@@ -243,7 +254,7 @@ export type Step =
   | { kind: "override"; name: string; computer: string; computerGuid: string; action: "add" | "block"; makeDefault: boolean; previous: string | null }
   | { kind: "unoverride"; name: string; computer: string; computerGuid: string; printerId: string };
 
-const FIELDS = ["host", "port", "ippPath", "useTls", "location", "model", "notes", "legacyTakeover", "legacyShares", "defaultSides"] as const;
+const FIELDS = ["host", "port", "ippPathAuto", "ippPath", "useTls", "location", "model", "notes", "legacyTakeover", "legacyShares", "legacyAliases", "defaultSides"] as const;
 const ENDPOINT = new Set(["host", "port", "ippPath", "useTls"]);
 
 export function plan(specs: PrinterSpec[], cur: CurrentState, opts: { pruneAssignments?: boolean } = {}): Step[] {
@@ -260,6 +271,8 @@ export function plan(specs: PrinterSpec[], cur: CurrentState, opts: { pruneAssig
       const changes: Record<string, unknown> = {};
       for (const f of FIELDS) {
         const want = spec[f];
+        // Auto mode: the stored (detected) path is kept.
+        if (f === "ippPath" && want === undefined) continue;
         const have = existing[f];
         if (JSON.stringify(want) !== JSON.stringify(have)) changes[f] = want;
       }
@@ -489,7 +502,7 @@ export function toSpecs(cur: CurrentState): Record<string, unknown>[] {
       name: p.name,
       host: p.host,
       ...(p.port !== 631 ? { port: p.port } : {}),
-      ...(p.ippPath !== "/ipp/print" ? { ippPath: p.ippPath } : {}),
+      ...(!p.ippPathAuto ? { ippPath: p.ippPath } : {}),
       ...(p.useTls ? { useTls: true } : {}),
       ...(p.location ? { location: p.location } : {}),
       ...(p.model ? { model: p.model } : {}),
@@ -497,6 +510,7 @@ export function toSpecs(cur: CurrentState): Record<string, unknown>[] {
       ...(p.defaultSides !== "auto" ? { defaultSides: p.defaultSides } : {}),
       ...(p.legacyTakeover !== "off" ? { legacyTakeover: p.legacyTakeover } : {}),
       ...(p.legacyShares.length ? { legacyShares: p.legacyShares } : {}),
+      ...(p.legacyAliases?.length ? { legacyAliases: p.legacyAliases } : {}),
       ...(assignments.length ? { assignments } : {}),
       ...(defaultFor.length ? { defaultFor } : {}),
     });
@@ -539,11 +553,11 @@ const csvField = (v: unknown) => {
 };
 
 export function exportCsv(cur: CurrentState): string {
-  const cols = ["name", "host", "port", "ipp_path", "tls", "location", "model", "notes", "duplex", "takeover", "shares", "assignments", "default_for"];
+  const cols = ["name", "host", "port", "ipp_path", "tls", "location", "model", "notes", "duplex", "takeover", "shares", "aliases", "assignments", "default_for"];
   const lines = [cols.join(",")];
   for (const p of toSpecs(cur)) {
     lines.push(
-      [p.name, p.host, p.port ?? 631, p.ippPath ?? "/ipp/print", p.useTls ? "true" : "false", p.location, p.model, p.notes, p.defaultSides ?? "auto", p.legacyTakeover ?? "off", p.legacyShares, p.assignments, p.defaultFor]
+      [p.name, p.host, p.port ?? 631, p.ippPath ?? "auto", p.useTls ? "true" : "false", p.location, p.model, p.notes, p.defaultSides ?? "auto", p.legacyTakeover ?? "off", p.legacyShares, p.legacyAliases, p.assignments, p.defaultFor]
         .map(csvField)
         .join(","),
     );

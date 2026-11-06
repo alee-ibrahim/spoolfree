@@ -5,7 +5,7 @@ import { PageHeader } from "@/components/app/page-header";
 import { MarkerBars, StatusBadges } from "@/components/app/printer-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { agentStaleCutoff, config } from "@/lib/config";
@@ -46,14 +46,14 @@ export default async function StatusPage() {
   return (
     <>
       <PageHeader title="Status" />
-      <div className="flex flex-col gap-6 p-6">
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="flex flex-col gap-4 p-4 md:gap-6 md:p-6">
+        <div className="grid grid-cols-2 gap-3 md:gap-4 xl:grid-cols-4">
           {stats.map((s) => (
-            <Card key={s.label}>
-              <CardHeader>
+            <Card key={s.label} className="gap-1 py-4 md:py-6">
+              <CardHeader className="px-4 md:px-6">
                 <CardDescription>{s.label}</CardDescription>
-                <CardTitle className="text-3xl tabular-nums">{s.value}</CardTitle>
-                <CardDescription>{s.hint}</CardDescription>
+                <CardTitle className="text-2xl font-semibold md:text-3xl">{s.value}</CardTitle>
+                <CardDescription className="text-xs md:text-sm">{s.hint}</CardDescription>
               </CardHeader>
             </Card>
           ))}
@@ -75,7 +75,41 @@ export default async function StatusPage() {
             </EmptyContent>
           </Empty>
         ) : (
-          <Card className="py-0">
+          <>
+          {/* Phones: one card per printer, problems first. */}
+          <ul className="flex flex-col gap-3 md:hidden" aria-label="Printers">
+            {sorted.map(({ p, s }) => (
+              <li key={p.id}>
+                <Card className="gap-3 py-4">
+                  <CardHeader className="px-4">
+                    <CardTitle className="text-base">{p.name}</CardTitle>
+                    <CardDescription>
+                      {p.location ?? "No location"} · {p.host}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3 px-4">
+                    <StatusBadges status={s} />
+                    <MarkerBars markers={s?.markers ?? []} />
+                    <dl className="grid grid-cols-3 gap-2 text-xs">
+                      <div>
+                        <dt className="text-muted-foreground">Pages</dt>
+                        <dd className="tabular-nums">{s?.pageCount?.toLocaleString("en-US") ?? "—"}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-muted-foreground">Last seen</dt>
+                        <dd>{s ? timeAgo(s.lastSeen) : "not polled"}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-muted-foreground">Source</dt>
+                        <dd>{s?.source && s.source !== "none" ? s.source.toUpperCase() : "—"}</dd>
+                      </div>
+                    </dl>
+                  </CardContent>
+                </Card>
+              </li>
+            ))}
+          </ul>
+          <Card className="hidden py-0 md:flex">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -112,6 +146,7 @@ export default async function StatusPage() {
               </TableBody>
             </Table>
           </Card>
+          </>
         )}
       </div>
     </>

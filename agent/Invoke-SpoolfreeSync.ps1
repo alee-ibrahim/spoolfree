@@ -248,6 +248,19 @@ if ((Split-Path $PSScriptRoot -Leaf) -eq 'current' -and $PSCmdlet.ShouldProcess(
     }
 }
 
+# Print analytics (0.5.0, manifest analytics.enabled): event 307 records from the PrintService log go to
+# /api/agent/jobs. Runs before the report so the report carries its outcome; it never fails the sync.
+$analytics = [ordered]@{ enabled = $false; logEnabled = $null; sent = 0; error = $null }
+if ($PSCmdlet.ShouldProcess('print analytics', 'collect and send')) {
+    try {
+        $analytics = Invoke-SpoolfreeAnalytics -Manifest $manifest -BaseUrl $base -Token $cfg.MachineToken -ServerId $serverId -ServerPrinterIds $serverPrinterIds -Log ${function:Write-Log}
+        if ($analytics.error) { Write-Log "Print analytics: $($analytics.error)" }
+    } catch {
+        $analytics.error = $_.Exception.Message
+        Write-Log "Print analytics failed: $($_.Exception.Message)"
+    }
+}
+
 $applied = @(Get-SpoolfreeInstalled | ForEach-Object { $_.Name })
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 $report = [ordered]@{
@@ -265,6 +278,7 @@ $report = [ordered]@{
     update         = $(try { Get-SpoolfreeUpdateReport } catch { [ordered]@{ state = 'current' } })
     critical       = $critical.ToArray()
     fallbacks      = $fallbacks.ToArray()
+    analytics      = $analytics
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds
 }
 try {

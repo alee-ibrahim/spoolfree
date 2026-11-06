@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.4.7'
+$script:AgentVersion = '0.5.0'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -393,6 +393,27 @@ function Get-SpoolfreeMacHostMatch {
     return $null
 }
 
+function ConvertTo-SpoolfreeAliasKey {
+    <# Pure: a host name for legacy-alias comparison: trimmed, lower-case, without a trailing dot or ".local". #>
+    param([AllowNull()][AllowEmptyString()][string]$HostName)
+    if (-not $HostName) { return $null }
+    $h = $HostName.Trim().ToLowerInvariant().TrimEnd('.')
+    if ($h.EndsWith('.local')) { $h = $h.Substring(0, $h.Length - 6).TrimEnd('.') }
+    if (-not $h) { return $null }
+    return $h
+}
+
+function Get-SpoolfreeLegacyAliases {
+    <# Pure: the printer's legacyAliases (manifest 0.5.0+) as alias keys; empty when absent. #>
+    param($Printer)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($a in @(Get-SpoolfreeProperty $Printer 'legacyAliases')) {
+        $k = ConvertTo-SpoolfreeAliasKey ([string]$a)
+        if ($k -and -not $out.Contains($k)) { $out.Add($k) }
+    }
+    return $out.ToArray()
+}
+
 function Get-SpoolfreeServerId {
     <# The pinned public key's id: first 16 hex digits of SHA-256 over the raw key (the server's keyId). #>
     param([AllowNull()][AllowEmptyString()][string]$PublicKey)
@@ -493,6 +514,7 @@ function Get-SpoolfreeLegacyMatches {
     $target = ([string](Get-SpoolfreeProperty $Printer 'name')).ToLowerInvariant()
     $deviceUuid = ConvertTo-SpoolfreeUuid ([string](Get-SpoolfreeProperty $Printer 'deviceUuid'))
     $macs = @(@(Get-SpoolfreeProperty $Printer 'macAddresses') | ForEach-Object { ConvertTo-SpoolfreeMac ([string]$_) } | Where-Object { $_ })
+    $aliases = @(Get-SpoolfreeLegacyAliases $Printer)
 
     foreach ($q in @($Queues)) {
         $name = [string](Get-SpoolfreeProperty $q 'Name')
@@ -517,13 +539,14 @@ function Get-SpoolfreeLegacyMatches {
             continue
         }
         if ($ConnectionsOnly) { continue }
-        if ($addr.Count -eq 0 -and -not $deviceUuid -and $macs.Count -eq 0) { continue }
+        if ($addr.Count -eq 0 -and -not $deviceUuid -and $macs.Count -eq 0 -and $aliases.Count -eq 0) { continue }
 
         $portName = [string](Get-SpoolfreeProperty $q 'PortName')
         $port = if ($portName -and $Ports.ContainsKey($portName)) { $Ports[$portName] } else { $null }
         if (Test-SpoolfreeVirtualQueue -Queue $q -Port $port) { continue }
 
-        $hostAddress = ([string](Get-SpoolfreeProperty $port 'HostAddress')).Trim().ToLowerInvariant()
+        $rawHostAddress = ([string](Get-SpoolfreeProperty $port 'HostAddress')).Trim()
+        $hostAddress = $rawHostAddress.ToLowerInvariant()
         $candidates = New-Object System.Collections.Generic.List[string]
         foreach ($a in @(Get-SpoolfreeProperty $port 'Addresses')) { if ($a) { $candidates.Add(([string]$a).ToLowerInvariant()) } }
         $monitor = [string](Get-SpoolfreeProperty $port 'Monitor')
@@ -531,7 +554,7 @@ function Get-SpoolfreeLegacyMatches {
         $urlHost = Get-SpoolfreeUrlHost $portName
         if (-not $urlHost) { $urlHost = Get-SpoolfreeUrlHost $hostAddress }
 
-        $kind = $null; $label = $null; $hostName = $null
+        $kind = $null; $label = $null; $hostName = $null; $displayHost = $null
         if ($portName -match '^WSD-' -or $monitor -eq 'WSD Port' -or $monitor -eq 'WSD Port Monitor') {
             # Identified by the device UUID the port stores, or by the device address found for that UUID.
             $kind = if ($description -eq 'IPP Port') { 'IPP port' } else { 'WSD port' }
@@ -546,9 +569,9 @@ function Get-SpoolfreeLegacyMatches {
                 if ($portUuids.Count) { continue }
             }
         } elseif ($urlHost) {
-            $kind = 'IPP port'; $label = $urlHost; $hostName = $urlHost; $candidates.Add($urlHost)
+            $kind = 'IPP port'; $label = $urlHost; $hostName = $urlHost; $displayHost = $urlHost; $candidates.Add($urlHost)
         } elseif ($hostAddress -or $monitor -eq 'Standard TCP/IP Port') {
-            $kind = 'TCP/IP port'; $label = $hostAddress; $hostName = $hostAddress
+            $kind = 'TCP/IP port'; $label = $hostAddress; $hostName = $hostAddress; $displayHost = $rawHostAddress
             if ($hostAddress) { $candidates.Add($hostAddress) }
         } else { continue }
 
@@ -563,6 +586,13 @@ function Get-SpoolfreeLegacyMatches {
         $macHit = Get-SpoolfreeMacHostMatch -HostName $hostName -Macs $macs
         if ($macHit) {
             $out.Add([pscustomobject]@{ Queue = $name; Reason = "$prefix$kind $label (host name has the printer's MAC $macHit)"; Kind = $kind })
+            continue
+        }
+        # Old host names the server lists for this printer (manifest legacyAliases), e.g. a NetBIOS-style name
+        # that is not in DNS. Compared case-insensitively, ignoring ".local" and a trailing dot on both sides.
+        $aliasKey = ConvertTo-SpoolfreeAliasKey $hostName
+        if ($aliasKey -and $aliases -contains $aliasKey) {
+            $out.Add([pscustomobject]@{ Queue = $name; Reason = "$prefix$kind host $displayHost is a legacy alias"; Kind = $kind })
         }
     }
     # Emitted one by one: wrap calls in @() for an array (empty => @()).
@@ -1327,7 +1357,12 @@ function Get-SpoolfreeDeviceIndex {
 }
 
 function Get-SpoolfreePortInventory {
-    <# Hashtable PortName -> Monitor, Description, HostAddress, Addresses (resolved / device hosts), Uuids. #>
+    <#
+    .SYNOPSIS
+        Hashtable PortName -> Monitor, Description, HostAddress, Addresses (resolved / device hosts), Uuids.
+        -NoResolve skips DNS lookups (Addresses of TCP/IP and URL ports stay empty).
+    #>
+    param([switch]$NoResolve)
     $ports = @{}
     $deviceIndex = $null
     foreach ($p in @(Get-PrinterPort -ErrorAction SilentlyContinue)) {
@@ -1338,8 +1373,8 @@ function Get-SpoolfreePortInventory {
         $addresses = @()
         $uuids = @()
         $urlHost = Get-SpoolfreeUrlHost $name
-        if ($hostAddress) { $addresses = Resolve-SpoolfreeAddress $hostAddress }
-        elseif ($urlHost) { $addresses = Resolve-SpoolfreeAddress $urlHost }
+        if ($hostAddress) { if (-not $NoResolve) { $addresses = Resolve-SpoolfreeAddress $hostAddress } }
+        elseif ($urlHost) { if (-not $NoResolve) { $addresses = Resolve-SpoolfreeAddress $urlHost } }
         elseif ($name -match '^WSD-' -or $monitor -like 'WSD Port*') {
             if ($null -eq $deviceIndex) { $deviceIndex = Get-SpoolfreeDeviceIndex }
             $values = @{}
@@ -1781,6 +1816,373 @@ function Invoke-SpoolfreeHttp {
         $params['Body'] = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 6 -Compress))
     }
     return Invoke-RestMethod @params
+}
+
+# ---------------------------------------------------------------------------
+# Print analytics (0.5.0, opt-in per server: manifest analytics.enabled).
+# Reads "document printed" events (ID 307) from the PrintService Operational log and posts them to
+# /api/agent/jobs. A bookmark (last sent EventRecordID) in HKLM:\SOFTWARE\Spoolfree\Analytics advances only
+# after the server accepted a batch, so nothing is lost and a re-send is harmless (the server dedups).
+# ---------------------------------------------------------------------------
+
+$script:PrintLogName = 'Microsoft-Windows-PrintService/Operational'
+$script:PrintLogMinSize = 20971520
+$script:AnalyticsRegistry = 'HKLM:\SOFTWARE\Spoolfree\Analytics'
+$script:SidCache = @{}
+
+function Get-SpoolfreeAnalyticsSettings {
+    <# Pure: manifest analytics { enabled, collectDocumentNames } -> Enabled / CollectDocumentNames (absent = off). #>
+    param($Manifest)
+    $a = Get-SpoolfreeProperty $Manifest 'analytics'
+    $enabled = (Get-SpoolfreeProperty $a 'enabled') -eq $true
+    $docs = $enabled -and ((Get-SpoolfreeProperty $a 'collectDocumentNames') -eq $true)
+    return [pscustomobject]@{ Enabled = [bool]$enabled; CollectDocumentNames = [bool]$docs }
+}
+
+function ConvertFrom-SpoolfreePrintEvent {
+    <#
+    .SYNOPSIS
+        Pure: a PrintService event 307 ("document printed") as XML -> RecordId, Time (ISO 8601 UTC), UserSid,
+        UserName (Param3), ClientComputer (without leading \\), Printer, Port, Bytes, Pages, Document.
+        Document is $null unless -CollectDocumentNames. $null for anything that is not a parseable event 307.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Xml, [bool]$CollectDocumentNames = $false)
+    if (-not $Xml) { return $null }
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.XmlResolver = $null
+    try { $doc.LoadXml($Xml) } catch { return $null }
+    $sys = $doc.SelectSingleNode("/*[local-name()='Event']/*[local-name()='System']")
+    if ($null -eq $sys) { return $null }
+    $idNode = $sys.SelectSingleNode("*[local-name()='EventID']")
+    if ($null -ne $idNode -and $idNode.InnerText.Trim() -ne '307') { return $null }
+    $ridNode = $sys.SelectSingleNode("*[local-name()='EventRecordID']")
+    [int64]$recordId = 0
+    if ($null -eq $ridNode -or -not [int64]::TryParse($ridNode.InnerText.Trim(), [ref]$recordId) -or $recordId -le 0) { return $null }
+
+    $time = $null
+    $tc = $sys.SelectSingleNode("*[local-name()='TimeCreated']/@SystemTime")
+    if ($null -ne $tc -and $tc.Value) {
+        $dt = [datetime]::MinValue
+        $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+        if ([datetime]::TryParse($tc.Value, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dt)) {
+            $time = $dt.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        }
+    }
+    $sidNode = $sys.SelectSingleNode("*[local-name()='Security']/@UserID")
+    $sid = if ($null -ne $sidNode -and $sidNode.Value) { $sidNode.Value.Trim() } else { $null }
+
+    $data = $doc.SelectSingleNode("/*[local-name()='Event']/*[local-name()='UserData']/*[local-name()='DocumentPrinted']")
+    $params = @{}
+    for ($i = 1; $i -le 8; $i++) {
+        $v = $null
+        if ($null -ne $data) {
+            $n = $data.SelectSingleNode("*[local-name()='Param$i']")
+            if ($null -ne $n) { $v = $n.InnerText.Trim(); if (-not $v) { $v = $null } }
+        }
+        $params[$i] = $v
+    }
+    $client = $params[4]
+    if ($client) { $client = $client.TrimStart([char]'\'); if (-not $client) { $client = $null } }
+    [int64]$bytes = 0; [int]$pages = 0
+    $bytesOut = if ($params[7] -and [int64]::TryParse($params[7], [ref]$bytes)) { $bytes } else { $null }
+    $pagesOut = if ($params[8] -and [int]::TryParse($params[8], [ref]$pages)) { $pages } else { $null }
+    return [pscustomobject]@{
+        RecordId       = $recordId
+        Time           = $time
+        UserSid        = $sid
+        UserName       = $params[3]
+        ClientComputer = $client
+        Printer        = $params[5]
+        Port           = $params[6]
+        Bytes          = $bytesOut
+        Pages          = $pagesOut
+        Document       = $(if ($CollectDocumentNames) { $params[2] } else { $null })
+    }
+}
+
+function Resolve-SpoolfreeSidName {
+    <# SID -> DOMAIN\name (cached per run); $null when it cannot be translated. #>
+    param([AllowNull()][AllowEmptyString()][string]$Sid)
+    if (-not $Sid) { return $null }
+    if ($script:SidCache.ContainsKey($Sid)) { return $script:SidCache[$Sid] }
+    $name = $null
+    try {
+        $id = New-Object System.Security.Principal.SecurityIdentifier $Sid
+        $name = [string]$id.Translate([System.Security.Principal.NTAccount]).Value
+    } catch { $name = $null }
+    $script:SidCache[$Sid] = $name
+    return $name
+}
+
+function Get-SpoolfreePortHost {
+    <# Pure: the device host a port points at (TCP/IP host address, IPP/WSD URL host), lower-case; $null for local ports. #>
+    param([AllowNull()][AllowEmptyString()][string]$PortName, $Port)
+    if (-not $PortName -or $PortName -match $script:LocalPortPattern) { return $null }
+    $h = Get-SpoolfreeUrlHost $PortName
+    if ($h) { return $h }
+    if ($null -eq $Port) { return $null }
+    $monitor = [string](Get-SpoolfreeProperty $Port 'Monitor')
+    $desc = [string](Get-SpoolfreeProperty $Port 'Description')
+    if ($script:LocalMonitors -contains $monitor -or $script:LocalMonitors -contains $desc) { return $null }
+    $hostAddress = ([string](Get-SpoolfreeProperty $Port 'HostAddress')).Trim()
+    if ($hostAddress) {
+        $h = Get-SpoolfreeUrlHost $hostAddress
+        if ($h) { return $h }
+        return $hostAddress.ToLowerInvariant()
+    }
+    if ($PortName -match '^WSD-' -or $monitor -like 'WSD Port*') {
+        foreach ($a in @(Get-SpoolfreeProperty $Port 'Addresses')) { if ($a) { return ([string]$a).ToLowerInvariant() } }
+    }
+    return $null
+}
+
+function Resolve-SpoolfreePrintQueue {
+    <#
+    .SYNOPSIS
+        Pure: maps a queue name from a print event to PrinterId (a manifest printer with that name, a queue this
+        agent created, or a queue whose Spoolfree comment belongs to this server) and PortHost.
+    .PARAMETER Queues
+        Get-SpoolfreeQueueInventory objects (Name, PortName, Comment).
+    .PARAMETER Ports
+        Get-SpoolfreePortInventory hashtable.
+    #>
+    param(
+        [AllowNull()][AllowEmptyString()][string]$QueueName,
+        [AllowNull()][AllowEmptyString()][string]$PortName,
+        [AllowEmptyCollection()][object[]]$Printers = @(),
+        [AllowEmptyCollection()][object[]]$Installed = @(),
+        [AllowEmptyCollection()][object[]]$Queues = @(),
+        [AllowNull()][hashtable]$Ports = @{},
+        [AllowNull()][AllowEmptyString()][string]$ServerId,
+        [AllowEmptyCollection()][string[]]$ServerPrinterIds = @()
+    )
+    if ($null -eq $Ports) { $Ports = @{} }
+    $printerId = $null
+    $queue = $null
+    if ($QueueName) {
+        foreach ($p in @($Printers)) {
+            if ($p -and ([string](Get-SpoolfreeProperty $p 'name')) -ieq $QueueName) { $printerId = [string](Get-SpoolfreeProperty $p 'id'); break }
+        }
+        if (-not $printerId) {
+            foreach ($m in @($Installed)) {
+                if ($m -and ([string](Get-SpoolfreeProperty $m 'Name')) -ieq $QueueName -and (Get-SpoolfreeProperty $m 'Id')) { $printerId = [string](Get-SpoolfreeProperty $m 'Id'); break }
+            }
+        }
+        foreach ($q in @($Queues)) { if ($q -and ([string](Get-SpoolfreeProperty $q 'Name')) -ieq $QueueName) { $queue = $q; break } }
+        if (-not $printerId -and $queue) {
+            $comment = [string](Get-SpoolfreeProperty $queue 'Comment')
+            $c = ConvertFrom-SpoolfreeComment $comment
+            if ($c -and $c.PrinterId -and (Get-SpoolfreeQueueOrigin -Comment $comment -ServerId $ServerId -ServerPrinterIds $ServerPrinterIds) -eq 'this') {
+                $printerId = [string]$c.PrinterId
+            }
+        }
+    }
+    $pn = $PortName
+    $port = if ($pn -and $Ports.ContainsKey($pn)) { $Ports[$pn] } else { $null }
+    if (-not $port -and -not (Get-SpoolfreeUrlHost $pn) -and $queue) {
+        # The event's port can be missing or a display name; fall back to the queue's own port.
+        $qp = [string](Get-SpoolfreeProperty $queue 'PortName')
+        if ($qp) { $pn = $qp; $port = $(if ($Ports.ContainsKey($qp)) { $Ports[$qp] } else { $null }) }
+    }
+    return [pscustomobject]@{ PrinterId = $(if ($printerId) { $printerId } else { $null }); PortHost = (Get-SpoolfreePortHost -PortName $pn -Port $port) }
+}
+
+function New-SpoolfreeJobRecord {
+    <# Pure: the /api/agent/jobs event for a parsed print event, its queue mapping and the translated user name. #>
+    param([Parameter(Mandatory)]$PrintEvent, $Mapping, [AllowNull()][AllowEmptyString()][string]$UserName)
+    $user = if ($UserName) { $UserName } elseif ($PrintEvent.UserName) { [string]$PrintEvent.UserName } else { $null }
+    return [ordered]@{
+        recordId       = [int64]$PrintEvent.RecordId
+        time           = $PrintEvent.Time
+        user           = $user
+        userSid        = $PrintEvent.UserSid
+        clientComputer = $PrintEvent.ClientComputer
+        printer        = $PrintEvent.Printer
+        port           = $PrintEvent.Port
+        portHost       = $(if ($Mapping) { $Mapping.PortHost } else { $null })
+        pages          = $PrintEvent.Pages
+        bytes          = $PrintEvent.Bytes
+        document       = $PrintEvent.Document
+        printerId      = $(if ($Mapping) { $Mapping.PrinterId } else { $null })
+    }
+}
+
+function Get-SpoolfreePrintLogState {
+    <# Enabled / MaxSizeBytes of the PrintService Operational log. #>
+    $l = Get-WinEvent -ListLog $script:PrintLogName -ErrorAction Stop
+    return [pscustomobject]@{ Enabled = [bool]$l.IsEnabled; MaxSizeBytes = [int64]$l.MaximumSizeInBytes }
+}
+
+function Invoke-SpoolfreeWevtutil {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $exe = Join-Path $env:SystemRoot 'System32\wevtutil.exe'
+    $out = & $exe @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "wevtutil $($Arguments -join ' ') failed (exit $LASTEXITCODE): $(@($out) -join ' ')" }
+}
+
+function Enable-SpoolfreePrintLog {
+    <# Makes sure the PrintService Operational log is on and at least 20 MB. Returns $true when it is enabled. #>
+    $state = Get-SpoolfreePrintLogState
+    if ($state.MaxSizeBytes -lt $script:PrintLogMinSize) { Invoke-SpoolfreeWevtutil -Arguments @('sl', $script:PrintLogName, "/ms:$($script:PrintLogMinSize)") }
+    if (-not $state.Enabled) { Invoke-SpoolfreeWevtutil -Arguments @('sl', $script:PrintLogName, '/e:true') }
+    return $true
+}
+
+function Get-SpoolfreeAnalyticsBookmark {
+    <# The last EventRecordID the server accepted; 0 when none. #>
+    $v = Get-ItemProperty -Path $script:AnalyticsRegistry -Name LastRecordId -ErrorAction SilentlyContinue
+    if (-not $v) { return [int64]0 }
+    [int64]$n = 0
+    if ([int64]::TryParse([string]$v.LastRecordId, [ref]$n) -and $n -ge 0) { return $n }
+    return [int64]0
+}
+
+function Set-SpoolfreeAnalyticsBookmark {
+    param([Parameter(Mandatory)][int64]$RecordId)
+    if (-not (Test-Path $script:AnalyticsRegistry)) { New-Item -Path $script:AnalyticsRegistry -Force | Out-Null }
+    New-ItemProperty -Path $script:AnalyticsRegistry -Name LastRecordId -Value $RecordId -PropertyType QWord -Force | Out-Null
+}
+
+function Test-SpoolfreeNoEventsError {
+    param($ErrorRecord)
+    return ([string]$ErrorRecord.FullyQualifiedErrorId) -like 'NoMatchingEventsFound*'
+}
+
+function Get-SpoolfreePrintLogNewestRecordId {
+    <# The newest EventRecordID in the PrintService Operational log; $null when it is empty. #>
+    try { $e = @(Get-WinEvent -LogName $script:PrintLogName -MaxEvents 1 -ErrorAction Stop) }
+    catch { if (Test-SpoolfreeNoEventsError $_) { return $null }; throw }
+    if ($e.Count -eq 0 -or $null -eq $e[0]) { return $null }
+    return [int64]$e[0].RecordId
+}
+
+function Get-SpoolfreePrintEventXml {
+    <# XML of up to $Max event-307 records after $After, oldest first. #>
+    param([int64]$After = 0, [int]$Max = 2000)
+    $xpath = "*[System[(EventID=307) and (EventRecordID>$After)]]"
+    try { $events = @(Get-WinEvent -LogName $script:PrintLogName -FilterXPath $xpath -Oldest -MaxEvents $Max -ErrorAction Stop) }
+    catch { if (Test-SpoolfreeNoEventsError $_) { return @() }; throw }
+    return @($events | Where-Object { $_ } | ForEach-Object { $_.ToXml() })
+}
+
+function Get-SpoolfreeHttpStatus {
+    <# The HTTP status of a failed Invoke-RestMethod, or $null. #>
+    param($ErrorRecord)
+    try { $r = $ErrorRecord.Exception.Response; if ($r) { return [int]$r.StatusCode } } catch { }
+    return $null
+}
+
+function Send-SpoolfreePrintJobs {
+    <#
+    .SYNOPSIS
+        Posts $Jobs to /api/agent/jobs in batches of $BatchSize and moves the bookmark after each accepted batch
+        (to the batch's highest recordId; to $FinalRecordId after the last). Stops at the first failure.
+    .OUTPUTS
+        Sent (events accepted), Unsupported (server answered 404), Error (message or $null).
+    #>
+    param(
+        [AllowEmptyCollection()][object[]]$Jobs = @(),
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [string]$Token,
+        [int64]$FinalRecordId = 0,
+        [int]$BatchSize = 500
+    )
+    $sent = 0
+    [int64]$last = 0
+    $all = @($Jobs | Where-Object { $_ })
+    for ($i = 0; $i -lt $all.Count; $i += $BatchSize) {
+        $end = [Math]::Min($i + $BatchSize, $all.Count) - 1
+        $batch = @($all[$i..$end])
+        foreach ($j in $batch) { if ([int64]$j['recordId'] -gt $last) { $last = [int64]$j['recordId'] } }
+        try {
+            Invoke-SpoolfreeHttp -Uri "$BaseUrl/api/agent/jobs" -Method POST -Token $Token -Body @{ events = $batch } | Out-Null
+        } catch {
+            if ((Get-SpoolfreeHttpStatus $_) -eq 404) { return [pscustomobject]@{ Sent = $sent; Unsupported = $true; Error = $null } }
+            return [pscustomobject]@{ Sent = $sent; Unsupported = $false; Error = "jobs upload failed: $($_.Exception.Message)" }
+        }
+        $sent += $batch.Count
+        Set-SpoolfreeAnalyticsBookmark -RecordId $last
+    }
+    if ($FinalRecordId -gt $last) { Set-SpoolfreeAnalyticsBookmark -RecordId $FinalRecordId }
+    return [pscustomobject]@{ Sent = $sent; Unsupported = $false; Error = $null }
+}
+
+function Invoke-SpoolfreeAnalytics {
+    <#
+    .SYNOPSIS
+        One analytics pass: enable the print log, read new event-307 records, map them and post them.
+        Never throws; returns the report's analytics object { enabled, logEnabled, sent, error }.
+    #>
+    param(
+        $Manifest,
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [string]$Token,
+        [AllowNull()][AllowEmptyString()][string]$ServerId,
+        [AllowEmptyCollection()][string[]]$ServerPrinterIds = @(),
+        [scriptblock]$Log,
+        [int]$MaxEvents = 2000,
+        [int]$BatchSize = 500
+    )
+    $settings = Get-SpoolfreeAnalyticsSettings $Manifest
+    $report = [ordered]@{ enabled = $settings.Enabled; logEnabled = $null; sent = 0; error = $null }
+    if (-not $settings.Enabled) { return $report }
+    $errs = New-Object System.Collections.Generic.List[string]
+    $notes = New-Object System.Collections.Generic.List[string]
+    try {
+        try { $report.logEnabled = [bool](Enable-SpoolfreePrintLog) }
+        catch {
+            $errs.Add("print log: $($_.Exception.Message)")
+            try { $report.logEnabled = [bool](Get-SpoolfreePrintLogState).Enabled } catch { $report.logEnabled = $null }
+        }
+
+        [int64]$bookmark = Get-SpoolfreeAnalyticsBookmark
+        $newest = Get-SpoolfreePrintLogNewestRecordId
+        if ($bookmark -gt 0 -and ($null -eq $newest -or [int64]$newest -lt $bookmark)) {
+            $notes.Add("Print analytics: the print log was cleared (newest record $newest, bookmark $bookmark); starting over.")
+            Set-SpoolfreeAnalyticsBookmark -RecordId 0
+            $bookmark = 0
+        }
+        $xmls = @(Get-SpoolfreePrintEventXml -After $bookmark -Max $MaxEvents)
+        $parsed = New-Object System.Collections.Generic.List[object]
+        foreach ($x in $xmls) {
+            $e = ConvertFrom-SpoolfreePrintEvent -Xml ([string]$x) -CollectDocumentNames $settings.CollectDocumentNames
+            if ($e) { $parsed.Add($e) }
+        }
+        # The newest record was read before the query, so when the query was not capped every event 307 up to
+        # it has been seen: the bookmark can skip the other events in between.
+        [int64]$final = 0
+        foreach ($e in $parsed) { if ($e.RecordId -gt $final) { $final = $e.RecordId } }
+        if ($xmls.Count -lt $MaxEvents -and $null -ne $newest -and [int64]$newest -gt $final) { $final = [int64]$newest }
+
+        $jobs = New-Object System.Collections.Generic.List[object]
+        if ($parsed.Count) {
+            $queues = @(Get-SpoolfreeQueueInventory)
+            $ports = Get-SpoolfreePortInventory -NoResolve
+            $installed = @(Get-SpoolfreeInstalled)
+            $printers = @(Get-SpoolfreeProperty $Manifest 'printers' | Where-Object { $_ })
+            $maps = @{}
+            foreach ($e in $parsed) {
+                if (-not $e.Printer) { continue }
+                $key = "$($e.Printer)|$($e.Port)".ToLowerInvariant()
+                if (-not $maps.ContainsKey($key)) {
+                    $maps[$key] = Resolve-SpoolfreePrintQueue -QueueName $e.Printer -PortName $e.Port -Printers $printers -Installed $installed -Queues $queues -Ports $ports -ServerId $ServerId -ServerPrinterIds $ServerPrinterIds
+                }
+                $jobs.Add((New-SpoolfreeJobRecord -PrintEvent $e -Mapping $maps[$key] -UserName (Resolve-SpoolfreeSidName $e.UserSid)))
+            }
+        }
+        if ($jobs.Count -gt 0 -or $final -gt $bookmark) {
+            $r = Send-SpoolfreePrintJobs -Jobs $jobs.ToArray() -BaseUrl $BaseUrl -Token $Token -FinalRecordId $final -BatchSize $BatchSize
+            $report.sent = [int]$r.Sent
+            if ($r.Unsupported) { $notes.Add('Print analytics: the server does not accept print jobs (HTTP 404); skipped.') }
+            elseif ($r.Error) { $errs.Add($r.Error) }
+            elseif ($r.Sent) { $notes.Add("Print analytics: sent $($r.Sent) print job(s).") }
+        }
+    } catch {
+        $errs.Add($_.Exception.Message)
+    }
+    if ($errs.Count) { $report.error = ($errs -join '; ') }
+    if ($Log) { foreach ($n in $notes) { try { & $Log $n } catch { } } }
+    return $report
 }
 
 function Get-SpoolfreeAgentVersion { return $script:AgentVersion }

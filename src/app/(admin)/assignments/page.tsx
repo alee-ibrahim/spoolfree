@@ -1,8 +1,6 @@
-import { NetworkIcon } from "lucide-react";
 import { DirectorySyncBadge } from "@/components/app/directory-sync-status";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ancestorChain, isUnder, normalizeDn, parentDn } from "@/lib/dn";
 import { baseDn, directory } from "@/lib/directory";
 import { buildOuTree, flattenTree } from "@/lib/ou-tree";
@@ -11,6 +9,7 @@ import { listPrinters, loadPolicy } from "@/lib/service";
 import { requireAdmin } from "@/lib/session";
 import { OuPanel } from "./ou-panel";
 import { OuTree } from "./ou-tree";
+import { TreeCard } from "./tree-card";
 
 export const metadata = { title: "Assignments" };
 
@@ -25,7 +24,7 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
     return (
       <>
         <PageHeader title="Assignments" actions={<DirectorySyncBadge />} />
-        <div className="p-6">
+        <div className="p-4 md:p-6">
           <Alert variant="destructive">
             <AlertTitle>Cannot read Active Directory</AlertTitle>
             <AlertDescription>{(e as Error).message}</AlertDescription>
@@ -56,15 +55,8 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
   return (
     <>
       <PageHeader title="Assignments" actions={<DirectorySyncBadge />} />
-      <div className="grid gap-6 p-6 lg:grid-cols-[minmax(16rem,22rem)_1fr]">
-        <Card className="h-fit">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <NetworkIcon className="size-4" /> Directory
-            </CardTitle>
-            <CardDescription>Printers assigned to an OU flow down to its child OUs.</CardDescription>
-          </CardHeader>
-          <CardContent className="px-0">
+      <div className="grid gap-4 p-4 md:gap-6 md:p-6 lg:grid-cols-[minmax(16rem,22rem)_1fr]">
+        <TreeCard selectedLabel={selected.kind === "domain" ? "Domain root" : selected.name} defaultOpen={typeof params.ou !== "string"}>
             <OuTree
               selectedKey={normalizeDn(sel)}
               items={flat.map((n) => {
@@ -83,8 +75,7 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
                 };
               })}
             />
-          </CardContent>
-        </Card>
+        </TreeCard>
 
         <OuPanel
           ou={{ dn: sel, name: selected.name, kind: selected.kind, description: selected.description ?? null, isRoot: !inherited }}

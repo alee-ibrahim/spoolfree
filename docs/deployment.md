@@ -132,13 +132,15 @@ printer's revision, so PCs re-create the queue.
 ```yaml
 printers:
   - name: Staff Room Copier          # queue name on PCs
-    ip: 192.0.2.10                   # or host: copier.example.org; port 631, ippPath /ipp/print, useTls false by default
+    ip: 192.0.2.10                   # or host: copier.example.org; port 631 and useTls false by default
+    # ippPath: /ipp                   # omit (or "auto") to let Test detect it; a path is a manual override
     location: Block A
     model: Brother MFC-L8900CDW
     notes: Toner in the store room
     defaultSides: two-sided-long-edge   # auto | one-sided | two-sided-long-edge | two-sided-short-edge
     legacyTakeover: dry-run             # off | dry-run | on (docs/agent.md, "Legacy queue takeover")
     legacyShares: [StaffRoom]           # share names on LEGACY_PRINT_SERVERS
+    legacyAliases: [OLD-COPIER-NAME]    # old host names TCP/IP ports may still use (not in DNS); .local optional
     assignments: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
     defaultFor: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
 
@@ -154,7 +156,8 @@ computers:                            # per-computer overrides (YAML only)
 Printer names must exist or be created by the same file. Unknown computers or printers stop the import before
 anything is written. `export` writes the overrides back as `computers:` (by computer name).
 
-CSV uses the columns `name,host` (or `ip`)`,port,ipp_path,tls,location,model,notes,duplex,takeover,shares,assignments,default_for`;
+CSV uses the columns `name,host` (or `ip`)`,port,ipp_path,tls,location,model,notes,duplex,takeover,shares,aliases,assignments,default_for`
+(`ipp_path` empty or `auto` = detected);
 lists are separated by `;` and DNs must be quoted (they contain commas). `export --format csv` writes this layout.
 
 Options: `--dry-run` prints the plan and writes nothing; `--prune-assignments` also removes assignments of the listed

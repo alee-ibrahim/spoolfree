@@ -48,7 +48,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   }
 
   return (
-    <main className="flex min-h-svh items-center justify-center bg-muted p-6">
+    <main className="flex min-h-svh items-center justify-center bg-muted p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-6">
       <Card className="w-full max-w-sm">
         <CardHeader className="items-center text-center">
           <div className="mx-auto mb-2 flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">

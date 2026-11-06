@@ -1,3 +1,5 @@
+import { sql } from "drizzle-orm";
+import { dayIn } from "../analytics/counters";
 import { config } from "../config";
 import { db, schema, sqlClient } from "../db";
 import { getPrinterAttributes } from "../ipp/client";
@@ -99,12 +101,46 @@ export async function pollAll(): Promise<number> {
     };
     await d.insert(schema.printerStatus).values({ printerId: p.id, ...values }).onConflictDoUpdate({ target: schema.printerStatus.printerId, set: values });
     if (prev && (prev.alertKey ?? null) !== key) await sendWebhook(p, s, key, prev.alertKey ?? null);
+    // Daily page-counter readings for analytics (total pages per printer, pages not sent from PCs).
+    if (s.online && s.pageCount !== null && s.pageCount >= 0) {
+      await recordCounter(p, s.pageCount, now).catch((e) => console.warn(`[spoolfree] counter of ${p.name}: ${(e as Error).message}`));
+    }
     // Device identity (printer-uuid, MACs) for legacy queue matching on PCs: once a day per printer.
     if (s.online && identityDue(p, now)) {
       await refreshIdentity(p).catch((e) => console.warn(`[spoolfree] identity of ${p.name}: ${(e as Error).message}`));
     }
   });
   return printers.length;
+}
+
+/** Upserts today's counter reading: first reading of the day stays, last is replaced. */
+export async function recordCounter(p: Pick<PrinterRow, "id" | "revision">, count: number, now: Date) {
+  const day = dayIn(config().ANALYTICS_TIME_ZONE, now);
+  await db()
+    .insert(schema.printerCounterDaily)
+    .values({ printerId: p.id, day, revision: p.revision, firstCount: count, lastCount: count, updatedAt: now })
+    .onConflictDoUpdate({
+      target: [schema.printerCounterDaily.printerId, schema.printerCounterDaily.day],
+      set: {
+        lastCount: count,
+        updatedAt: now,
+        // A replaced device (new revision) or a reset counter starts the day over.
+        firstCount: sql`case when ${schema.printerCounterDaily.revision} <> ${p.revision} or ${count} < ${schema.printerCounterDaily.lastCount} then ${count} else ${schema.printerCounterDaily.firstCount} end`,
+        revision: p.revision,
+      },
+    });
+}
+
+const PURGE_EVERY_MS = 3600_000;
+const gp = globalThis as unknown as { __spoolfreeLastPurge?: number };
+
+/** Analytics retention: at most once an hour, inside the poll lock. */
+async function purgeIfDue() {
+  if (gp.__spoolfreeLastPurge && Date.now() - gp.__spoolfreeLastPurge < PURGE_EVERY_MS) return;
+  gp.__spoolfreeLastPurge = Date.now();
+  const { purgeAnalytics } = await import("../analytics/queries");
+  const r = await purgeAnalytics();
+  if (r.jobs || r.counters) console.log(`[spoolfree] analytics retention: deleted ${r.jobs} print jobs and ${r.counters} counter readings`);
 }
 
 const LOCK_ID = 0x5f001;
@@ -116,6 +152,7 @@ export async function pollOnce(): Promise<boolean> {
     const [{ locked }] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(${LOCK_ID}) as locked`;
     if (!locked) return false;
     await pollAll();
+    await purgeIfDue().catch((e) => console.warn(`[spoolfree] analytics purge failed: ${(e as Error).message}`));
     return true;
   });
 }

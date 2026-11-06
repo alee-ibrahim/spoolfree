@@ -26,7 +26,7 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
     return (
       <>
         <PageHeader title="Preview" />
-        <div className="p-6">
+        <div className="p-4 md:p-6">
           <Alert variant="destructive">
             <AlertTitle>Cannot read Active Directory</AlertTitle>
             <AlertDescription>{(e as Error).message}</AlertDescription>
@@ -59,8 +59,8 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
 
   return (
     <>
-      <PageHeader title="Preview" actions={<ComputerPicker computers={computers.map((c) => ({ guid: c.objectGuid, name: c.name, ou: shortDn(c.dn.slice(c.dn.indexOf(",") + 1)) }))} selected={computer?.objectGuid ?? null} />} />
-      <div className="flex flex-col gap-6 p-6">
+      <PageHeader title="Preview" wideActions actions={<ComputerPicker computers={computers.map((c) => ({ guid: c.objectGuid, name: c.name, ou: shortDn(c.dn.slice(c.dn.indexOf(",") + 1)) }))} selected={computer?.objectGuid ?? null} />} />
+      <div className="flex flex-col gap-4 p-4 md:gap-6 md:p-6">
         {!computer && (
           <Alert>
             <AlertTitle>What will a computer get?</AlertTitle>
@@ -99,7 +99,7 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
                       )}
                       {resolution.printers.map((r) => (
                         <TableRow key={r.printerId}>
-                          <TableCell className="font-medium">
+                          <TableCell className="font-medium whitespace-normal">
                             {name(r.printerId)}
                             {resolution.defaultPrinterId === r.printerId && (
                               <Badge variant="secondary" className="ml-2">
@@ -108,7 +108,7 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
                               </Badge>
                             )}
                           </TableCell>
-                          <TableCell className="text-muted-foreground">
+                          <TableCell className="text-muted-foreground whitespace-normal">
                             {r.source.kind === "computer" ? <Badge variant="outline">Computer override</Badge> : shortDn(r.source.ouDn) || "Domain root"}
                           </TableCell>
                         </TableRow>
@@ -134,8 +134,8 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
                     <TableBody>
                       {resolution.trace.map((t) => (
                         <TableRow key={t.ouDn}>
-                          <TableCell>{shortDn(t.ouDn) || "Domain root"}</TableCell>
-                          <TableCell className="flex flex-wrap gap-1">
+                          <TableCell className="whitespace-normal">{shortDn(t.ouDn) || "Domain root"}</TableCell>
+                          <TableCell className="flex flex-wrap gap-1 whitespace-normal">
                             {t.blockedInheritance && <Badge variant="destructive">Blocks inheritance</Badge>}
                             {t.blocked.map((id) => (
                               <Badge key={`b${id}`} variant="destructive">

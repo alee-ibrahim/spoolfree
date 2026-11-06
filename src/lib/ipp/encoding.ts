@@ -177,8 +177,10 @@ export function getPrinterAttributesRequest(
   printerUri: string,
   requested: string[],
   requestId = 1,
+  version: [number, number] = [2, 0],
 ): Buffer {
   return encodeRequest({
+    version,
     operation: Operation.getPrinterAttributes,
     requestId,
     operationAttributes: [

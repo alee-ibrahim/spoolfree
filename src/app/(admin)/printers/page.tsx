@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { PageHeader } from "@/components/app/page-header";
 import { db, schema } from "@/lib/db";
+import { printerUri } from "@/lib/ipp/interpret";
 import { requireAdmin } from "@/lib/session";
 import { PrinterFormDialog, PrintersTable } from "./printers-client";
 
@@ -18,7 +19,7 @@ export default async function PrintersPage() {
   return (
     <>
       <PageHeader title="Printers" actions={<PrinterFormDialog />} />
-      <div className="p-6">
+      <div className="p-4 md:p-6">
         <PrintersTable
           printers={printers.map((p) => ({
             id: p.id,
@@ -26,12 +27,16 @@ export default async function PrintersPage() {
             host: p.host,
             port: p.port,
             ippPath: p.ippPath,
+            ippPathAuto: p.ippPathAuto,
+            ippUri: printerUri(p),
+            ippVersion: p.lastTest?.ippRequestVersion ?? null,
             useTls: p.useTls,
             location: p.location,
             model: p.model,
             notes: p.notes,
             legacyTakeover: p.legacyTakeover,
             legacyShares: p.legacyShares,
+            legacyAliases: p.legacyAliases,
             defaultSides: p.defaultSides,
             sidesSupported: p.lastTest?.sidesSupported ?? null,
             sidesDefault: p.lastTest?.sidesDefault ?? null,

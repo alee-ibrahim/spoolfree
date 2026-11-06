@@ -1,7 +1,10 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   bigserial,
   boolean,
+  date,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -40,6 +43,11 @@ export const printers = pgTable(
     host: text("host").notNull(),
     port: integer("port").notNull().default(631),
     ippPath: text("ipp_path").notNull().default("/ipp/print"),
+    /**
+     * true: Test (and saving a new endpoint) detects the IPP path (/ipp/print, /ipp, /ipp/printer, /printers/lp1, /)
+     * and stores it in ippPath. false: ippPath is a manual override and is never changed by detection.
+     */
+    ippPathAuto: boolean("ipp_path_auto").notNull().default(true),
     useTls: boolean("use_tls").notNull().default(false),
     location: text("location"),
     model: text("model"),
@@ -53,6 +61,11 @@ export const printers = pgTable(
     legacyTakeover: text("legacy_takeover").$type<LegacyTakeover>().notNull().default("off"),
     /** Share names of this device on the LEGACY_PRINT_SERVERS (\\server\<share> connections). */
     legacyShares: jsonb("legacy_shares").$type<string[]>().notNull().default([]),
+    /**
+     * Old host names of this device (NetBIOS-style names, retired DNS names) that legacy TCP/IP ports may still
+     * point at. Takeover matches a port host equal to any of them (case-insensitive, ".local" optional).
+     */
+    legacyAliases: jsonb("legacy_aliases").$type<string[]>().notNull().default([]),
     /** Default duplex for the PC queue (agents run Set-PrintConfiguration -DuplexingMode). */
     defaultSides: text("default_sides").$type<DefaultSides>().notNull().default("auto"),
     /**
@@ -65,7 +78,7 @@ export const printers = pgTable(
     macAddresses: jsonb("mac_addresses").$type<string[]>().notNull().default([]),
     identityCheckedAt: timestamp("identity_checked_at", { withTimezone: true }),
     lastTestAt: timestamp("last_test_at", { withTimezone: true }),
-    lastTest: jsonb("last_test").$type<DriverlessCheck & { error?: string | null }>(),
+    lastTest: jsonb("last_test").$type<DriverlessCheck & { error?: string | null; ippPath?: string; ippRequestVersion?: string }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -146,6 +159,8 @@ export interface AgentReport {
   critical?: string[];
   /** Queues created with the TCP/IP port fallback because Add-Printer -IppURL failed (agents 0.4.6+). */
   fallbacks?: { printer: string; method: string; reason?: string }[];
+  /** Print analytics collection state (agents 0.5+). */
+  analytics?: { enabled: boolean; logEnabled?: boolean | null; sent?: number; error?: string | null };
 }
 
 export const AGENT_UPDATE_STATES = ["current", "pending", "updated", "rolled-back", "failed", "skipped"] as const;
@@ -248,3 +263,64 @@ export const localUsers = pgTable(
   },
   (t) => [uniqueIndex("local_users_username_unique").on(t.username)],
 );
+
+// --- Print analytics (ANALYTICS_ENABLED; agents 0.5+ send PrintService event 307) --------------------------
+
+/** One printed document, as a PC's PrintService/Operational log recorded it (event 307). */
+export const printJobs = pgTable(
+  "print_jobs",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The reporting PC (objectGUID, name and DN at the time the event was received). */
+    computerGuid: text("computer_guid").notNull(),
+    computerName: text("computer_name").notNull(),
+    /** Parent OU of the PC when the event was received (pages by OU / department). */
+    ouDn: text("ou_dn"),
+    /** EventRecordID in the PC's log. Unique per PC together with the event time (a cleared log restarts ids). */
+    recordId: bigint("record_id", { mode: "number" }).notNull(),
+    printedAt: timestamp("printed_at", { withTimezone: true }).notNull(),
+    userName: text("user_name"),
+    userSid: text("user_sid"),
+    /** Client machine in the event (differs from the reporting PC for shared queues). */
+    clientComputer: text("client_computer"),
+    queueName: text("queue_name").notNull(),
+    /** The Spoolfree printer when the queue is managed; null for queues Spoolfree does not manage. */
+    printerId: uuid("printer_id").references(() => printers.id, { onDelete: "set null" }),
+    port: text("port"),
+    /** Host behind the queue's port (helps find hand-installed printers). */
+    portHost: text("port_host"),
+    pages: integer("pages"),
+    bytes: bigint("bytes", { mode: "number" }),
+    /** Only stored when ANALYTICS_COLLECT_DOCUMENT_NAMES is on. */
+    documentName: text("document_name"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("print_jobs_event_unique").on(t.computerGuid, t.recordId, t.printedAt),
+    index("print_jobs_printed_at_idx").on(t.printedAt),
+    index("print_jobs_printer_idx").on(t.printerId, t.printedAt),
+  ],
+);
+
+/**
+ * Daily page-counter readings from the poller (IPP printer-impressions-completed / SNMP prtMarkerLifeCount).
+ * first/last are the first and last readings of the day (ANALYTICS_TIME_ZONE); deltas give total pages.
+ */
+export const printerCounterDaily = pgTable(
+  "printer_counter_daily",
+  {
+    printerId: uuid("printer_id")
+      .notNull()
+      .references(() => printers.id, { onDelete: "cascade" }),
+    day: date("day", { mode: "string" }).notNull(),
+    /** Printer revision at the time: a replaced device has its own counter. */
+    revision: integer("revision").notNull(),
+    firstCount: bigint("first_count", { mode: "number" }).notNull(),
+    lastCount: bigint("last_count", { mode: "number" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.printerId, t.day] })],
+);
+
+export type PrintJob = typeof printJobs.$inferSelect;

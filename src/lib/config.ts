@@ -108,6 +108,25 @@ const schema = z.object({
         .filter(Boolean),
     ),
 
+  // Print analytics (agents 0.5+ read PrintService event 307 on PCs). Off unless "1"/"true".
+  ANALYTICS_ENABLED: bool,
+  /** Also collect document names (titles can be personal or confidential). Off unless "1"/"true". */
+  ANALYTICS_COLLECT_DOCUMENT_NAMES: bool,
+  /** Print jobs and daily printer counters older than this are deleted (hourly purge). */
+  ANALYTICS_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+  /** IANA time zone for day buckets (charts, daily counters). */
+  ANALYTICS_TIME_ZONE: z
+    .string()
+    .default("UTC")
+    .refine((tz) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "ANALYTICS_TIME_ZONE must be an IANA time zone"),
+
   // Development only
   DEV_FAKE_AD: bool,
   /** Optional JSON file that replaces the sample directory (see directory/fake.ts). */

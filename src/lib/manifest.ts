@@ -1,4 +1,5 @@
 import type { KeyObject } from "node:crypto";
+import { manifestAliases } from "./aliases";
 import { normalizeMac, normalizeUuid } from "./identity";
 import { printerUri } from "./ipp/interpret";
 import type { Resolution } from "./resolve";
@@ -19,6 +20,7 @@ export interface ManifestPrinterInput {
   revision: number;
   legacyTakeover?: "off" | "dry-run" | "on";
   legacyShares?: string[];
+  legacyAliases?: string[];
   defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
   deviceUuid?: string | null;
   macAddresses?: string[];
@@ -48,6 +50,17 @@ export interface ManifestPrinter {
    */
   deviceUuid?: string | null;
   macAddresses?: string[];
+  /**
+   * Old host names of the device (agents 0.5+): a legacy TCP/IP port whose host equals one of them (case-insensitive,
+   * ".local" optional) is a queue for this device. Lower-case; empty unless takeover is on or dry-run.
+   */
+  legacyAliases?: string[];
+}
+
+/** Print analytics settings for agents (0.5+). */
+export interface ManifestAnalytics {
+  enabled: boolean;
+  collectDocumentNames: boolean;
 }
 
 export interface ManifestPayload {
@@ -72,6 +85,8 @@ export interface ManifestPayload {
   agentBundle?: { sha256: string; size: number; signature: string };
   /** Agents install an older agentVersion only when this is true (AGENT_ALLOW_DOWNGRADE). */
   agentAllowDowngrade?: boolean;
+  /** Print analytics (agents 0.5+): read PrintService event 307 and POST it to /api/agent/jobs. */
+  analytics?: ManifestAnalytics;
 }
 
 export interface SignedManifest {
@@ -96,6 +111,7 @@ export function buildManifest(args: {
   serial?: string;
   legacyPrintServers?: string[];
   agentUpdate?: AgentUpdateOffer;
+  analytics?: ManifestAnalytics;
 }): ManifestPayload {
   const list: ManifestPrinter[] = [];
   for (const r of args.resolution.printers) {
@@ -115,6 +131,7 @@ export function buildManifest(args: {
       deviceUuid: normalizeUuid(p.deviceUuid ?? null),
       macAddresses: [...new Set((p.macAddresses ?? []).map((m) => normalizeMac(m)).filter((m): m is string => m !== null))].sort(),
       legacy: { mode: p.legacyTakeover ?? "off", shares: p.legacyTakeover && p.legacyTakeover !== "off" ? (p.legacyShares ?? []) : [] },
+      legacyAliases: p.legacyTakeover && p.legacyTakeover !== "off" ? manifestAliases(p.legacyAliases) : [],
     });
   }
   const def = list.find((p) => p.isDefault)?.name ?? null;
@@ -129,6 +146,7 @@ export function buildManifest(args: {
     syncIntervalMinutes: args.syncIntervalMinutes ?? 15,
     legacyPrintServers: args.legacyPrintServers ?? [],
     serverPrinterIds: [...args.printers.keys()].sort(),
+    analytics: args.analytics ?? { enabled: false, collectDocumentNames: false },
     ...(args.agentUpdate
       ? {
           agentVersion: args.agentUpdate.version,

@@ -7,7 +7,9 @@ import { config } from "@/lib/config";
 import { db, schema } from "@/lib/db";
 import { directory } from "@/lib/directory";
 import { normalizeDn } from "@/lib/dn";
+import { aliasList } from "@/lib/aliases";
 import { getPrinterAttributes } from "@/lib/ipp/client";
+import { detectIppPath, IppDetectError, type DetectedPath } from "@/lib/ipp/detect";
 import { checkDriverless, printerUri, TEST_ATTRIBUTES, type DriverlessCheck } from "@/lib/ipp/interpret";
 import { requireAdmin } from "@/lib/session";
 import { refreshIdentity } from "@/lib/status/identity";
@@ -26,7 +28,14 @@ const PrinterInput = z.object({
     .regex(/^[^\\/,!]+$/, "Name cannot contain \\ / , or !"),
   host: z.string().trim().min(1, "Host is required").max(253).regex(hostRe, "Not a valid hostname or IP"),
   port: z.coerce.number().int().min(1).max(65535).default(631),
-  ippPath: z.string().trim().min(1).max(200).default("/ipp/print"),
+  /** Manual IPP path; empty = auto-detect. */
+  ippPathOverride: z
+    .string()
+    .trim()
+    .max(200)
+    .optional()
+    .transform((v) => (v ? (v.startsWith("/") ? v : `/${v}`) : null))
+    .pipe(z.string().regex(/^\/[\x21-\x7e]*$/, "The IPP path must be a URL path such as /ipp/print").nullable()),
   useTls: z.preprocess((v) => v === "on" || v === "true" || v === true, z.boolean()),
   location: z.string().trim().max(200).optional().transform((v) => v || null),
   model: z.string().trim().max(200).optional().transform((v) => v || null),
@@ -39,6 +48,7 @@ const PrinterInput = z.object({
     .optional()
     .transform((v) => [...new Set((v ?? "").split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean))])
     .pipe(z.array(z.string().max(80).regex(/^[^\\/]+$/, "Share names only, without \\\\server\\"))),
+  legacyAliases: aliasList,
 });
 
 function formObject(fd: FormData) {
@@ -50,7 +60,39 @@ function firstError(e: z.ZodError): string {
 }
 
 function revalidateAll() {
-  for (const p of ["/", "/printers", "/assignments", "/preview", "/unassigned", "/agents", "/audit"]) revalidatePath(p);
+  for (const p of ["/", "/printers", "/assignments", "/preview", "/unassigned", "/agents", "/audit", "/analytics"]) revalidatePath(p);
+}
+
+/** Short timeout for detection while saving: an unreachable host fails fast and the path stays as it was. */
+const SAVE_DETECT_TIMEOUT_MS = 4000;
+
+/** Best-effort IPP path detection for a new endpoint; null when the device does not answer. */
+async function detectOnSave(endpoint: { host: string; port: number; useTls: boolean }): Promise<DetectedPath | null> {
+  try {
+    return await detectIppPath(endpoint, ["printer-uri-supported"], Math.min(config().POLL_TIMEOUT_MS, SAVE_DETECT_TIMEOUT_MS), getPrinterAttributes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The IPP path to store: a manual override as given; in auto mode the detected path when the endpoint is new or
+ * changed (or the printer just switched to auto), otherwise the stored one.
+ */
+async function resolveIppPath(
+  input: { host: string; port: number; useTls: boolean; ippPathOverride: string | null },
+  before: { host: string; port: number; useTls: boolean; ippPath: string; ippPathAuto: boolean } | null,
+): Promise<{ ippPath: string; ippPathAuto: boolean; note: string }> {
+  if (input.ippPathOverride) return { ippPath: input.ippPathOverride, ippPathAuto: false, note: "" };
+  const endpointSame = !!before && before.host === input.host && before.port === input.port && before.useTls === input.useTls;
+  if (before && endpointSame && before.ippPathAuto) return { ippPath: before.ippPath, ippPathAuto: true, note: "" };
+  const found = await detectOnSave(input);
+  if (found) return { ippPath: found.path, ippPathAuto: true, note: `. IPP address detected: ${found.uri} (IPP ${found.version})` };
+  return {
+    ippPath: before && endpointSame ? before.ippPath : "/ipp/print",
+    ippPathAuto: true,
+    note: ". The printer did not answer, so the IPP path is not detected yet; run Test when it is online.",
+  };
 }
 
 export async function savePrinter(_prev: ActionResult | null, fd: FormData): Promise<ActionResult> {
@@ -60,29 +102,34 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
   const id = fd.get("id")?.toString() || null;
   const d = db();
   let sidesWarning = "";
+  let ippNote = "";
   try {
+    const { ippPathOverride, ...rest } = parsed.data;
     if (id) {
       const [before] = await d.select().from(schema.printers).where(eq(schema.printers.id, id));
       if (!before) return { ok: false, error: "Printer not found" };
-      sidesWarning = sidesSupportWarning(parsed.data.defaultSides, before.lastTest?.sidesSupported);
-      const endpointChanged =
-        before.host !== parsed.data.host ||
-        before.port !== parsed.data.port ||
-        before.ippPath !== parsed.data.ippPath ||
-        before.useTls !== parsed.data.useTls;
+      sidesWarning = sidesSupportWarning(rest.defaultSides, before.lastTest?.sidesSupported);
+      const ipp = await resolveIppPath({ ...rest, ippPathOverride }, before);
+      ippNote = ipp.note;
+      const values = { ...rest, ippPath: ipp.ippPath, ippPathAuto: ipp.ippPathAuto };
+      const deviceChanged = before.host !== values.host || before.port !== values.port || before.useTls !== values.useTls;
+      const endpointChanged = deviceChanged || before.ippPath !== values.ippPath;
       await d
         .update(schema.printers)
         .set({
-          ...parsed.data,
+          ...values,
           updatedAt: new Date(),
           revision: endpointChanged ? before.revision + 1 : before.revision,
-          ...(endpointChanged ? NO_IDENTITY : {}),
+          ...(deviceChanged ? NO_IDENTITY : {}),
         })
         .where(eq(schema.printers.id, id));
-      await audit(admin.email, "printer.update", "printer", id, { before: pick(before), after: parsed.data });
+      await audit(admin.email, "printer.update", "printer", id, { before: pick(before), after: values });
     } else {
-      const [row] = await d.insert(schema.printers).values(parsed.data).returning({ id: schema.printers.id });
-      await audit(admin.email, "printer.create", "printer", row.id, parsed.data);
+      const ipp = await resolveIppPath({ ...rest, ippPathOverride }, null);
+      ippNote = ipp.note;
+      const values = { ...rest, ippPath: ipp.ippPath, ippPathAuto: ipp.ippPathAuto };
+      const [row] = await d.insert(schema.printers).values(values).returning({ id: schema.printers.id });
+      await audit(admin.email, "printer.create", "printer", row.id, values);
     }
   } catch (e) {
     if (String((e as Error).message).includes("printers_name_unique") || (e as { code?: string }).code === "23505")
@@ -90,7 +137,7 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
     throw e;
   }
   revalidateAll();
-  return { ok: true, message: (id ? "Printer updated" : "Printer added") + sidesWarning };
+  return { ok: true, message: (id ? "Printer updated" : "Printer added") + ippNote + sidesWarning };
 }
 
 /** Warns (but saves) when the printer's last IPP test did not list the chosen duplex mode. */
@@ -107,11 +154,13 @@ function pick(p: typeof schema.printers.$inferSelect) {
     host: p.host,
     port: p.port,
     ippPath: p.ippPath,
+    ippPathAuto: p.ippPathAuto,
     useTls: p.useTls,
     model: p.model,
     location: p.location,
     legacyTakeover: p.legacyTakeover,
     legacyShares: p.legacyShares,
+    legacyAliases: p.legacyAliases,
     defaultSides: p.defaultSides,
   };
 }
@@ -124,7 +173,7 @@ const ReplaceInput = z.object({
   host: PrinterInput.shape.host,
   model: z.string().trim().max(200).optional().transform((v) => v || null),
   port: PrinterInput.shape.port,
-  ippPath: PrinterInput.shape.ippPath,
+  ippPathOverride: PrinterInput.shape.ippPathOverride,
   useTls: PrinterInput.shape.useTls,
 });
 
@@ -136,7 +185,9 @@ export async function replacePrinter(_prev: ActionResult | null, fd: FormData): 
   const d = db();
   const [before] = await d.select().from(schema.printers).where(eq(schema.printers.id, parsed.data.id));
   if (!before) return { ok: false, error: "Printer not found" };
-  const { id, ...rest } = parsed.data;
+  const { id, ippPathOverride, ...endpoint } = parsed.data;
+  const ipp = await resolveIppPath({ ...endpoint, ippPathOverride }, null);
+  const rest = { ...endpoint, ippPath: ipp.ippPath, ippPathAuto: ipp.ippPathAuto };
   await d
     .update(schema.printers)
     .set({ ...rest, revision: before.revision + 1, updatedAt: new Date(), lastTest: null, lastTestAt: null, ...NO_IDENTITY })
@@ -144,7 +195,7 @@ export async function replacePrinter(_prev: ActionResult | null, fd: FormData): 
   await d.delete(schema.printerStatus).where(eq(schema.printerStatus.printerId, id));
   await audit(admin.email, "printer.replace", "printer", id, { before: pick(before), after: rest, revision: before.revision + 1 });
   revalidateAll();
-  return { ok: true, message: `${before.name} now points at ${rest.host}. PCs update at their next sync.` };
+  return { ok: true, message: `${before.name} now points at ${rest.host}${ipp.note}. PCs update at their next sync.` };
 }
 
 export async function deletePrinter(id: string): Promise<ActionResult> {
@@ -162,27 +213,60 @@ export async function deletePrinter(id: string): Promise<ActionResult> {
   return { ok: true, message: `Deleted ${before.name}` };
 }
 
-export type TestResult = { ok: true; check: DriverlessCheck; uri: string } | { ok: false; error: string; uri: string };
+export interface TestDetection {
+  /** true: the path was auto-detected; false: manual override. */
+  auto: boolean;
+  path: string | null;
+  /** IPP request version the device answered ("2.0" or "1.1"). */
+  version: string | null;
+  /** Auto mode only: the stored path changed (revision bumped; PCs re-create the queue). */
+  changed: boolean;
+  tried: DetectedPath["tried"];
+}
 
-/** IPP Get-Printer-Attributes: confirms the device is reachable and driverless-capable. */
+export type TestResult =
+  | { ok: true; check: DriverlessCheck; uri: string; detection: TestDetection }
+  | { ok: false; error: string; uri: string; detection: TestDetection | null };
+
+/**
+ * IPP Get-Printer-Attributes: confirms the device is reachable and driverless-capable. In auto mode the IPP path is
+ * detected (/ipp/print, /ipp, /ipp/printer, /printers/lp1, /; IPP 2.0 then 1.1) and stored; a manual path is only
+ * tested.
+ */
 export async function testPrinter(id: string): Promise<TestResult> {
   const admin = await requireAdmin();
   const d = db();
   const [p] = await d.select().from(schema.printers).where(eq(schema.printers.id, id));
-  if (!p) return { ok: false, error: "Printer not found", uri: "" };
-  const uri = printerUri(p);
+  if (!p) return { ok: false, error: "Printer not found", uri: "", detection: null };
   let result: TestResult;
+  const timeout = Math.max(config().POLL_TIMEOUT_MS, 8000);
   try {
-    const attrs = await getPrinterAttributes(uri, TEST_ATTRIBUTES, Math.max(config().POLL_TIMEOUT_MS, 8000));
-    result = { ok: true, check: checkDriverless(attrs), uri };
-    await d.update(schema.printers).set({ lastTest: result.check, lastTestAt: new Date() }).where(eq(schema.printers.id, id));
+    const found = await detectIppPath(p, TEST_ATTRIBUTES, timeout, getPrinterAttributes, p.ippPathAuto ? undefined : [p.ippPath]);
+    const changed = p.ippPathAuto && found.path !== p.ippPath;
+    const check = checkDriverless(found.attrs);
+    result = { ok: true, check, uri: found.uri, detection: { auto: p.ippPathAuto, path: found.path, version: found.version, changed, tried: found.tried } };
+    await d
+      .update(schema.printers)
+      .set({
+        lastTest: { ...check, ippPath: found.path, ippRequestVersion: found.version },
+        lastTestAt: new Date(),
+        ...(changed ? { ippPath: found.path, revision: p.revision + 1, updatedAt: new Date() } : {}),
+      })
+      .where(eq(schema.printers.id, id));
+    if (changed) await audit(admin.email, "printer.ipp_path_detected", "printer", id, { before: p.ippPath, after: found.path, version: found.version });
     // printer-uuid and MAC addresses go into the manifest for legacy queue matching on PCs.
-    await refreshIdentity(p, { uuid: result.check.uuid, model: result.check.model }).catch(() => undefined);
+    await refreshIdentity({ ...p, ippPath: found.path }, { uuid: check.uuid, model: check.model }).catch(() => undefined);
   } catch (e) {
-    result = { ok: false, error: (e as Error).message, uri };
+    const tried = e instanceof IppDetectError ? e.tried : [];
+    result = {
+      ok: false,
+      error: (e as Error).message,
+      uri: printerUri(p),
+      detection: { auto: p.ippPathAuto, path: null, version: null, changed: false, tried },
+    };
   }
-  await audit(admin.email, "printer.test", "printer", id, { uri, ok: result.ok && result.check.ok });
-  revalidatePath("/printers");
+  await audit(admin.email, "printer.test", "printer", id, { uri: result.uri, ok: result.ok && result.check.ok });
+  revalidateAll();
   return result;
 }
 

@@ -105,6 +105,68 @@ Describe 'Get-SpoolfreeLegacyMatches' {
     }
 }
 
+Describe 'Get-SpoolfreeLegacyMatches legacy aliases' {
+    BeforeAll {
+        function PA([AllowNull()][string[]]$aliases, [string]$mode = 'on') {
+            $p = [pscustomobject]@{ id = 'p1'; name = 'Finance Laser'; host = 'prn-fin.example.org'; revision = 1
+                legacy = [pscustomobject]@{ mode = $mode; shares = @() } }
+            if ($null -ne $aliases) { $p | Add-Member -NotePropertyName legacyAliases -NotePropertyValue $aliases }
+            return $p
+        }
+        function MA($printer, [string]$hostAddress, [string]$portName = 'IP_old', [string[]]$addresses = @()) {
+            $ports = @{ $portName = (Port 'Standard TCP/IP Port' $hostAddress) }
+            return , @(Get-SpoolfreeLegacyMatches -Printer $printer -Queues @((Q 'Old Brother' $portName)) -Ports $ports -PrinterAddresses $addresses)
+        }
+    }
+    It 'matches a TCP/IP port whose host is a legacy alias' {
+        $r = MA (PA @('old-prn-office2')) 'OLD-PRN-OFFICE2'
+        $r.Count | Should -Be 1
+        $r[0].Queue | Should -Be 'Old Brother'
+        $r[0].Kind | Should -Be 'TCP/IP port'
+        $r[0].Reason | Should -Be 'TCP/IP port host OLD-PRN-OFFICE2 is a legacy alias'
+    }
+    It 'compares case-insensitively' {
+        (MA (PA @('OLD-Prn-Office2')) 'old-prn-office2').Count | Should -Be 1
+    }
+    It 'ignores .local and a trailing dot on either side' {
+        (MA (PA @('old-prn-office2')) 'OLD-PRN-OFFICE2.local').Count | Should -Be 1
+        (MA (PA @('old-prn-office2')) 'OLD-PRN-OFFICE2.local.').Count | Should -Be 1
+        (MA (PA @('old-prn-office2.local')) 'OLD-PRN-OFFICE2').Count | Should -Be 1
+        (MA (PA @('old-prn-office2.')) 'old-prn-office2.LOCAL').Count | Should -Be 1
+    }
+    It 'matches IPP URL ports by alias too' {
+        $r = @(Get-SpoolfreeLegacyMatches -Printer (PA @('old-brother')) -Queues @((Q 'Old IPP' 'http://old-brother.local:631/ipp/print')) -Ports @{})
+        $r.Count | Should -Be 1
+        $r[0].Reason | Should -Be 'IPP port host old-brother.local is a legacy alias'
+    }
+    It 'does not match other hosts' {
+        (MA (PA @('old-prn-office2')) 'OLD-PRN-OFFICE22').Count | Should -Be 0
+        (MA (PA @('old-prn-office2')) 'OLD-PRN-OFFICE2.example.org').Count | Should -Be 0
+        (MA (PA @('old-prn-office2')) 'other-host').Count | Should -Be 0
+    }
+    It 'does nothing when legacyAliases is absent or empty' {
+        (MA (PA $null) 'OLD-PRN-OFFICE2').Count | Should -Be 0
+        (MA (PA @()) 'OLD-PRN-OFFICE2').Count | Should -Be 0
+        @(Get-SpoolfreeLegacyAliases (PA $null)).Count | Should -Be 0
+    }
+    It 'respects takeover mode and safety rules' {
+        (MA (PA @('old-prn-office2') 'off') 'OLD-PRN-OFFICE2').Count | Should -Be 0
+        (MA (PA @('old-prn-office2') 'dry-run') 'OLD-PRN-OFFICE2').Count | Should -Be 1
+        $ports = @{ 'IP_old' = (Port 'Standard TCP/IP Port' 'OLD-PRN-OFFICE2') }
+        $printer = PA @('old-prn-office2')
+        # Spoolfree's own queue (comment or marker), a virtual driver and a USB port are never matched.
+        @(Get-SpoolfreeLegacyMatches -Printer $printer -Queues @((Q 'Mine' 'IP_old' 'x' 'Local' 'Managed by Spoolfree [p1 rev 1]')) -Ports $ports).Count | Should -Be 0
+        @(Get-SpoolfreeLegacyMatches -Printer $printer -Queues @((Q 'Marked' 'IP_old')) -Ports $ports -Installed @('marked')).Count | Should -Be 0
+        @(Get-SpoolfreeLegacyMatches -Printer $printer -Queues @((Q 'PDF' 'IP_old' 'Some PDF Writer')) -Ports $ports).Count | Should -Be 0
+        @(Get-SpoolfreeLegacyMatches -Printer $printer -Queues @((Q 'USB one' 'USB001')) -Ports @{ 'USB001' = (Port 'USB Monitor' 'OLD-PRN-OFFICE2') }).Count | Should -Be 0
+    }
+    It 'normalises alias keys' {
+        ConvertTo-SpoolfreeAliasKey ' Host.LOCAL. ' | Should -Be 'host'
+        ConvertTo-SpoolfreeAliasKey '.local' | Should -BeNullOrEmpty
+        ConvertTo-SpoolfreeAliasKey '' | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Legacy helpers' {
     It 'parses URL hosts' {
         Get-SpoolfreeUrlHost 'IPPS://[2001:db8::1]:443/ipp/print' | Should -Be '2001:db8::1'
