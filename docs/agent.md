@@ -27,6 +27,42 @@ The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A 
 Seen on Windows 11 21H2 (build 22000): after takeover removed the PC's WSD queue for the device, `Add-Printer -IppURL`
 kept failing with "The specified WSD or IPP print device was not found". The same flow worked on 24H2.
 
+**"The specified printer already exists" after takeover** (0.6.2). Some printers (seen on HP LaserJet Pro / MFP models
+on Windows 11 25H2) use their WS-Discovery endpoint UUID as IPP `printer-uuid`. Windows keeps the WSD device
+association (`HKLM\SYSTEM\CurrentControlSet\Services\DeviceAssociationService\State\Store\DAFWSDProvider#urn:uuid:<uuid>`)
+after the WSD queue and its Plug and Play nodes are gone, and `Add-Printer -IppURL` then fails with "already exists"
+although no queue has that name. Before 0.6.2 the agent treated that as a name clash and stopped, so a PC whose legacy
+queue takeover had just removed was left without the printer. From 0.6.2, when the name is free and takeover is **on**
+for the printer or already removed a legacy queue for it on this PC, the agent:
+
+1. looks again for any queue that holds the device (also one Windows set up again by itself right after the removal),
+   removes it and retries `-IppURL`; the removal is reported in `legacy` like any takeover;
+2. if no queue holds the device, clears the stale association: the store entry (backed up to
+   `%ProgramData%\Spoolfree\Backup\daf-*.reg`), the device's `SWD\DAFWSDProvider\urn:uuid:<uuid>` nodes, then restarts
+   the Device Association service, and retries `-IppURL`. Nothing is touched while a queue still uses a WSD/IPP port of
+   the device;
+3. as a last resort (WPP off) creates the TCP/IP fallback queue, with the **driver of the legacy queue it replaced** when
+   that driver is still installed (remembered in `HKLM:\SOFTWARE\Spoolfree\LegacyDrivers`), otherwise the Microsoft IPP
+   Class Driver. The PC is never left without the printer.
+
+In dry-run nothing changes: the error still names the blocking queue. Queue names are matched literally from 0.6.2
+(`Get-Printer -Name` / `Remove-Printer -Name` treat `[ ]` as wildcards, so a queue such as
+`HP Color LaserJet Pro MFP 3303 [HPI0AEEE8]` was reported as removed while Windows kept it).
+
+**Windows automatic printer setup.** "Set up network connected devices automatically" (NcdAutoSetup) only acts on
+networks with the Private profile, not on domain networks, and needs the Function Discovery services. It was not the
+cause of the "already exists" failures above. If Windows does re-create a queue for a managed printer, step 1 removes
+it. Should that happen again and again (PCs on Private-profile networks), turn automatic setup off with a GPP Registry
+item `HKLM\SOFTWARE\Policies\Microsoft\Windows\NcdAutoSetup\Private` `AutoSetup` = `0` (DWORD).
+
+**HP software prompts.** Windows Update can install HP extension drivers for an HP IPP queue
+(`euthenia_extensioninf_x64.inf`, extension id `{DFC94AE1-91F8-4F6E-BDF2-157543A2109A}`) that add the software component
+`SWC\HP_Device_DeployAgent` (`da_componentinf_x64.inf`). That component's `AddSoftware` runs
+`HP.DeviceSetupLauncher.exe` in the user's session, which asks non-admins for UAC. To block it, use *Computer
+Configuration > Administrative Templates > System > Device Installation > Device Installation Restrictions >
+Prevent installation of devices that match any of these device IDs* with `SWC\HP_Device_DeployAgent` (and "Also apply
+to matching devices that are already installed" to remove it from PCs that have it). Printing does not depend on it.
+
 **PC left without a printer.** Takeover may have removed a legacy queue for a printer, in this or an earlier sync, while
 the Spoolfree queue for that printer still does not exist. Every sync then reports it in the report's `critical` field:
 `PC left without printer <name>: legacy queue(s) '<queue>' were removed and the Spoolfree queue could not be created

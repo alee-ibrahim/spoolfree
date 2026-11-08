@@ -47,7 +47,7 @@ if ($takeover) {
                 $entry = [ordered]@{ printer = $printer.name; queue = $m.Queue; reason = $m.Reason; action = 'would-remove' }
                 if ($printer.legacy.mode -eq 'on') {
                     try {
-                        Remove-Printer -Name $m.Queue -ErrorAction Stop
+                        Remove-SpoolfreeQueue -Name $m.Queue
                         $entry.action = 'removed'
                         $removedHere[$m.Queue] = $printer.name
                     } catch {

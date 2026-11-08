@@ -94,7 +94,10 @@ foreach ($p in @($manifest.printers)) {
             $entry = [ordered]@{ printer = [string]$p.name; queue = $m.Queue; reason = $m.Reason; action = 'would-remove'; scope = 'machine' }
             if ($mode -eq 'on' -and $PSCmdlet.ShouldProcess($m.Queue, "Remove legacy queue (replaced by $($p.name))")) {
                 try {
-                    Remove-Printer -Name $m.Queue -ErrorAction Stop
+                    # Remember the queue's model driver for the TCP/IP fallback (never leave the PC without the printer).
+                    $drv = Get-SpoolfreeLegacyDriverChoice -Queues @($queues | Where-Object { $_.Name -eq $m.Queue })
+                    if ($drv -and -not (Get-SpoolfreeLegacyDriver -Printer ([string]$p.name))) { Set-SpoolfreeLegacyDriver -Printer ([string]$p.name) -Driver $drv }
+                    Remove-SpoolfreeQueue -Name $m.Queue
                     $entry.action = 'removed'
                     $legacyRemoved[$m.Queue] = [string]$p.name
                     Write-Log "Legacy queue '$($m.Queue)' removed ($($m.Reason)); replaced by '$($p.name)'."
@@ -139,32 +142,56 @@ if ($PSCmdlet.ShouldProcess('Spoolfree Sync task', 'set interval')) {
     }
 }
 
+# Creates one queue (Add/Replace). 0.6.2: when takeover is on for the printer or already removed a legacy queue for it
+# here, an "already exists" failure is recovered (blocking queue removed, stale device association cleared, TCP/IP
+# fallback with the old queue's driver) so the PC is never left without the printer.
+$takeoverPrinters = @{}
+foreach ($v in @((Get-SpoolfreeProperty (Get-SpoolfreeTakeoverState) 'removedMap')).PSObject.Properties) { if ($v.Value) { $takeoverPrinters[([string]$v.Value).ToLowerInvariant()] = $true } }
+foreach ($v in $legacyRemoved.Values) { $takeoverPrinters[([string]$v).ToLowerInvariant()] = $true }
+$lateRemoved = @{}
+function Install-SyncStep($step) {
+    $name = [string]$step.Name
+    $on = (Get-SpoolfreeLegacyMode $step.Printer) -eq 'on'
+    $recovery = $on -or $takeoverPrinters.ContainsKey($name.ToLowerInvariant())
+    $find = $null
+    if ($on) {
+        $find = {
+            $q2 = Get-SpoolfreeQueueInventory
+            $p2 = Get-SpoolfreePortInventory
+            @(Get-SpoolfreeLegacyMatches -Printer $step.Printer -Queues $q2 -Ports $p2 -PrinterAddresses (Get-SpoolfreePrinterAddressSet -Printer $step.Printer) -LegacyServers $legacyServers -Installed @(Get-SpoolfreeInstalled | ForEach-Object { [string]$_.Name }) -ServerId $serverId -ServerPrinterIds $serverPrinterIds) |
+                Where-Object { $_.Kind -ne 'connection' -and -not ([string]$_.Queue).StartsWith('\') } | ForEach-Object { [string]$_.Queue }
+        }
+    }
+    $r = Install-SpoolfreePrinterResilient -Printer $step.Printer -Method $method -ServerId $serverId -ProtectedPrintMode $wpp `
+        -TakeoverRecovery $recovery -FindBlocking $find -FallbackDriver (Get-SpoolfreeLegacyDriver -Printer $name)
+    foreach ($n in @($r.Notes)) { Write-Log "${name}: $n" }
+    foreach ($rq in @($r.RemovedQueues)) {
+        $lateRemoved[$rq] = $name
+        $legacy.Add([pscustomobject][ordered]@{ printer = $name; queue = $rq; reason = 'held the device when the Spoolfree queue was created'; action = 'removed'; scope = 'machine' })
+        Write-Log "Legacy queue '$rq' removed (held the device of '$name')."
+    }
+    if ($r.Fallback) { $fallbacks.Add([ordered]@{ printer = $name; method = $r.Method; reason = (@($r.Notes) | Select-Object -First 1) }) }
+    $added.Add($name)
+}
+
 foreach ($step in $plan) {
     if (-not $PSCmdlet.ShouldProcess($step.Name, $step.Action)) { continue }
     try {
         switch ($step.Action) {
-            'Add' {
-                $r = Install-SpoolfreePrinterResilient -Printer $step.Printer -Method $method -ServerId $serverId -ProtectedPrintMode $wpp
-                foreach ($n in @($r.Notes)) { Write-Log "$($step.Name): $n" }
-                if ($r.Fallback) { $fallbacks.Add([ordered]@{ printer = $step.Name; method = $r.Method; reason = (@($r.Notes) | Select-Object -First 1) }) }
-                $added.Add($step.Name)
-            }
+            'Add' { Install-SyncStep $step }
             'Replace' {
-                if (Get-Printer -Name $step.Name -ErrorAction SilentlyContinue) { Uninstall-SpoolfreePrinter -Name $step.Name }
-                $r = Install-SpoolfreePrinterResilient -Printer $step.Printer -Method $method -ServerId $serverId -ProtectedPrintMode $wpp
-                foreach ($n in @($r.Notes)) { Write-Log "$($step.Name): $n" }
-                if ($r.Fallback) { $fallbacks.Add([ordered]@{ printer = $step.Name; method = $r.Method; reason = (@($r.Notes) | Select-Object -First 1) }) }
-                $added.Add($step.Name)
+                if (Get-SpoolfreeQueueByName -Name $step.Name) { Uninstall-SpoolfreePrinter -Name $step.Name }
+                Install-SyncStep $step
             }
             'Remove' { Uninstall-SpoolfreePrinter -Name $step.Name; $removed.Add($step.Name) }
             'Conflict' { $errors.Add("$($step.Name): a queue with this name exists and was not created by Spoolfree; skipped.") }
             'SetDefault' { }
             'Keep' {
-                $q = Get-Printer -Name $step.Name -ErrorAction SilentlyContinue
+                $q = Get-SpoolfreeQueueByName -Name $step.Name
                 if ($q) {
                     $update = Get-SpoolfreeQueueUpdate -Printer $step.Printer -Queue $q -ServerId $serverId
                     if ($update.Count) {
-                        Set-Printer -Name $step.Name @update -ErrorAction Stop
+                        Set-Printer -InputObject $q @update -ErrorAction Stop
                         Write-Log "$($step.Name): updated $(@($update.Keys) -join ', ')."
                     }
                 }
@@ -185,6 +212,12 @@ foreach ($step in $plan) {
         $errors.Add($msg)
         Write-Log $msg
     }
+}
+# Queues removed while creating a Spoolfree queue count as taken over (user default carry-over, orphan check).
+if ($lateRemoved.Count -and $PSCmdlet.ShouldProcess('legacy takeover rules', 'publish')) {
+    foreach ($k in $lateRemoved.Keys) { $legacyRemoved[$k] = $lateRemoved[$k] }
+    try { Set-SpoolfreeTakeoverState -Servers $legacyServers -Rules $legacyRules.ToArray() -Removed $lateRemoved -Recreated @{} }
+    catch { Write-Log "Publishing takeover rules failed: $($_.Exception.Message)" }
 }
 # Takeover safety: a printer whose legacy queue was removed here (this or an earlier sync) but that could not be
 # created leaves the PC without that printer. Reported as critical (Agents page) until it is fixed.

@@ -149,7 +149,7 @@ Describe 'Install-SpoolfreePrinter (mocked print cmdlets)' {
             else { $script:queues | ForEach-Object { [pscustomobject]@{ Name = $_; PortName = 'x' } } }
         }
         Mock -ModuleName Spoolfree.Agent Add-Printer { $script:queues += 'Brother MFC (IPP)' }
-        Mock -ModuleName Spoolfree.Agent Rename-Printer { $script:queues = @($script:queues | Where-Object { $_ -ne 'Brother MFC (IPP)' }) + 'Staff Copier' }
+        Mock -ModuleName Spoolfree.Agent -RemoveParameterType InputObject Rename-Printer { $script:queues = @($script:queues | Where-Object { $_ -ne 'Brother MFC (IPP)' }) + 'Staff Copier' }
         Mock -ModuleName Spoolfree.Agent Set-Printer {}
         Mock -ModuleName Spoolfree.Agent Set-SpoolfreeMarker {}
 
@@ -175,7 +175,7 @@ Describe 'Install-SpoolfreePrinter (mocked print cmdlets)' {
     It 'refuses to delete a queue whose comment was changed' {
         Mock -ModuleName Spoolfree.Agent Get-SpoolfreeInstalled { @([pscustomobject]@{ Name = 'Staff Copier'; PortName = 'IPP_1' }) }
         Mock -ModuleName Spoolfree.Agent Get-Printer { [pscustomobject]@{ Name = 'Staff Copier'; Comment = 'Installed by hand' } }
-        Mock -ModuleName Spoolfree.Agent Remove-Printer {}
+        Mock -ModuleName Spoolfree.Agent -RemoveParameterType InputObject Remove-Printer {}
         { Uninstall-SpoolfreePrinter -Name 'Staff Copier' } | Should -Throw '*leaving it alone*'
         Should -Invoke -ModuleName Spoolfree.Agent Remove-Printer -Times 0
     }
