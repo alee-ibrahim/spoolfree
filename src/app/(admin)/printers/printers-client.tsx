@@ -43,6 +43,8 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { OuPicker, type OuOption, type PickedOu } from "@/components/app/ou-picker";
+import { StatusBadges } from "@/components/app/printer-status";
+import type { Marker } from "@/lib/ipp/interpret";
 import { deletePrinter, previewPrinterReach, replacePrinter, resetDriverDecision, savePrinter, testPrinter, type ActionResult, type TestResult } from "../actions";
 
 export interface DriverPackageOption {
@@ -102,6 +104,8 @@ export interface PrinterView {
   ippVersions: string[] | null;
   /** The driver PCs get now. */
   decision: DriverDecisionView;
+  /** Live status from the poller (null: not polled yet). */
+  status: { online: boolean; state: string; stateReasons: string[]; markers: Marker[] } | null;
 }
 
 function useResultToast(state: ActionResult | null, onOk: () => void) {
@@ -766,6 +770,9 @@ export function PrintersTable({ printers, ouOptions, packages }: { printers: Pri
                 {p.location ?? "No location"}
                 {p.model ? ` · ${p.model}` : ""} · {p.assignedOus} OU{p.assignedOus === 1 ? "" : "s"}
               </ItemDescription>
+              <div className="pt-1">
+                <StatusBadges status={p.status} />
+              </div>
               <div className="flex flex-wrap gap-1 pt-1">
                 <DriverlessBadge p={p} />
                 <DriverBadge p={p} />
@@ -783,6 +790,7 @@ export function PrintersTable({ printers, ouOptions, packages }: { printers: Pri
             <TableRow>
               <TableHead className="pl-4">Name</TableHead>
               <TableHead>IPP address</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Location</TableHead>
               <TableHead>Model</TableHead>
               <TableHead>Driverless</TableHead>
@@ -804,6 +812,9 @@ export function PrintersTable({ printers, ouOptions, packages }: { printers: Pri
                 <TableCell className="font-mono text-xs">
                   {p.ippUri}
                   {!p.ippPathAuto && <span className="ml-1 font-sans text-muted-foreground">(manual)</span>}
+                </TableCell>
+                <TableCell className="max-w-48 whitespace-normal">
+                  <StatusBadges status={p.status} />
                 </TableCell>
                 <TableCell>{p.location ?? "—"}</TableCell>
                 <TableCell>{p.model ?? "—"}</TableCell>

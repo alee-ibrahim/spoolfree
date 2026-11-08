@@ -1,3 +1,6 @@
+import { Suspense } from "react";
+import { ListFilters, type FilterField } from "@/components/app/list-filters";
+import { NoMatches } from "@/components/app/no-matches";
 import { PageHeader } from "@/components/app/page-header";
 import type { OuOption } from "@/components/app/ou-picker";
 import { db, schema } from "@/lib/db";
@@ -8,15 +11,19 @@ import { printerUri } from "@/lib/ipp/interpret";
 import { requireAdmin } from "@/lib/session";
 import { driverNames } from "@/lib/drivers/package";
 import { driverDecision, loadPackagesForMatch } from "@/lib/service";
+import { shortDn } from "@/lib/format";
+import { activePrinterFilters, brandOptions, filterPrinters, parsePrinterFilters } from "@/lib/list-filters/printers";
 import { PrinterFormDialog, PrintersTable, type DriverPackageOption } from "./printers-client";
 
 export const metadata = { title: "Printers" };
 
-export default async function PrintersPage() {
+export default async function PrintersPage({ searchParams }: PageProps<"/printers">) {
   await requireAdmin();
   const d = db();
-  const printers = await d.select().from(schema.printers).orderBy(schema.printers.name);
-  const [assignments, settings, ouOptions, packages] = await Promise.all([
+  const f = parsePrinterFilters(await searchParams);
+  const [allPrinters, statuses, assignments, settings, ouOptions, packages] = await Promise.all([
+    d.select().from(schema.printers).orderBy(schema.printers.name),
+    d.select().from(schema.printerStatus),
     d.select().from(schema.ouAssignments),
     d.select().from(schema.ouSettings),
     loadOuOptions(),
@@ -26,7 +33,37 @@ export default async function PrintersPage() {
   const byPrinter = new Map<string, string[]>();
   for (const a of assignments) byPrinter.set(a.printerId, [...(byPrinter.get(a.printerId) ?? []), a.ouDn]);
   const defaultOf = new Map(settings.filter((s) => s.defaultPrinterId).map((s) => [normalizeDn(s.ouDn), s.defaultPrinterId!]));
-  const nameOf = new Map(printers.map((p) => [p.id, p.name]));
+  const nameOf = new Map(allPrinters.map((p) => [p.id, p.name]));
+  const statusOf = new Map(statuses.map((s) => [s.printerId, s]));
+  // Search and filters run here on the server; the list keeps the filter rows' order (sorted by f.sort).
+  const printers = filterPrinters(
+    allPrinters.map((p) => ({ ...p, ouDns: byPrinter.get(p.id) ?? [], status: statusOf.get(p.id) ?? null })),
+    f,
+  );
+  const assignedOus = [...new Map(assignments.map((a) => [normalizeDn(a.ouDn), a.ouDn])).values()].sort((a, b) => shortDn(a).localeCompare(shortDn(b)));
+  const fields: FilterField[] = [
+    { kind: "toggle", key: "status", label: "Status", options: [{ value: "online", label: "Online" }, { value: "offline", label: "Offline" }, { value: "error", label: "Error" }] },
+    { kind: "switch", key: "low", label: "Toner low" },
+    { kind: "switch", key: "unassigned", label: "Unassigned" },
+    { kind: "select", key: "ou", label: "OU", allLabel: "All OUs", searchable: true, options: assignedOus.map((o) => ({ value: o, label: shortDn(o) || o })) },
+    { kind: "select", key: "brand", label: "Brand", allLabel: "All brands", options: brandOptions(allPrinters).map((b) => ({ value: b, label: b })) },
+    { kind: "toggle", key: "takeover", label: "Takeover", options: [{ value: "off", label: "Off" }, { value: "dry-run", label: "Dry-run" }, { value: "on", label: "On" }] },
+    {
+      kind: "select",
+      key: "sides",
+      label: "Duplex default",
+      allLabel: "Any duplex",
+      options: [
+        { value: "auto", label: "Driver default" },
+        { value: "one-sided", label: "One-sided" },
+        { value: "two-sided-long-edge", label: "Two-sided (long edge)" },
+        { value: "two-sided-short-edge", label: "Two-sided (short edge)" },
+      ],
+    },
+    { kind: "select", key: "driver", label: "Driver mode", allLabel: "Any driver mode", options: [{ value: "auto", label: "Auto" }, { value: "driverless", label: "Driverless" }, { value: "vendor", label: "Vendor" }] },
+    { kind: "sort", key: "sort", label: "Sort", defaultValue: "name", options: [{ value: "name", label: "Name" }, { value: "location", label: "Location / floor" }, { value: "status", label: "Status (problems first)" }] },
+  ];
+  const filtered = activePrinterFilters(f) > 0 || !!f.q;
   const options: OuOption[] | null =
     ouOptions?.map((o) => {
       const def = defaultOf.get(o.key);
@@ -35,7 +72,22 @@ export default async function PrintersPage() {
   return (
     <>
       <PageHeader title="Printers" actions={<PrinterFormDialog ouOptions={options} packages={packageOptions} />} />
-      <div className="p-4 md:p-6">
+      <div className="flex flex-col gap-3 p-4 md:gap-4 md:p-6">
+        {allPrinters.length > 0 && (
+          <Suspense>
+            <ListFilters
+              fields={fields}
+              searchLabel="Search printers"
+              searchPlaceholder="Name, IP, model, location or alias"
+              total={allPrinters.length}
+              shown={printers.length}
+              noun={["printer", "printers"]}
+            />
+          </Suspense>
+        )}
+        {filtered && printers.length === 0 ? (
+          <NoMatches what="printers" clearHref="/printers" />
+        ) : (
         <PrintersTable
           packages={packageOptions}
           printers={printers.map((p) => {
@@ -71,6 +123,7 @@ export default async function PrintersPage() {
             vendorProtocol: p.vendorProtocol,
             lprQueue: p.lprQueue,
             ippVersions: p.lastTest?.ippVersions ?? null,
+            status: p.status ? { online: p.status.online, state: p.status.state, stateReasons: p.status.stateReasons, markers: p.status.markers } : null,
             decision: {
               mode: dec.mode,
               source: dec.source,
@@ -85,6 +138,7 @@ export default async function PrintersPage() {
           })}
           ouOptions={options}
         />
+        )}
       </div>
     </>
   );

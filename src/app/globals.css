@@ -153,9 +153,12 @@
   [data-slot="dropdown-menu-item"],
   [data-slot="select-item"],
   [data-slot="toggle-group-item"],
+  [data-slot="toggle"],
+  [data-slot="input-group"],
   [data-slot="tabs-trigger"],
   [data-slot="sidebar-menu-button"],
   [data-slot="popover-trigger"],
+  [data-slot="sheet-trigger"],
   [data-slot="command-item"],
   [data-slot="command-input-wrapper"] [data-slot="input-group"] {
     min-height: 44px;

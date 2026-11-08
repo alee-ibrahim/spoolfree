@@ -1,23 +1,59 @@
+import { count, desc } from "drizzle-orm";
+import Link from "next/link";
+import { Suspense } from "react";
+import { ListFilters, type FilterField } from "@/components/app/list-filters";
+import { NoMatches } from "@/components/app/no-matches";
 import { PageHeader } from "@/components/app/page-header";
+import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemTitle } from "@/components/ui/item";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { recentAudit } from "@/lib/service";
+import { db, schema } from "@/lib/db";
+import { activeAuditFilters, auditActionOptions, auditWhere, parseAuditFilters } from "@/lib/list-filters/audit";
+import { toQuery } from "@/lib/list-filters/params";
 import { requireAdmin } from "@/lib/session";
 
 export const metadata = { title: "Audit log" };
 
-export default async function AuditPage() {
+const PAGE_SIZE = 50;
+
+export default async function AuditPage({ searchParams }: PageProps<"/audit">) {
   await requireAdmin();
-  const rows = await recentAudit(300);
+  const f = parseAuditFilters(await searchParams);
+  const d = db();
+  const a = schema.auditLog;
+  const w = auditWhere(f);
+  // Filtering, counting and paging run in Postgres: the log only grows.
+  const [rows, [{ n: shown }], [{ n: total }], actors, actions] = await Promise.all([
+    d.select().from(a).where(w).orderBy(desc(a.id)).limit(PAGE_SIZE).offset((f.page - 1) * PAGE_SIZE),
+    d.select({ n: count() }).from(a).where(w),
+    d.select({ n: count() }).from(a),
+    d.selectDistinct({ v: a.actor }).from(a).orderBy(a.actor).limit(500),
+    d.selectDistinct({ v: a.action }).from(a).orderBy(a.action).limit(500),
+  ]);
+  const today = new Date().toISOString().slice(0, 10);
+  const fields: FilterField[] = [
+    { kind: "select", key: "actor", label: "Who", allLabel: "Anyone", searchable: true, options: actors.map((r) => ({ value: r.v, label: r.v })) },
+    { kind: "select", key: "action", label: "Action", allLabel: "Any action", searchable: true, options: auditActionOptions(actions.map((r) => r.v)) },
+    { kind: "dates", label: "Date (UTC)", fromKey: "from", toKey: "to", today },
+  ];
+  const filtered = activeAuditFilters(f) > 0 || !!f.q;
+  const pages = Math.max(1, Math.ceil(shown / PAGE_SIZE));
+  const link = (page: number) => `/audit${toQuery({ q: f.q, actor: f.actor, action: f.action, from: f.from, to: f.to, page: page > 1 ? page : null })}`;
   return (
     <>
       <PageHeader title="Audit log" />
-      <div className="p-4 md:p-6">
+      <div className="flex flex-col gap-3 p-4 md:gap-4 md:p-6">
+        {total > 0 && (
+          <Suspense>
+            <ListFilters fields={fields} searchLabel="Search the audit log" searchPlaceholder="Search who, action, target, details" total={total} shown={shown} noun={["change", "changes"]} />
+          </Suspense>
+        )}
+        {filtered && shown === 0 && <NoMatches what="changes" clearHref="/audit" />}
         {/* Phones: one entry per change. */}
         <ItemGroup className="gap-2 md:hidden">
-          {rows.length === 0 && <p className="text-sm text-muted-foreground">No changes recorded yet.</p>}
+          {total === 0 && <p className="text-sm text-muted-foreground">No changes recorded yet.</p>}
           {rows.map((r) => (
             <Item key={r.id} variant="outline" size="sm">
               <ItemContent className="min-w-0">
@@ -40,7 +76,7 @@ export default async function AuditPage() {
             </Item>
           ))}
         </ItemGroup>
-        <Card className="hidden py-0 md:flex">
+        <Card className={filtered && shown === 0 ? "hidden" : "hidden py-0 md:flex"}>
           <Table>
             <TableHeader>
               <TableRow>
@@ -52,7 +88,7 @@ export default async function AuditPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.length === 0 && (
+              {total === 0 && (
                 <TableRow>
                   <TableCell colSpan={5} className="pl-4 text-muted-foreground">
                     No changes recorded yet.
@@ -78,6 +114,23 @@ export default async function AuditPage() {
             </TableBody>
           </Table>
         </Card>
+        {pages > 1 && (
+          <nav className="flex items-center justify-between gap-2" aria-label="Audit log pages">
+            <Button asChild variant="outline" className={f.page <= 1 ? "pointer-events-none opacity-50" : undefined}>
+              <Link href={link(f.page - 1)} aria-disabled={f.page <= 1} scroll={false}>
+                Newer
+              </Link>
+            </Button>
+            <span className="text-sm text-muted-foreground tabular-nums">
+              Page {Math.min(f.page, pages)} of {pages}
+            </span>
+            <Button asChild variant="outline" className={f.page >= pages ? "pointer-events-none opacity-50" : undefined}>
+              <Link href={link(f.page + 1)} aria-disabled={f.page >= pages} scroll={false}>
+                Older
+              </Link>
+            </Button>
+          </nav>
+        )}
       </div>
     </>
   );

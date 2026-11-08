@@ -1,6 +1,6 @@
 {
   "name": "spoolfree",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -19,6 +19,7 @@
     "seed:dev": "node --env-file-if-exists=.env --import tsx scripts/seed-dev.ts",
     "screenshots": "node --env-file-if-exists=.env --import tsx scripts/screenshots.ts",
     "check:ou-picker": "node --import tsx scripts/ou-picker-check.ts",
+    "check:filters": "node --import tsx scripts/filters-check.ts",
     "dev:printers": "node --import tsx scripts/fake-printers.ts"
   },
   "dependencies": {

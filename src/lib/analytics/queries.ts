@@ -3,10 +3,11 @@ import { sql, type SQL } from "drizzle-orm";
 import { config } from "../config";
 import { db } from "../db";
 import { counterTotals, daysBetween, pagesNotFromPcs, type CounterDay } from "./counters";
+import { words } from "../list-filters/params";
 import { likeEscape, type AnalyticsFilters } from "./filters";
 
 /** WHERE clause for print_jobs j (left-joined printers p) from the filters. */
-function where(f: AnalyticsFilters, tz: string): SQL {
+export function where(f: AnalyticsFilters, tz: string): SQL {
   const parts: SQL[] = [
     sql`j.printed_at >= (${f.from}::date::timestamp at time zone ${tz})`,
     sql`j.printed_at < ((${f.to}::date + 1)::timestamp at time zone ${tz})`,
@@ -16,6 +17,10 @@ function where(f: AnalyticsFilters, tz: string): SQL {
   if (f.printer?.startsWith("queue:")) parts.push(sql`j.printer_id is null and lower(j.queue_name) = lower(${f.printer.slice(6)})`);
   else if (f.printer) parts.push(sql`j.printer_id::text = ${f.printer}`);
   if (f.ou) parts.push(sql`(lower(j.ou_dn) = lower(${f.ou}) or lower(j.ou_dn) like ${"%," + likeEscape(f.ou.toLowerCase())})`);
+  for (const w of words(f.q)) {
+    const pat = `%${likeEscape(w)}%`;
+    parts.push(sql`(j.user_name ilike ${pat} or j.document_name ilike ${pat})`);
+  }
   return sql.join(parts, sql` and `);
 }
 
@@ -192,7 +197,7 @@ export async function unmanagedQueues(f: AnalyticsFilters, limit = 50): Promise<
 /** Filter choices: users, PCs, printers/queues and OUs seen in the range. */
 export async function filterOptions(f: AnalyticsFilters) {
   const tz = config().ANALYTICS_TIME_ZONE;
-  const base = { ...f, user: null, printer: null, ou: null, computer: null };
+  const base = { ...f, user: null, printer: null, ou: null, computer: null, q: null };
   const w = where(base, tz);
   const [users, computers, printers, ous] = await Promise.all([
     db().execute<Record<string, unknown>>(sql`select distinct j.user_name v from print_jobs j where ${w} and j.user_name is not null order by 1 limit 500`),

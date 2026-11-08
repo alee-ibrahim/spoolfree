@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { Suspense } from "react";
+import { ListFilters, type FilterField } from "@/components/app/list-filters";
 import { DirectorySyncBadge } from "@/components/app/directory-sync-status";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -12,11 +14,13 @@ import { shortDn } from "@/lib/format";
 import { resolvePrinters } from "@/lib/resolve";
 import { loadPolicy } from "@/lib/service";
 import { requireAdmin } from "@/lib/session";
+import { activeUnassignedFilters, containerOptions, filterComputers, parseUnassignedFilters } from "@/lib/list-filters/directory";
 
 export const metadata = { title: "Unassigned PCs" };
 
-export default async function UnassignedPage() {
+export default async function UnassignedPage({ searchParams }: PageProps<"/unassigned">) {
   await requireAdmin();
+  const f = parseUnassignedFilters(await searchParams);
   let computers, defaultContainer;
   try {
     [computers, defaultContainer] = await Promise.all([directory().listComputers(), directory().defaultComputersContainer()]);
@@ -35,10 +39,25 @@ export default async function UnassignedPage() {
   }
   const policy = await loadPolicy();
   const enabled = computers.filter((c) => !c.disabled);
-  const inDefault = enabled.filter((c) => isUnder(c.dn, defaultContainer));
-  const noPrinters = enabled
+  const allInDefault = enabled.filter((c) => isUnder(c.dn, defaultContainer));
+  const allNoPrinters = enabled
     .filter((c) => !isUnder(c.dn, defaultContainer))
     .filter((c) => resolvePrinters(policy, c).printers.length === 0);
+  // Search (name, OS) and the OU filter (that OU and below) run here on the server.
+  const inDefault = filterComputers(allInDefault, f);
+  const noPrinters = filterComputers(allNoPrinters, f);
+  const total = allInDefault.length + allNoPrinters.length;
+  const filtered = activeUnassignedFilters(f) > 0 || !!f.q;
+  const fields: FilterField[] = [
+    {
+      kind: "select",
+      key: "ou",
+      label: "OU",
+      allLabel: "All OUs",
+      searchable: true,
+      options: containerOptions([...allInDefault, ...allNoPrinters]).map((o) => ({ value: o, label: shortDn(o) || o })),
+    },
+  ];
   const byOu = new Map<string, typeof noPrinters>();
   for (const c of noPrinters) {
     const ou = parentDn(c.dn) ?? "";
@@ -48,6 +67,20 @@ export default async function UnassignedPage() {
   return (
     <>
       <PageHeader title="Unassigned PCs" actions={<DirectorySyncBadge />} />
+      {total > 0 && (
+        <div className="px-4 pt-4 md:px-6 md:pt-6">
+          <Suspense>
+            <ListFilters
+              fields={fields}
+              searchLabel="Search unassigned PCs"
+              searchPlaceholder="Computer name or OS"
+              total={total}
+              shown={inDefault.length + noPrinters.length}
+              noun={["PC", "PCs"]}
+            />
+          </Suspense>
+        </div>
+      )}
       <div className="grid gap-4 p-4 md:gap-6 md:p-6 xl:grid-cols-2">
         <Card>
           <CardHeader>
@@ -58,7 +91,7 @@ export default async function UnassignedPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <ComputerTable list={inDefault} />
+            <ComputerTable list={inDefault} filtered={filtered && allInDefault.length > 0} />
           </CardContent>
         </Card>
         <Card>
@@ -68,7 +101,9 @@ export default async function UnassignedPage() {
           </CardHeader>
           <CardContent>
             {byOu.size === 0 ? (
-              <p className="text-sm text-muted-foreground">Every computer in an OU gets at least one printer.</p>
+              <p className="text-sm text-muted-foreground">
+                {filtered && allNoPrinters.length > 0 ? "No PC here matches the filters." : "Every computer in an OU gets at least one printer."}
+              </p>
             ) : (
               <ItemGroup className="gap-2">
                 {[...byOu.values()].map((list) => {
@@ -102,8 +137,8 @@ export default async function UnassignedPage() {
   );
 }
 
-function ComputerTable({ list }: { list: { name: string; objectGuid: string; operatingSystem?: string | null }[] }) {
-  if (list.length === 0) return <p className="text-sm text-muted-foreground">None. Good housekeeping.</p>;
+function ComputerTable({ list, filtered }: { list: { name: string; objectGuid: string; operatingSystem?: string | null }[]; filtered: boolean }) {
+  if (list.length === 0) return <p className="text-sm text-muted-foreground">{filtered ? "No PC here matches the filters." : "None. Good housekeeping."}</p>;
   return (
     <ItemGroup className="gap-2">
       {list.map((c) => (

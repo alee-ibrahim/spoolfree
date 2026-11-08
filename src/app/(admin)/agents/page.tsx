@@ -1,4 +1,7 @@
-import { desc } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
+import { Suspense } from "react";
+import { ListFilters, type FilterField } from "@/components/app/list-filters";
+import { NoMatches } from "@/components/app/no-matches";
 import { ServerCogIcon, TriangleAlertIcon } from "lucide-react";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -15,23 +18,51 @@ import { shortDn, timeAgo } from "@/lib/format";
 import { signingKeyInfo } from "@/lib/keys";
 import { requireAdmin } from "@/lib/session";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemTitle } from "@/components/ui/item";
+import { activeAgentFilters, agentFacetOptions, agentOuOptions, filterAgents, parseAgentFilters, type AgentFilters } from "@/lib/list-filters/agents";
 import { RevokeButton } from "./revoke-button";
 
 export const metadata = { title: "Agents" };
 
-export default async function AgentsPage() {
+export default async function AgentsPage({ searchParams }: PageProps<"/agents">) {
   await requireAdmin();
-  const agents = await db().select().from(schema.agents).orderBy(desc(schema.agents.lastReportAt));
+  const f = parseAgentFilters(await searchParams);
+  const [all, users] = await Promise.all([db().select().from(schema.agents).orderBy(desc(schema.agents.lastReportAt)), usersByComputer(f)]);
   const staleBefore = agentStaleCutoff();
   const key = signingKeyInfo();
   const publicUrl = config().PUBLIC_URL;
   const bundle = currentAgentBundle();
   const latest = bundle?.version ?? null;
   const selfUpdate = config().AGENT_SELF_UPDATE;
+  const agents = all;
   const outdatedCount = agents.filter((a) => !a.revokedAt && isAgentOutdated(a.lastReport?.agentVersion, latest)).length;
   // High severity: PCs that takeover left without a printer (agents 0.4.6+ report it until it is fixed).
   const ctx: AgentCtx = { staleBefore, latest, selfUpdate };
   const critical = agents.filter((a) => !a.revokedAt && (a.lastReport?.critical ?? []).length > 0);
+  // Search and filters run on the server (hundreds of PCs); only the matching rows are sent.
+  const shown = filterAgents(all, f, { staleBefore, latest }, users);
+  const facets = agentFacetOptions(all);
+  const fields: FilterField[] = [
+    {
+      kind: "select",
+      key: "state",
+      label: "State",
+      allLabel: "Any state",
+      options: [
+        { value: "ok", label: "OK" },
+        { value: "error", label: "Error" },
+        { value: "critical", label: "Left without printer" },
+        { value: "outdated", label: "Outdated agent" },
+        { value: "stale", label: `Not seen > ${config().AGENT_STALE_HOURS} h` },
+        { value: "would-remove", label: "Takeover pending (would remove)" },
+        { value: "revoked", label: "Revoked" },
+      ],
+    },
+    { kind: "select", key: "ou", label: "OU", allLabel: "All OUs", searchable: true, options: agentOuOptions(all).map((o) => ({ value: o, label: shortDn(o) || o })) },
+    { kind: "select", key: "version", label: "Agent version", allLabel: "Any version", searchable: true, options: facets.versions.map((v) => ({ value: v, label: `v${v}` })) },
+    { kind: "select", key: "os", label: "OS build", allLabel: "Any OS build", searchable: true, options: facets.os.map((v) => ({ value: v, label: v })) },
+    { kind: "sort", key: "sort", label: "Sort", defaultValue: "seen-desc", options: [{ value: "seen-desc", label: "Last seen (newest)" }, { value: "seen-asc", label: "Last seen (oldest)" }, { value: "name", label: "Computer name" }] },
+  ];
+  const filtered = activeAgentFilters(f) > 0 || !!f.q;
 
   return (
     <>
@@ -56,7 +87,21 @@ export default async function AgentsPage() {
             </AlertDescription>
           </Alert>
         )}
-        {agents.length === 0 ? (
+        {all.length > 0 && (
+          <Suspense>
+            <ListFilters
+              fields={fields}
+              searchLabel="Search agents"
+              searchPlaceholder="Computer name or user"
+              total={all.length}
+              shown={shown.length}
+              noun={["PC", "PCs"]}
+            />
+          </Suspense>
+        )}
+        {filtered && shown.length === 0 ? (
+          <NoMatches what="PCs" clearHref="/agents" />
+        ) : agents.length === 0 ? (
           <Empty className="border">
             <EmptyHeader>
               <EmptyMedia variant="icon">
@@ -70,7 +115,7 @@ export default async function AgentsPage() {
           <>
           {/* Phones: one card per PC. */}
           <ItemGroup className="gap-3 md:hidden">
-            {agents.map((a) => {
+            {shown.map((a) => {
               const x = agentParts(a, ctx);
               return (
                 <Item key={a.id} variant="outline" className={a.revokedAt ? "items-start opacity-50" : "items-start"}>
@@ -101,7 +146,7 @@ export default async function AgentsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {agents.map((a) => {
+                {shown.map((a) => {
                   const x = agentParts(a, ctx);
                   return (
                     <TableRow key={a.id} className={a.revokedAt ? "opacity-50" : undefined}>
@@ -165,6 +210,20 @@ export default async function AgentsPage() {
 }
 
 type AgentRow = typeof schema.agents.$inferSelect;
+
+/**
+ * Users seen printing on each PC (print analytics, last 90 days), so a search for a user finds their PC. Only read
+ * when there is a search.
+ */
+async function usersByComputer(f: AgentFilters): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (!f.q) return out;
+  const rows = await db().execute<{ c: string; u: string }>(
+    sql`select distinct lower(computer_name) c, user_name u from print_jobs where user_name is not null and printed_at > now() - interval '90 days' limit 20000`,
+  );
+  for (const r of rows) out.set(r.c, [...(out.get(r.c) ?? []), r.u]);
+  return out;
+}
 interface AgentCtx {
   staleBefore: number;
   latest: string | null;

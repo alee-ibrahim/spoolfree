@@ -16,7 +16,7 @@ import { config } from "@/lib/config";
 import { shortDn } from "@/lib/format";
 import { requireAdmin } from "@/lib/session";
 import { CounterVsPcs, PagesOverTime, RankingBars } from "./analytics-charts";
-import { AnalyticsFilters as Filters } from "./analytics-filters";
+import { ListFilters, type FilterField } from "@/components/app/list-filters";
 
 export const metadata = { title: "Analytics" };
 
@@ -45,6 +45,16 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
     jobLog(f, { limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE }),
     filterOptions(f),
   ]);
+  // Jobs in the date range before the other filters, for "N of M jobs".
+  const anyFilter = !!(f.user || f.printer || f.ou || f.computer || f.q);
+  const rangeTotal = anyFilter ? (await jobLog({ ...f, user: null, printer: null, ou: null, computer: null, q: null }, { limit: 0 })).total : log.total;
+  const fields: FilterField[] = [
+    { kind: "dates", label: "Date range", fromKey: "from", toKey: "to", today, required: true, from: f.from, to: f.to },
+    { kind: "select", key: "user", label: "User", allLabel: "All users", searchable: true, options: options.users.map((u) => ({ value: u, label: u })) },
+    { kind: "select", key: "printer", label: "Printer", allLabel: "All printers", searchable: true, options: options.printers },
+    { kind: "select", key: "ou", label: "OU", allLabel: "All OUs", searchable: true, options: options.ous.map((o) => ({ value: o, label: shortDn(o) || o })) },
+    { kind: "select", key: "computer", label: "PC", allLabel: "All PCs", searchable: true, options: options.computers.map((c) => ({ value: c, label: c })) },
+  ];
   const showDocs = c.ANALYTICS_COLLECT_DOCUMENT_NAMES;
   const link = (extra: Record<string, string | null>) => `/analytics?${filterParams(f, extra)}`;
   const kpis = [
@@ -81,12 +91,14 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
         )}
 
         <Suspense>
-          <Filters
-            from={f.from}
-            to={f.to}
-            today={today}
-            values={{ user: f.user, printer: f.printer, ou: f.ou, computer: f.computer }}
-            options={{ ...options, ous: options.ous.map((o) => ({ value: o, label: shortDn(o) || o })) }}
+          <ListFilters
+            fields={fields}
+            searchLabel="Search print jobs"
+            searchPlaceholder={showDocs ? "User or document name" : "User name"}
+            total={rangeTotal}
+            shown={log.total}
+            noun={["job", "jobs"]}
+            keep={["from", "to"]}
           />
         </Suspense>
 

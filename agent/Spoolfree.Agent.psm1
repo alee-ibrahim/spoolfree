@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.7.2'
+$script:AgentVersion = '0.7.3'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'

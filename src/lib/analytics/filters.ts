@@ -9,6 +9,8 @@ export interface AnalyticsFilters {
   printer: string | null;
   ou: string | null;
   computer: string | null;
+  /** Free text: every word must appear in the job's user or document name. */
+  q: string | null;
 }
 
 export const RANGE_PRESETS = [
@@ -41,13 +43,13 @@ export function parseFilters(sp: Record<string, string | string[] | undefined>, 
   let from = validDay(text(sp.from)) ?? addDays(to, -29);
   if (from > to) [from, to] = [to, from];
   if (addDays(from, MAX_DAYS) < to) from = addDays(to, -MAX_DAYS);
-  return { from, to, user: text(sp.user, 256), printer: text(sp.printer), ou: text(sp.ou, 2048), computer: text(sp.computer, 256) };
+  return { from, to, user: text(sp.user, 256), printer: text(sp.printer), ou: text(sp.ou, 2048), computer: text(sp.computer, 256), q: text(sp.q, 200) };
 }
 
 /** Search params for links (only the set filters). */
 export function filterParams(f: AnalyticsFilters, extra: Record<string, string | null> = {}): string {
   const p = new URLSearchParams();
-  for (const [k, v] of Object.entries({ from: f.from, to: f.to, user: f.user, printer: f.printer, ou: f.ou, computer: f.computer, ...extra })) {
+  for (const [k, v] of Object.entries({ from: f.from, to: f.to, user: f.user, printer: f.printer, ou: f.ou, computer: f.computer, q: f.q, ...extra })) {
     if (v) p.set(k, v);
   }
   return p.toString();

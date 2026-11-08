@@ -1,4 +1,6 @@
+import { Suspense } from "react";
 import { DirectorySyncBadge } from "@/components/app/directory-sync-status";
+import { ListFilters, type FilterField } from "@/components/app/list-filters";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ancestorChain, isUnder, normalizeDn, parentDn } from "@/lib/dn";
@@ -7,6 +9,8 @@ import { buildOuTree, flattenTree } from "@/lib/ou-tree";
 import { resolvePrinters } from "@/lib/resolve";
 import { listPrinters, loadPolicy } from "@/lib/service";
 import { requireAdmin } from "@/lib/session";
+import { activeOuTreeFilters, matchOuTree, parseOuTreeFilters, visibleOuTree } from "@/lib/list-filters/directory";
+import { toQuery } from "@/lib/list-filters/params";
 import { OuPanel } from "./ou-panel";
 import { OuTree } from "./ou-tree";
 import { TreeCard } from "./tree-card";
@@ -52,29 +56,51 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
   const inOu = computers.filter((c) => normalizeDn(parentDn(c.dn) ?? "") === normalizeDn(sel));
   const below = computers.filter((c) => isUnder(c.dn, sel)).length;
 
+  // Tree filters (URL params, applied here): name search, only OUs with their own printers, OUs that get printer X.
+  const f = parseOuTreeFilters(params);
+  const items = flat.map((n) => {
+    const key = normalizeDn(n.dn);
+    const parent = parentDn(n.dn);
+    return {
+      key,
+      dn: n.dn,
+      label: n.kind === "domain" ? n.dn.replace(/DC=/gi, "").replace(/,/g, ".") : n.name,
+      depth: n.depth,
+      kind: n.kind,
+      parentKey: parent && n.depth > 0 ? normalizeDn(parent) : null,
+      hasChildren: n.children.length > 0,
+      count: ownCount.get(key) ?? 0,
+      blocked: settingsByOu.get(key)?.blockInheritance ?? false,
+    };
+  });
+  const dnOf = new Map(items.map((i) => [i.key, i.dn]));
+  const matched = matchOuTree(items, f, (key) => probe(dnOf.get(key) ?? key).printers.some((r) => r.printerId === f.printer));
+  const visible = visibleOuTree(items, matched).map((i) => ({ ...i, matched: !matched || matched.has(i.key) }));
+  const fields: FilterField[] = [
+    { kind: "switch", key: "assigned", label: "Only OUs with printers" },
+    { kind: "select", key: "printer", label: "Gets printer", allLabel: "Any printer", searchable: true, options: printers.map((p) => ({ value: p.id, label: p.name })) },
+  ];
+  const filterQuery = toQuery({ q: f.q, assigned: f.withPrinters, printer: f.printer });
+
   return (
     <>
       <PageHeader title="Assignments" actions={<DirectorySyncBadge />} />
+      <div className="px-4 pt-4 md:px-6 md:pt-6">
+        <Suspense>
+          <ListFilters
+            fields={fields}
+            searchLabel="Filter OUs"
+            searchPlaceholder={`Filter ${items.length} OUs by name`}
+            total={items.length}
+            shown={matched ? matched.size : items.length}
+            noun={["OU", "OUs"]}
+            keep={["ou"]}
+          />
+        </Suspense>
+      </div>
       <div className="grid gap-4 p-4 md:gap-6 md:p-6 lg:grid-cols-[minmax(16rem,22rem)_1fr]">
-        <TreeCard selectedLabel={selected.kind === "domain" ? "Domain root" : selected.name} defaultOpen={typeof params.ou !== "string"}>
-            <OuTree
-              selectedKey={normalizeDn(sel)}
-              items={flat.map((n) => {
-                const key = normalizeDn(n.dn);
-                const parent = parentDn(n.dn);
-                return {
-                  key,
-                  dn: n.dn,
-                  label: n.kind === "domain" ? n.dn.replace(/DC=/gi, "").replace(/,/g, ".") : n.name,
-                  depth: n.depth,
-                  kind: n.kind,
-                  parentKey: parent && n.depth > 0 ? normalizeDn(parent) : null,
-                  hasChildren: n.children.length > 0,
-                  count: ownCount.get(key) ?? 0,
-                  blocked: settingsByOu.get(key)?.blockInheritance ?? false,
-                };
-              })}
-            />
+        <TreeCard selectedLabel={selected.kind === "domain" ? "Domain root" : selected.name} defaultOpen={typeof params.ou !== "string" || activeOuTreeFilters(f) > 0 || !!f.q}>
+            <OuTree selectedKey={normalizeDn(sel)} items={visible} filtering={!!matched} filterQuery={filterQuery} />
         </TreeCard>
 
         <OuPanel
