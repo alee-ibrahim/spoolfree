@@ -210,3 +210,38 @@ Describe 'Install-SpoolfreePrinter -Method Vendor' {
         Should -Invoke -ModuleName Spoolfree.Agent Set-SpoolfreeMarker -Times 0
     }
 }
+
+Describe 'Get-SpoolfreeDriverState / Set-SpoolfreeDriverState' {
+    BeforeAll {
+        # A registry stand-in under TestDrive (the real key is HKLM:\SOFTWARE\Spoolfree\Drivers).
+        $script:Reg = "TestDrive:\drivers"
+        New-Item -ItemType Directory -Path $script:Reg -Force | Out-Null
+    }
+    It 'reads a key without values (interrupted install) as no driver names, under StrictMode' {
+        InModuleScope Spoolfree.Agent -Parameters @{ Reg = $script:Reg } {
+            param($Reg)
+            Mock Test-Path { $true } -ParameterFilter { $Path -like '*Drivers*' }
+            Mock Get-ItemProperty { [pscustomobject]@{ PSPath = 'x'; PSChildName = 'ab' } }
+            $s = Get-SpoolfreeDriverState -Sha256 ('ab' * 32)
+            @($s.DriverNames).Count | Should -Be 0
+            $s.Signer | Should -Be ''
+        }
+    }
+    It 'records the driver name when the key is new or empty' {
+        InModuleScope Spoolfree.Agent {
+            $script:written = @{}
+            Mock Get-SpoolfreeDriverState { [pscustomobject]@{ DriverNames = @(); InstalledAt = ''; Signer = '' } }
+            Mock Test-Path { $true }
+            Mock New-Item { }
+            Mock New-ItemProperty { $script:written[$Name] = $Value }
+            Set-SpoolfreeDriverState -Sha256 ('ab' * 32) -DriverName 'Brother HL-3150CDN series' -Signer 'CN=x' -Package 'p'
+            @($script:written['DriverNames']) | Should -Be @('Brother HL-3150CDN series')
+            Mock Get-SpoolfreeDriverState { $null }
+            Set-SpoolfreeDriverState -Sha256 ('ab' * 32) -DriverName 'B' -Signer 'CN=x' -Package 'p'
+            @($script:written['DriverNames']) | Should -Be @('B')
+            Mock Get-SpoolfreeDriverState { [pscustomobject]@{ DriverNames = @('A'); InstalledAt = ''; Signer = '' } }
+            Set-SpoolfreeDriverState -Sha256 ('ab' * 32) -DriverName 'B' -Signer 'CN=x' -Package 'p'
+            @($script:written['DriverNames']) | Should -Be @('A', 'B')
+        }
+    }
+}

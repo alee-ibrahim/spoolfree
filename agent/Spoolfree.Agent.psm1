@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.7.1'
+$script:AgentVersion = '0.7.2'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -1175,15 +1175,21 @@ function Get-SpoolfreeDriverState {
     param([Parameter(Mandatory)][string]$Sha256)
     $key = Join-Path $script:DriverRegistry $Sha256.ToLowerInvariant()
     if (-not (Test-Path $key)) { return $null }
-    $p = Get-ItemProperty -Path $key
-    return [pscustomobject]@{ DriverNames = @($p.DriverNames); InstalledAt = [string]$p.InstalledAt; Signer = [string]$p.Signer }
+    # StrictMode-safe: a key without values (an interrupted earlier install) reads as "no driver names".
+    $p = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+    return [pscustomobject]@{
+        DriverNames = @(Get-SpoolfreeProperty $p 'DriverNames' | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        InstalledAt = [string](Get-SpoolfreeProperty $p 'InstalledAt')
+        Signer      = [string](Get-SpoolfreeProperty $p 'Signer')
+    }
 }
 
 function Set-SpoolfreeDriverState {
     param([Parameter(Mandatory)][string]$Sha256, [Parameter(Mandatory)][string]$DriverName, [string]$Signer = '', [string]$Package = '')
     $key = Join-Path $script:DriverRegistry $Sha256.ToLowerInvariant()
+    $before = Get-SpoolfreeDriverState -Sha256 $Sha256
+    $names = @(@(if ($before) { $before.DriverNames }) + @($DriverName) | Where-Object { $_ } | Select-Object -Unique)
     if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
-    $names = @((Get-SpoolfreeDriverState -Sha256 $Sha256).DriverNames | Where-Object { $_ }) + @($DriverName) | Select-Object -Unique
     New-ItemProperty -Path $key -Name DriverNames -Value ([string[]]$names) -PropertyType MultiString -Force | Out-Null
     New-ItemProperty -Path $key -Name InstalledAt -Value ([datetime]::UtcNow.ToString('o')) -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Signer -Value $Signer -PropertyType String -Force | Out-Null
