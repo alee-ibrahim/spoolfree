@@ -45,7 +45,7 @@ A printer in auto mode gets a vendor driver when any of these is true:
    pages (default 2) are not measured, because warm-up time dominates them. Only jobs printed over IPP are visible
    this way. Printers that do not keep completed jobs are not measured.
 4. **Static hint.** The printer is raster only (no PDF), has no raster compression (`compression-supported` is only
-   `none`), is colour, and its PWG raster resolution is at most 600 dpi.
+   `none`), is colour, and its PWG raster resolution is 600 dpi or more. A 300-dpi colour inkjet is not affected.
 
 Otherwise the printer gets the driverless queue.
 
@@ -68,7 +68,8 @@ When a printer resolves to vendor, the server picks a package:
    packages match, the newest upload wins.
 2. **The brand's universal driver.** A package uploaded as **universal**, for example Brother Universal Printer or
    HP Universal Printing PCL 6, serves every printer of its manufacturer that no exact package covers. Spoolfree
-   uses its *universal driver* name, which defaults to the INF's first model.
+   uses its *universal driver* name, which defaults to the INF's first model. A universal driver whose name says "Mono"
+   is never chosen for a colour printer, because it would print in grey.
 
 If no package matches, the printer **stays driverless**. The UI shows *"vendor driver needed: upload one for
 &lt;model&gt;"* in the Printers list and at the top of the Drivers page. To see the decision for every printer:

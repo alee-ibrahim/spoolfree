@@ -142,9 +142,12 @@ export function matchPackage(p: Pick<PrinterForDecision, "model" | "deviceId" | 
   }
   const brand = brandKey(mfg) ?? brandKey(p.lastTest?.model ?? p.model);
   if (!brand) return null;
+  const colour = p.lastTest?.color === true;
   for (const pkg of newest.filter((x) => x.universal)) {
     if (brandKey(pkg.manufacturer) !== brand) continue;
     const name = pkg.universalDriver ?? pkg.infs[0]?.models[0]?.name;
+    // A monochrome universal driver would print a colour printer's jobs in grey.
+    if (colour && name && /\bmono(chrome)?\b/i.test(name)) continue;
     const inf = name ? infForDriver(pkg.infs, name) : null;
     if (name && inf) return { package: pkg, driverName: inf.models.find((m) => m.name.toLowerCase() === name.toLowerCase())!.name, inf, match: "universal" };
   }
@@ -171,7 +174,8 @@ export function vendorReason(p: Pick<PrinterForDecision, "lastTest" | "speedSamp
     const raster = t.formats.includes("image/pwg-raster") || t.formats.includes("image/urf");
     const noPdf = !t.formats.includes("application/pdf");
     const noCompression = t.compression.every((c) => c === "none");
-    if (raster && noPdf && noCompression && t.color === true && (t.maxRasterDpi ?? 600) <= 600)
+    // Only 600-dpi (or finer) colour raster: a 300-dpi inkjet raster is a quarter of the data and prints fine.
+    if (raster && noPdf && noCompression && t.color === true && t.maxRasterDpi != null && t.maxRasterDpi >= 600)
       return "raster only, no compression (600-dpi colour raster is slow)";
   }
   return null;
