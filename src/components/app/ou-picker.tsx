@@ -39,15 +39,12 @@ interface Props {
   onChange: (v: PickedOu[]) => void;
   /** The printer being edited (null when adding). */
   printerId: string | null;
-  /** "Will reach N computers" (null while loading or unknown). */
-  reach: { computers: number } | { error: string } | null;
-  reachPending: boolean;
 }
 
 const keyOf = normalizeDn;
 
 /** Multi-select of directory OUs for the Add/Edit printer form. */
-export function OuPicker({ options, value, onChange, printerId, reach, reachPending }: Props) {
+export function OuPicker({ options, value, onChange, printerId }: Props) {
   const [open, setOpen] = useState(false);
   const isMobile = useIsMobile();
   const id = useId();
@@ -196,14 +193,8 @@ export function OuPicker({ options, value, onChange, printerId, reach, reachPend
         </ul>
       )}
 
-      <FieldDescription aria-live="polite">
-        {value.length === 0
-          ? "Optional. You can also assign printers on the Assignments page."
-          : reachPending || reach === null
-            ? "Counting computers…"
-            : "error" in reach
-              ? `Cannot count computers: ${reach.error}`
-              : `Will reach ${reach.computers} computer${reach.computers === 1 ? "" : "s"} (incl. child OUs).`}
+      <FieldDescription>
+        {value.length === 0 ? "Optional. You can also assign printers on the Assignments page." : "Computers in child OUs get the printer too."}
       </FieldDescription>
     </Field>
   );

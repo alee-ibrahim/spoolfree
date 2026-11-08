@@ -149,18 +149,31 @@ export const NEW_PRINTER_ID = "00000000-0000-0000-0000-000000000000";
 /**
  * How many enabled computers would receive `printerId` if it were assigned to exactly `ous` (child OUs inherit),
  * using the same resolution as Preview: inheritance blocks, blocked printers and computer overrides all apply.
+ * `pcs` (computer GUIDs), when given, replaces the printer's stored per-computer `add` overrides, so the count covers
+ * OUs plus specific PCs with every computer counted once. `block` overrides are kept.
  */
 export function printerReach(
   policy: Policy,
   computers: { dn: string; objectGuid: string; disabled: boolean }[],
   printerId: string,
   ous: string[],
+  pcs?: string[],
 ): { computers: number; ous: number } {
+  const overrides = pcs
+    ? [
+        ...policy.overrides.filter((o) => !(o.printerId === printerId && o.action === "add")),
+        ...pcs
+          // A computer that blocks this printer stays blocked; the form does not change blocks.
+          .filter((g) => !policy.overrides.some((o) => o.printerId === printerId && o.action === "block" && o.computerGuid.toLowerCase() === g.toLowerCase()))
+          .map((computerGuid) => ({ computerGuid, printerId, action: "add" as const, makeDefault: false })),
+      ]
+    : policy.overrides;
   const hypothetical: Policy = {
     ...policy,
     assignments: [...policy.assignments.filter((a) => a.printerId !== printerId), ...ous.map((ouDn) => ({ ouDn, printerId }))],
+    overrides,
   };
-  if (!ous.length && !policy.overrides.some((o) => o.printerId === printerId && o.action === "add")) return { computers: 0, ous: 0 };
+  if (!ous.length && !overrides.some((o) => o.printerId === printerId && o.action === "add")) return { computers: 0, ous: 0 };
   const reachedOus = new Set<string>();
   let n = 0;
   for (const c of computers) {

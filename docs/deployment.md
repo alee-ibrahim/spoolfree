@@ -228,5 +228,5 @@ kubectl exec -n <ns> deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs
 2. Import the printers with their old share names (`legacyShares`) and `legacyTakeover: dry-run`.
 3. After a sync, **Agents** shows "Would remove …" per PC (machine queues at the next sync, per-user `\\server\share`
    connections after the user's next logon). Check that only the expected queues are listed.
-4. Switch the printers to `on` (UI or re-import). Agents remove the old queues, create the Spoolfree queue and, for users
+4. Switch the printers to `on` (UI: **Advanced (migration)** in the printer form, or re-import). Agents remove the old queues, create the Spoolfree queue and, for users
    whose default was a removed queue, make the Spoolfree queue their default at their next logon.

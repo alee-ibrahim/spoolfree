@@ -108,6 +108,9 @@ const schema = z.object({
         .filter(Boolean),
     ),
 
+  /** Legacy queue takeover for printers added in the web UI (the form starts with this value): on | dry-run | off. */
+  DEFAULT_LEGACY_TAKEOVER: z.string().trim().toLowerCase().default("on").pipe(z.enum(["on", "dry-run", "off"])),
+
   // Print analytics (agents 0.5+ read PrintService event 307 on PCs). Off unless "1"/"true".
   ANALYTICS_ENABLED: bool,
   /** Also collect document names (titles can be personal or confidential). Off unless "1"/"true". */

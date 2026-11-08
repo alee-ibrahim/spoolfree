@@ -3,6 +3,8 @@ import { ListFilters, type FilterField } from "@/components/app/list-filters";
 import { NoMatches } from "@/components/app/no-matches";
 import { PageHeader } from "@/components/app/page-header";
 import type { OuOption } from "@/components/app/ou-picker";
+import type { PcOption } from "@/components/app/pc-picker";
+import { config } from "@/lib/config";
 import { db, schema } from "@/lib/db";
 import { isUnder, normalizeDn, parentDn } from "@/lib/dn";
 import { directory } from "@/lib/directory";
@@ -21,14 +23,19 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
   await requireAdmin();
   const d = db();
   const f = parsePrinterFilters(await searchParams);
-  const [allPrinters, statuses, assignments, settings, ouOptions, packages] = await Promise.all([
+  const [allPrinters, statuses, assignments, settings, dir, packages, overrides] = await Promise.all([
     d.select().from(schema.printers).orderBy(schema.printers.name),
     d.select().from(schema.printerStatus),
     d.select().from(schema.ouAssignments),
     d.select().from(schema.ouSettings),
-    loadOuOptions(),
+    loadDirectoryOptions(),
     loadPackagesForMatch(),
+    d.select().from(schema.computerOverrides).orderBy(schema.computerOverrides.computerName),
   ]);
+  const ouOptions = dir?.ous ?? null;
+  const pcOptions = dir?.pcs ?? null;
+  const overridesOf = new Map<string, typeof overrides>();
+  for (const o of overrides) overridesOf.set(o.printerId, [...(overridesOf.get(o.printerId) ?? []), o]);
   const packageOptions: DriverPackageOption[] = packages.map((p) => ({ id: p.id, name: p.name, universal: p.universal, drivers: driverNames(p.infs) }));
   const byPrinter = new Map<string, string[]>();
   for (const a of assignments) byPrinter.set(a.printerId, [...(byPrinter.get(a.printerId) ?? []), a.ouDn]);
@@ -80,7 +87,7 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
     }) ?? null;
   return (
     <>
-      <PageHeader title="Printers" actions={<PrinterFormDialog ouOptions={options} packages={packageOptions} />} />
+      <PageHeader title="Printers" actions={<PrinterFormDialog ouOptions={options} pcOptions={pcOptions} packages={packageOptions} defaultLegacyTakeover={config().DEFAULT_LEGACY_TAKEOVER} />} />
       <div className="flex flex-col gap-3 p-4 md:gap-4 md:p-6">
         {allPrinters.length > 0 && (
           <Suspense>
@@ -126,6 +133,7 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
             lastTestFormats: p.lastTest?.driverlessFormats ?? [],
             assignedOus: byPrinter.get(p.id)?.length ?? 0,
             ous: (byPrinter.get(p.id) ?? []).map((ouDn) => ({ ouDn, isDefault: defaultOf.get(normalizeDn(ouDn)) === p.id })),
+            pcOverrides: (overridesOf.get(p.id) ?? []).map((o) => ({ computerGuid: o.computerGuid, computerName: o.computerName, action: o.action, makeDefault: o.makeDefault })),
             driverMode: p.driverMode,
             driverPackageId: p.driverPackageId,
             driverName: p.driverName,
@@ -146,6 +154,7 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
             };
           })}
           ouOptions={options}
+          pcOptions={pcOptions}
         />
         )}
       </div>
@@ -153,13 +162,16 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
   );
 }
 
-/** Every OU and container from the directory, in tree order, with a full path label. Null when AD cannot be read. */
-async function loadOuOptions(): Promise<Omit<OuOption, "defaultPrinter">[] | null> {
+/**
+ * Every OU and container from the directory, in tree order, with a full path label, and every enabled computer with
+ * the path of its OU. Null when AD (or the snapshot) cannot be read.
+ */
+async function loadDirectoryOptions(): Promise<{ ous: Omit<OuOption, "defaultPrinter">[]; pcs: PcOption[] } | null> {
   try {
     const [containers, computers] = await Promise.all([directory().listContainers(), directory().listComputers()]);
     const flat = flattenTree(buildOuTree(containers));
     const nameByKey = new Map<string, string>();
-    return flat.map((n) => {
+    const ous = flat.map((n) => {
       const key = normalizeDn(n.dn);
       const label = n.kind === "domain" ? n.dn.replace(/DC=/gi, "").replace(/,/g, ".") : n.name;
       const parent = parentDn(n.dn);
@@ -177,6 +189,14 @@ async function loadOuOptions(): Promise<Omit<OuOption, "defaultPrinter">[] | nul
         computers: computers.filter((c) => !c.disabled && isUnder(c.dn, n.dn) && normalizeDn(c.dn) !== key).length,
       };
     });
+    const pcs: PcOption[] = computers
+      .filter((c) => !c.disabled)
+      .map((c) => {
+        const parent = parentDn(c.dn);
+        return { guid: c.objectGuid.toLowerCase(), name: c.name, path: (parent && nameByKey.get(normalizeDn(parent))) || shortDn(parent ?? "") || "" };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return { ous, pcs };
   } catch {
     return null;
   }

@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2Icon, MoreHorizontalIcon, PlusIcon, PrinterIcon, XCircleIcon } from "lucide-react";
+import { CheckCircle2Icon, ChevronDownIcon, MoreHorizontalIcon, PlusIcon, PrinterIcon, XCircleIcon } from "lucide-react";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from "@/components/ui/item";
 import { useActionState, useEffect, useState, useTransition } from "react";
 import { toast } from "sonner";
@@ -18,6 +18,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogClose,
@@ -43,7 +44,9 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { OuPicker, type OuOption, type PickedOu } from "@/components/app/ou-picker";
+import { PcPicker, type PcOption, type PcOverride } from "@/components/app/pc-picker";
 import { StatusBadges } from "@/components/app/printer-status";
+import { cn } from "@/lib/utils";
 import type { Marker } from "@/lib/ipp/interpret";
 import { deletePrinter, previewPrinterReach, replacePrinter, resetDriverDecision, savePrinter, testPrinter, type ActionResult, type TestResult } from "../actions";
 
@@ -95,6 +98,8 @@ export interface PrinterView {
   assignedOus: number;
   /** OU assignments, with whether this printer is the OU's default. */
   ous: PickedOu[];
+  /** Per-computer overrides of this printer (add and block). */
+  pcOverrides: PcOverride[];
   driverMode: "auto" | "driverless" | "vendor";
   driverPackageId: string | null;
   driverName: string | null;
@@ -123,15 +128,35 @@ function EndpointFields({ p }: { p?: Partial<PrinterView> }) {
   return (
     <>
       <div className="grid grid-cols-[1fr_6rem] gap-3">
-        <Field>
-          <FieldLabel htmlFor="host">IP address or hostname</FieldLabel>
-          <Input id="host" name="host" required defaultValue={p?.host} placeholder="192.0.2.25" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
-        </Field>
-        <Field>
-          <FieldLabel htmlFor="port">Port</FieldLabel>
-          <Input id="port" name="port" type="number" inputMode="numeric" defaultValue={p?.port ?? 631} />
-        </Field>
+        <HostField p={p} />
+        <PortField p={p} />
       </div>
+      <IppAddressField p={p} />
+      <IppPathFields p={p} />
+    </>
+  );
+}
+
+function HostField({ p }: { p?: Partial<PrinterView> }) {
+  return (
+    <Field>
+      <FieldLabel htmlFor="host">IP address or hostname</FieldLabel>
+      <Input id="host" name="host" required defaultValue={p?.host} placeholder="192.0.2.25" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+    </Field>
+  );
+}
+
+function PortField({ p }: { p?: Partial<PrinterView> }) {
+  return (
+    <Field>
+      <FieldLabel htmlFor="port">Port</FieldLabel>
+      <Input id="port" name="port" type="number" inputMode="numeric" defaultValue={p?.port ?? 631} />
+    </Field>
+  );
+}
+
+function IppAddressField({ p }: { p?: Partial<PrinterView> }) {
+  return (
       <Field>
         <FieldLabel htmlFor="ippAddress">IPP address (auto)</FieldLabel>
         <Input
@@ -146,6 +171,11 @@ function EndpointFields({ p }: { p?: Partial<PrinterView> }) {
           answers.{p?.ippVersion ? ` Last answer: IPP ${p.ippVersion}.` : ""}
         </FieldDescription>
       </Field>
+  );
+}
+
+function IppPathFields({ p }: { p?: Partial<PrinterView> }) {
+  return (
       <div className="grid grid-cols-[1fr_auto] items-end gap-3">
         <Field>
           <FieldLabel htmlFor="ippPathOverride">IPP path override</FieldLabel>
@@ -164,8 +194,7 @@ function EndpointFields({ p }: { p?: Partial<PrinterView> }) {
           <FieldLabel htmlFor="useTls">IPPS</FieldLabel>
         </Field>
       </div>
-    </>
-  )
+  );
 }
 
 const SIDES_LABEL: Record<string, string> = {
@@ -351,44 +380,93 @@ function DriverField({ printer, packages }: { printer?: PrinterView; packages: D
   );
 }
 
-/** OU picker state plus the debounced "will reach N computers" preview. */
-function useOuSelection(printer: PrinterView | undefined, open: boolean) {
+/** OU and PC picker state plus the debounced "will reach N computers" preview (OUs and PCs, each computer once). */
+function useAssignSelection(printer: PrinterView | undefined, open: boolean) {
+  const storedPcs = () => (printer?.pcOverrides ?? []).filter((o) => o.action === "add").map((o) => o.computerGuid.toLowerCase());
   const [ous, setOus] = useState<PickedOu[]>(printer?.ous ?? []);
+  const [pcs, setPcs] = useState<string[]>(storedPcs);
   const [reach, setReach] = useState<{ key: string; result: { computers: number } | { error: string } } | null>(null);
-  const dns = JSON.stringify(ous.map((o) => o.ouDn));
+  const key = JSON.stringify([ous.map((o) => o.ouDn), pcs]);
+  const empty = ous.length === 0 && pcs.length === 0;
   useEffect(() => {
-    if (!open || dns === "[]") return;
+    if (!open || empty) return;
     let cancelled = false;
     const t = setTimeout(async () => {
-      const r = await previewPrinterReach(printer?.id ?? null, JSON.parse(dns) as string[]).catch((e: Error) => ({ ok: false as const, error: e.message }));
-      if (!cancelled) setReach({ key: dns, result: r.ok ? { computers: r.computers } : { error: r.error } });
+      const [dns, guids] = JSON.parse(key) as [string[], string[]];
+      const r = await previewPrinterReach(printer?.id ?? null, dns, guids).catch((e: Error) => ({ ok: false as const, error: e.message }));
+      if (!cancelled) setReach({ key, result: r.ok ? { computers: r.computers } : { error: r.error } });
     }, 250);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [open, dns, printer?.id]);
+  }, [open, key, empty, printer?.id]);
   /** Start from the stored assignments each time the dialog opens. */
-  const reset = () => setOus(printer?.ous ?? []);
-  return { ous, setOus, reset, reach: reach?.result ?? null, reachPending: reach?.key !== dns };
+  const reset = () => {
+    setOus(printer?.ous ?? []);
+    setPcs(storedPcs());
+  };
+  return { ous, setOus, pcs, setPcs, reset, empty, reach: reach?.result ?? null, reachPending: reach?.key !== key };
+}
+
+function ReachNote({ empty, reach, pending }: { empty: boolean; reach: { computers: number } | { error: string } | null; pending: boolean }) {
+  return (
+    <p className="-mt-3 text-sm text-muted-foreground" aria-live="polite">
+      {empty
+        ? "Not assigned yet: no PC gets this printer."
+        : pending || reach === null
+          ? "Counting computers…"
+          : "error" in reach
+            ? `Cannot count computers: ${reach.error}`
+            : `Will reach ${reach.computers} computer${reach.computers === 1 ? "" : "s"} (OUs incl. child OUs, plus specific PCs; each counted once).`}
+    </p>
+  );
+}
+
+/** A collapsed section of the printer form. Its fields stay mounted (hidden) so they are always submitted. */
+function FormSection({ title, hint, defaultOpen = false, children }: { title: string; hint: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border">
+      <CollapsibleTrigger asChild>
+        <Button type="button" variant="ghost" className="h-auto w-full justify-between gap-3 px-3 py-2.5 text-left font-normal">
+          <span className="flex min-w-0 flex-col">
+            <span className="font-medium">{title}</span>
+            <span className="text-xs whitespace-normal text-muted-foreground">{hint}</span>
+          </span>
+          <ChevronDownIcon className={cn("shrink-0 transition-transform", open && "rotate-180")} aria-hidden />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent forceMount className="data-[state=closed]:hidden">
+        <FieldGroup className="gap-5 border-t p-3">{children}</FieldGroup>
+      </CollapsibleContent>
+    </Collapsible>
+  );
 }
 
 export function PrinterFormDialog({
   printer,
   trigger,
   ouOptions,
+  pcOptions,
   packages,
+  defaultLegacyTakeover = "on",
 }: {
   printer?: PrinterView;
   trigger?: React.ReactNode;
   /** Directory OUs for the picker; null when the directory cannot be read. */
   ouOptions: OuOption[] | null;
+  /** Directory computers for the PC picker; null when the directory cannot be read. */
+  pcOptions: PcOption[] | null;
   /** Uploaded driver packages (vendor mode). */
   packages: DriverPackageOption[];
+  /** Takeover for a new printer (server setting DEFAULT_LEGACY_TAKEOVER). */
+  defaultLegacyTakeover?: "off" | "dry-run" | "on";
 }) {
   const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState(savePrinter, null);
-  const { ous, setOus, reset, reach, reachPending } = useOuSelection(printer, open);
+  const { ous, setOus, pcs, setPcs, reset, empty, reach, reachPending } = useAssignSelection(printer, open);
+  const hasShares = (printer?.legacyShares.length ?? 0) > 0;
   useResultToast(state, () => setOpen(false));
   return (
     <Dialog
@@ -419,16 +497,8 @@ export function PrinterFormDialog({
               <FieldLabel htmlFor="name">Name</FieldLabel>
               <Input id="name" name="name" required defaultValue={printer?.name} placeholder="Staff Room Copier" />
             </Field>
-            <EndpointFields p={printer} />
-            {ouOptions && <input type="hidden" name="ous" value={JSON.stringify(ous)} />}
-            <OuPicker
-              options={ouOptions}
-              value={ous}
-              onChange={setOus}
-              printerId={printer?.id ?? null}
-              reach={reach}
-              reachPending={reachPending}
-            />
+            <HostField p={printer} />
+            <IppAddressField p={printer} />
             <div className="grid gap-3 sm:grid-cols-2">
               <Field>
                 <FieldLabel htmlFor="location">Location</FieldLabel>
@@ -439,55 +509,63 @@ export function PrinterFormDialog({
                 <Input id="model" name="model" defaultValue={printer?.model ?? ""} placeholder="Brother MFC-L8900CDW" />
               </Field>
             </div>
-            <Field>
-              <FieldLabel htmlFor="notes">Notes</FieldLabel>
-              <Textarea id="notes" name="notes" rows={2} defaultValue={printer?.notes ?? ""} />
-            </Field>
+            {ouOptions && <input type="hidden" name="ous" value={JSON.stringify(ous)} />}
+            <OuPicker options={ouOptions} value={ous} onChange={setOus} printerId={printer?.id ?? null} />
+            {pcOptions && <input type="hidden" name="computers" value={JSON.stringify(pcs)} />}
+            <PcPicker options={pcOptions} value={pcs} onChange={setPcs} stored={printer?.pcOverrides ?? []} />
+            <ReachNote empty={empty} reach={reach} pending={reachPending} />
             <SidesField printer={printer} />
             <DriverField printer={printer} packages={packages} />
-            <Field>
-              <FieldLabel htmlFor="legacyTakeover">Replace existing queues for this device</FieldLabel>
-              <Select name="legacyTakeover" defaultValue={printer?.legacyTakeover ?? "off"}>
-                <SelectTrigger id="legacyTakeover" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="off">Off: never touch other queues</SelectItem>
-                  <SelectItem value="dry-run">Dry run: report what would be removed</SelectItem>
-                  <SelectItem value="on">On: remove them, then add this printer</SelectItem>
-                </SelectContent>
-              </Select>
-              <FieldDescription>
-                Removes non-Spoolfree queues on PCs that print to this device (same IP or hostname, or a print-server
-                share below). USB and virtual printers are never touched. Start with a dry run and check Agents.
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="legacyShares">Shares on the old print servers</FieldLabel>
-              <Input
-                id="legacyShares"
-                name="legacyShares"
-                defaultValue={(printer?.legacyShares ?? []).join(", ")}
-                placeholder="Staff-Room-Copier, StaffRoom2"
-              />
-              <FieldDescription>Comma-separated share names on the servers in LEGACY_PRINT_SERVERS.</FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="legacyAliases">Legacy hostnames / aliases</FieldLabel>
-              <Input
-                id="legacyAliases"
-                name="legacyAliases"
-                defaultValue={(printer?.legacyAliases ?? []).join(", ")}
-                placeholder="OLD-PRINTER-NAME, old-printer.example.org"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-              />
-              <FieldDescription>
-                Old names TCP/IP ports may still point at, e.g. a NetBIOS-style name that is not in DNS. Takeover matches a port
-                host equal to any of them (case-insensitive, &quot;.local&quot; optional).
-              </FieldDescription>
-            </Field>
+            <FormSection title="Connection and notes" hint="Port, IPP path override, IPPS, notes">
+              <PortField p={printer} />
+              <IppPathFields p={printer} />
+              <Field>
+                <FieldLabel htmlFor="notes">Notes</FieldLabel>
+                <Textarea id="notes" name="notes" rows={2} defaultValue={printer?.notes ?? ""} />
+              </Field>
+            </FormSection>
+            <FormSection title="Advanced (migration)" hint="Replace old queues for this device, legacy hostnames">
+              <Field>
+                <FieldLabel htmlFor="legacyTakeover">Replace existing queues for this device</FieldLabel>
+                <Select name="legacyTakeover" defaultValue={printer?.legacyTakeover ?? defaultLegacyTakeover}>
+                  <SelectTrigger id="legacyTakeover" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="on">On: remove them, then add this printer</SelectItem>
+                    <SelectItem value="dry-run">Dry run: report what would be removed</SelectItem>
+                    <SelectItem value="off">Off: never touch other queues</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FieldDescription>
+                  Removes non-Spoolfree queues on PCs that print to this device (same IP or hostname, or a legacy hostname below), so
+                  users do not see the printer twice. USB and virtual printers are never touched. A dry run only reports on Agents.
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="legacyAliases">Legacy hostnames / aliases</FieldLabel>
+                <Input
+                  id="legacyAliases"
+                  name="legacyAliases"
+                  defaultValue={(printer?.legacyAliases ?? []).join(", ")}
+                  placeholder="OLD-PRINTER-NAME, old-printer.example.org"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <FieldDescription>
+                  Old names TCP/IP ports may still point at, e.g. a NetBIOS-style name that is not in DNS. Takeover matches a port
+                  host equal to any of them (case-insensitive, &quot;.local&quot; optional).
+                </FieldDescription>
+              </Field>
+              {hasShares && (
+                <Field>
+                  <FieldLabel htmlFor="legacyShares">Shares on the old print servers</FieldLabel>
+                  <Input id="legacyShares" name="legacyShares" defaultValue={(printer?.legacyShares ?? []).join(", ")} />
+                  <FieldDescription>Comma-separated share names on the servers in LEGACY_PRINT_SERVERS. Clear it to stop matching them.</FieldDescription>
+                </Field>
+              )}
+            </FormSection>
           </FieldGroup>
           <DialogFooter className="sticky -bottom-4 z-10 -mx-4 -mb-4 border-t bg-background p-4 sm:static sm:m-0 sm:border-0 sm:p-0">
             <DialogClose asChild>
@@ -653,6 +731,7 @@ function DetectionNote({ d }: { d: NonNullable<TestResult["detection"]> }) {
 function PrinterActions({
   p,
   ouOptions,
+  pcOptions,
   packages,
   pending,
   onTest,
@@ -661,6 +740,7 @@ function PrinterActions({
 }: {
   p: PrinterView;
   ouOptions: OuOption[] | null;
+  pcOptions: PcOption[] | null;
   packages: DriverPackageOption[];
   pending: boolean;
   onTest: () => void;
@@ -681,6 +761,7 @@ function PrinterActions({
         <PrinterFormDialog
           printer={p}
           ouOptions={ouOptions}
+          pcOptions={pcOptions}
           packages={packages}
           trigger={<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>}
         />
@@ -729,7 +810,17 @@ function DriverlessBadge({ p }: { p: PrinterView }) {
   return <Badge variant="destructive">Unsupported</Badge>;
 }
 
-export function PrintersTable({ printers, ouOptions, packages }: { printers: PrinterView[]; ouOptions: OuOption[] | null; packages: DriverPackageOption[] }) {
+export function PrintersTable({
+  printers,
+  ouOptions,
+  pcOptions,
+  packages,
+}: {
+  printers: PrinterView[];
+  ouOptions: OuOption[] | null;
+  pcOptions: PcOption[] | null;
+  packages: DriverPackageOption[];
+}) {
   const [replacing, setReplacing] = useState<PrinterView | null>(null);
   const [deleting, setDeleting] = useState<PrinterView | null>(null);
   const [testResult, setTestResult] = useState<(TestResult & { name: string; decision?: DriverDecisionView }) | null>(null);
@@ -779,7 +870,7 @@ export function PrintersTable({ printers, ouOptions, packages }: { printers: Pri
               </div>
             </ItemContent>
             <ItemActions>
-              <PrinterActions p={p} ouOptions={ouOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+              <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
             </ItemActions>
           </Item>
         ))}
@@ -826,7 +917,7 @@ export function PrintersTable({ printers, ouOptions, packages }: { printers: Pri
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{p.assignedOus}</TableCell>
                 <TableCell className="pr-4">
-                  <PrinterActions p={p} ouOptions={ouOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+                  <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
                 </TableCell>
               </TableRow>
             ))}

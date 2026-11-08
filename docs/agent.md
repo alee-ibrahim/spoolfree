@@ -89,11 +89,16 @@ It only changes queues it created. Each one is recorded under `HKLM:\SOFTWARE\Sp
 
 - A queue with the same name that someone else created is reported as a conflict and left alone.
 - A queue whose comment was changed is not deleted.
-- The one exception is legacy queue takeover, below, which is opt-in per printer.
+- The one exception is legacy queue takeover, below, which is set per printer.
 
 ## Legacy queue takeover
 
-For moving PCs off an old print server or hand-installed queues. It is set per printer: **off** (the default), **dry-run** or **on**.
+For moving PCs off an old print server or hand-installed queues, so users do not see the same printer twice. It is set
+per printer: **off**, **dry-run** or **on**. From 0.7.6 a printer added in the web UI starts with **on**
+(`DEFAULT_LEGACY_TAKEOVER=on|dry-run|off` changes that); edits keep the stored value, and the bulk CLI still uses
+**off** unless the file sets `legacyTakeover`. In the printer form the setting, the legacy host names and (only when a
+printer already has some) the print-server share names are in the collapsed **Advanced (migration)** section. Share
+names for new printers are set with the bulk CLI (`legacyShares`).
 
 **What counts as the same printer.** The agent matches non-Spoolfree queues against the printer's host name, its
 resolved IP addresses and, from 0.4.2, the device identity the server sends in the manifest (`deviceUuid`: the IPP

@@ -37,6 +37,7 @@ async function run(width: number, height: number, label: string, mobile: boolean
     const dialog = page.getByRole("dialog", { name: "Add printer" });
     await dialog.getByLabel("Name", { exact: true }).fill(name);
     await dialog.getByLabel("IP address or hostname").fill("192.0.2.200");
+    await dialog.getByRole("button", { name: /Connection and notes/ }).click();
     await dialog.getByLabel("IPP path override", { exact: true }).fill("/ipp/print");
     const trigger = dialog.getByRole("combobox", { name: "Assign to OUs" });
     if (mobile) await minTarget(trigger, "picker trigger");
@@ -74,7 +75,7 @@ async function run(width: number, height: number, label: string, mobile: boolean
 
     const selected = dialog.getByRole("list", { name: "Selected OUs" });
     await expect(selected.getByRole("listitem")).toHaveCount(2);
-    await expect(dialog.getByText(/Will reach \d+ computers? \(incl\. child OUs\)/)).toBeVisible();
+    await expect(dialog.getByText(/Will reach \d+ computers?/)).toBeVisible();
     const finRow = selected.getByRole("listitem").filter({ hasText: "Finance" });
     const remove = finRow.getByRole("button", { name: /^Remove/ });
     if (mobile) await minTarget(remove, "remove button");

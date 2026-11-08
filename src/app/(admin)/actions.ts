@@ -27,6 +27,14 @@ import {
   type OuChangePlan,
   type PrinterOu,
 } from "@/lib/printer-ous";
+import {
+  applyComputerChanges,
+  computerSummary,
+  loadPrinterComputers,
+  planComputerChanges,
+  PrinterComputersField,
+  type ComputerChangePlan,
+} from "@/lib/printer-computers";
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
 
@@ -53,7 +61,8 @@ const PrinterInput = z.object({
   location: z.string().trim().max(200).optional().transform((v) => v || null),
   model: z.string().trim().max(200).optional().transform((v) => v || null),
   notes: z.string().trim().max(2000).optional().transform((v) => v || null),
-  legacyTakeover: z.enum(["off", "dry-run", "on"]).default("off"),
+  /** Absent: a new printer gets DEFAULT_LEGACY_TAKEOVER, an existing one keeps its value. */
+  legacyTakeover: z.enum(["off", "dry-run", "on"]).optional(),
   defaultSides: z.enum(["auto", "one-sided", "two-sided-long-edge", "two-sided-short-edge"]).default("auto"),
   legacyShares: z
     .string()
@@ -136,18 +145,40 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
     if (!ous.success) return { ok: false, error: firstError(ous.error) };
     desiredOus = ous.data;
   }
+  // Per-computer "add" overrides from the form. Absent field = leave them alone.
+  const pcsRaw = fd.get("computers");
+  let desiredPcs: string[] | null = null;
+  if (typeof pcsRaw === "string") {
+    const pcs = PrinterComputersField.safeParse(pcsRaw);
+    if (!pcs.success) return { ok: false, error: firstError(pcs.error) };
+    desiredPcs = pcs.data;
+  }
   const d = db();
   let sidesWarning = "";
   let ippNote = "";
   let ouNote = "";
+  let pcNote = "";
   try {
-    const { ippPathOverride, ...rest } = parsed.data;
+    const { ippPathOverride, legacyTakeover, ...input } = parsed.data;
     const before = id ? (await d.select().from(schema.printers).where(eq(schema.printers.id, id)))[0] : null;
     if (id && !before) return { ok: false, error: "Printer not found" };
+    const rest = {
+      ...input,
+      legacyTakeover: legacyTakeover ?? before?.legacyTakeover ?? config().DEFAULT_LEGACY_TAKEOVER,
+      // The form only shows the share list when the printer already has shares; absent = keep them.
+      legacyShares: fd.has("legacyShares") ? input.legacyShares : (before?.legacyShares ?? []),
+    };
     if (desiredOus) {
       const current = id ? await loadPrinterOus(d, id) : { assigned: [], defaults: [] };
       const unknown = await unknownOus(planOuChanges(current.assigned, current.defaults, desiredOus).added);
       if (unknown) return { ok: false, error: unknown };
+    }
+    let pcNames = new Map<string, string>();
+    if (desiredPcs) {
+      const plan = planComputerChanges(id ? await loadPrinterComputers(d, id) : [], desiredPcs);
+      const checked = await checkComputers(plan);
+      if ("error" in checked) return { ok: false, error: checked.error };
+      pcNames = checked.names;
     }
     if (before) sidesWarning = sidesSupportWarning(rest.defaultSides, before.lastTest?.sidesSupported);
     const driverError = await checkVendorDriver(rest);
@@ -191,13 +222,19 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
         await applyOuChanges(tx, admin.email, { id: printerId, name: values.name }, plan);
         ouNote = ouSummary(plan);
       }
+      if (desiredPcs) {
+        const plan = planComputerChanges(await loadPrinterComputers(tx, printerId), desiredPcs);
+        await applyComputerChanges(tx, admin.email, { id: printerId, name: values.name }, plan, pcNames);
+        pcNote = computerSummary(plan);
+      }
     });
   } catch (e) {
     if (isUniqueViolation(e)) return { ok: false, error: "A printer with that name already exists" };
     throw e;
   }
   revalidateAll();
-  return { ok: true, message: (id ? "Printer updated" : "Printer added") + ouNote + ippNote + sidesWarning };
+  const changes = [ouNote.replace(/^\. /, ""), pcNote].filter(Boolean).join(", ");
+  return { ok: true, message: (id ? "Printer updated" : "Printer added") + (changes ? `. ${changes}` : "") + ippNote + sidesWarning };
 }
 
 function isUniqueViolation(e: unknown): boolean {
@@ -224,6 +261,24 @@ async function unknownOus(added: string[]): Promise<string | null> {
   return missing.length ? `Not in the directory: ${missing.join("; ")}` : null;
 }
 
+/** Names of the computers to add, or an error when one is not in the directory or blocks this printer. */
+async function checkComputers(plan: ComputerChangePlan): Promise<{ names: Map<string, string> } | { error: string }> {
+  if (plan.blocked.length) {
+    return { error: `Blocked for this printer on ${plan.blocked.map((b) => b.computerName).join(", ")}; remove the block on Preview first` };
+  }
+  if (!plan.added.length) return { names: new Map() };
+  let computers;
+  try {
+    computers = await directory().listComputers();
+  } catch (e) {
+    return { error: `Cannot check the computers against the directory: ${(e as Error).message}` };
+  }
+  const byGuid = new Map(computers.map((c) => [c.objectGuid.toLowerCase(), c.name]));
+  const missing = plan.added.filter((g) => !byGuid.has(g));
+  if (missing.length) return { error: `Computer not in the directory: ${missing.join(", ")}` };
+  return { names: new Map(plan.added.map((g) => [g, byGuid.get(g)!])) };
+}
+
 function ouSummary(p: OuChangePlan): string {
   const parts = [
     p.added.length ? `${p.added.length} OU${p.added.length === 1 ? "" : "s"} added` : "",
@@ -234,14 +289,20 @@ function ouSummary(p: OuChangePlan): string {
 }
 
 /** Live "will reach N computers" hint for the OU picker in the printer form. */
-export async function previewPrinterReach(printerId: string | null, ous: string[]): Promise<{ ok: true; computers: number } | { ok: false; error: string }> {
+export async function previewPrinterReach(
+  printerId: string | null,
+  ous: string[],
+  pcs?: string[],
+): Promise<{ ok: true; computers: number } | { ok: false; error: string }> {
   await requireAdmin();
   const list = z.array(z.string().max(2000)).max(5000).safeParse(ous);
   if (!list.success) return { ok: false, error: "Invalid OU list" };
+  const pcList = z.array(z.string().max(64)).max(5000).optional().safeParse(pcs);
+  if (!pcList.success) return { ok: false, error: "Invalid computer list" };
   try {
     const [policy, computers] = await Promise.all([loadPolicy(), directory().listComputers()]);
     const id = printerId && z.string().uuid().safeParse(printerId).success ? printerId : NEW_PRINTER_ID;
-    return { ok: true, computers: printerReach(policy, computers, id, list.data).computers };
+    return { ok: true, computers: printerReach(policy, computers, id, list.data, pcList.data?.map((g) => g.toLowerCase())).computers };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
