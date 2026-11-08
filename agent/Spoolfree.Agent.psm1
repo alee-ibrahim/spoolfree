@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.6.2'
+$script:AgentVersion = '0.6.3'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -693,6 +693,24 @@ function Get-SpoolfreeWsdPortData {
     }
     foreach ($u in $uuids) { if ($DeviceIndex.ContainsKey($u)) { foreach ($h in @($DeviceIndex[$u])) { if ($h) { $hosts.Add([string]$h) } } } }
     return [pscustomobject]@{ Uuids = @($uuids | Select-Object -Unique); Hosts = @($hosts | Select-Object -Unique) }
+}
+
+function Get-SpoolfreeTakeoverPrinters {
+    <#
+    .SYNOPSIS
+        Pure: lower-case names of the printers takeover removed a legacy queue for on this PC (published removed map
+        of earlier syncs and this sync's removals), as a hashtable name -> $true. The removed map comes back from JSON
+        as a PSCustomObject, or as a hashtable; both are read by entry (0.6.3: 0.6.2 read the properties of the
+        wrapping array instead, so dry-run PCs never got the recovery).
+    #>
+    param($RemovedMap, $Removed)
+    $out = @{}
+    foreach ($m in @($RemovedMap, $Removed)) {
+        if ($null -eq $m) { continue }
+        $values = if ($m -is [System.Collections.IDictionary]) { @($m.Values) } else { @($m.PSObject.Properties | ForEach-Object { $_.Value }) }
+        foreach ($v in $values) { if ($v) { $out[([string]$v).ToLowerInvariant()] = $true } }
+    }
+    return $out
 }
 
 function Merge-SpoolfreeRemovedMap {

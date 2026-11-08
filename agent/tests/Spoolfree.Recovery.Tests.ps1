@@ -144,3 +144,15 @@ Describe 'Install-SpoolfreePrinterResilient: "already exists" after takeover' {
         @($r.Notes) -join ' ' | Should -Match 're-scan for blocking queues failed: inventory broke'
     }
 }
+
+Describe 'Get-SpoolfreeTakeoverPrinters' {
+    It 'reads the published removed map (JSON object) and this sync''s removals by entry' {
+        $json = '{"removedMap":{"procurement-hp-m277dw":"9F Procurement HP","Old (Copy 1)":"Office HP"}}' | ConvertFrom-Json
+        $r = Get-SpoolfreeTakeoverPrinters -RemovedMap $json.removedMap -Removed @{ 'legacy x' = 'Lab Printer' }
+        @($r.Keys | Sort-Object) | Should -Be @('9f procurement hp', 'lab printer', 'office hp')
+        $r.ContainsKey('length') | Should -BeFalse
+    }
+    It 'handles a missing map' {
+        (Get-SpoolfreeTakeoverPrinters -RemovedMap $null -Removed @{}).Count | Should -Be 0
+    }
+}

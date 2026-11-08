@@ -145,9 +145,7 @@ if ($PSCmdlet.ShouldProcess('Spoolfree Sync task', 'set interval')) {
 # Creates one queue (Add/Replace). 0.6.2: when takeover is on for the printer or already removed a legacy queue for it
 # here, an "already exists" failure is recovered (blocking queue removed, stale device association cleared, TCP/IP
 # fallback with the old queue's driver) so the PC is never left without the printer.
-$takeoverPrinters = @{}
-foreach ($v in @((Get-SpoolfreeProperty (Get-SpoolfreeTakeoverState) 'removedMap')).PSObject.Properties) { if ($v.Value) { $takeoverPrinters[([string]$v.Value).ToLowerInvariant()] = $true } }
-foreach ($v in $legacyRemoved.Values) { $takeoverPrinters[([string]$v).ToLowerInvariant()] = $true }
+$takeoverPrinters = Get-SpoolfreeTakeoverPrinters -RemovedMap (Get-SpoolfreeProperty (Get-SpoolfreeTakeoverState) 'removedMap') -Removed $legacyRemoved
 $lateRemoved = @{}
 function Install-SyncStep($step) {
     $name = [string]$step.Name
