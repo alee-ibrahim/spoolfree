@@ -48,6 +48,28 @@ const Report = z.object({
     .array(z.object({ printer: z.string().max(256), method: z.string().max(32), reason: z.string().max(1000).optional() }))
     .max(200)
     .optional(),
+  queues: z
+    .array(
+      z.object({
+        name: z.string().max(256),
+        driver: z.string().max(256).nullable().optional(),
+        port: z.string().max(512).nullable().optional(),
+        method: z.string().max(32).nullable().optional(),
+      }),
+    )
+    .max(200)
+    .optional(),
+  drivers: z
+    .array(
+      z.object({
+        printer: z.string().max(256),
+        status: z.enum(["installed", "present", "wpp-blocked", "failed", "fallback"]),
+        driverName: z.string().max(256).nullable().optional(),
+        message: z.string().max(1000).nullable().optional(),
+      }),
+    )
+    .max(200)
+    .optional(),
   analytics: z
     .object({
       enabled: z.boolean(),

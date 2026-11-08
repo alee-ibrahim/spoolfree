@@ -6,7 +6,9 @@ import { directory } from "@/lib/directory";
 import { buildOuTree, flattenTree } from "@/lib/ou-tree";
 import { printerUri } from "@/lib/ipp/interpret";
 import { requireAdmin } from "@/lib/session";
-import { PrinterFormDialog, PrintersTable } from "./printers-client";
+import { driverNames } from "@/lib/drivers/package";
+import { driverDecision, loadPackagesForMatch } from "@/lib/service";
+import { PrinterFormDialog, PrintersTable, type DriverPackageOption } from "./printers-client";
 
 export const metadata = { title: "Printers" };
 
@@ -14,11 +16,13 @@ export default async function PrintersPage() {
   await requireAdmin();
   const d = db();
   const printers = await d.select().from(schema.printers).orderBy(schema.printers.name);
-  const [assignments, settings, ouOptions] = await Promise.all([
+  const [assignments, settings, ouOptions, packages] = await Promise.all([
     d.select().from(schema.ouAssignments),
     d.select().from(schema.ouSettings),
     loadOuOptions(),
+    loadPackagesForMatch(),
   ]);
+  const packageOptions: DriverPackageOption[] = packages.map((p) => ({ id: p.id, name: p.name, universal: p.universal, drivers: driverNames(p.infs) }));
   const byPrinter = new Map<string, string[]>();
   for (const a of assignments) byPrinter.set(a.printerId, [...(byPrinter.get(a.printerId) ?? []), a.ouDn]);
   const defaultOf = new Map(settings.filter((s) => s.defaultPrinterId).map((s) => [normalizeDn(s.ouDn), s.defaultPrinterId!]));
@@ -30,10 +34,13 @@ export default async function PrintersPage() {
     }) ?? null;
   return (
     <>
-      <PageHeader title="Printers" actions={<PrinterFormDialog ouOptions={options} />} />
+      <PageHeader title="Printers" actions={<PrinterFormDialog ouOptions={options} packages={packageOptions} />} />
       <div className="p-4 md:p-6">
         <PrintersTable
-          printers={printers.map((p) => ({
+          packages={packageOptions}
+          printers={printers.map((p) => {
+            const dec = driverDecision(p, packages);
+            return {
             id: p.id,
             name: p.name,
             host: p.host,
@@ -58,7 +65,24 @@ export default async function PrintersPage() {
             lastTestFormats: p.lastTest?.driverlessFormats ?? [],
             assignedOus: byPrinter.get(p.id)?.length ?? 0,
             ous: (byPrinter.get(p.id) ?? []).map((ouDn) => ({ ouDn, isDefault: defaultOf.get(normalizeDn(ouDn)) === p.id })),
-          }))}
+            driverMode: p.driverMode,
+            driverPackageId: p.driverPackageId,
+            driverName: p.driverName,
+            vendorProtocol: p.vendorProtocol,
+            lprQueue: p.lprQueue,
+            ippVersions: p.lastTest?.ippVersions ?? null,
+            decision: {
+              mode: dec.mode,
+              source: dec.source,
+              reason: dec.reason,
+              needed: dec.needed,
+              packageName: dec.package?.name ?? null,
+              driverName: dec.driverName,
+              match: dec.match,
+              sticky: !!p.autoVendorReason,
+            },
+            };
+          })}
           ouOptions={options}
         />
       </div>

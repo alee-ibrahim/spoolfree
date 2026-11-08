@@ -3,6 +3,7 @@ import {
   ChartColumnIcon,
   FolderTreeIcon,
   MonitorSmartphoneIcon,
+  PackageIcon,
   PrinterIcon,
   ScrollTextIcon,
   SearchCheckIcon,
@@ -31,6 +32,7 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     label: "Manage",
     items: [
       { href: "/printers", label: "Printers", icon: PrinterIcon },
+      { href: "/drivers", label: "Drivers", icon: PackageIcon },
       { href: "/assignments", label: "Assignments", short: "OUs", icon: FolderTreeIcon },
       { href: "/preview", label: "Preview", icon: SearchCheckIcon },
       { href: "/unassigned", label: "Unassigned PCs", icon: MonitorSmartphoneIcon },

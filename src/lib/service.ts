@@ -5,7 +5,9 @@ import { baseDn, directory, type ComputerObject } from "./directory";
 import { buildManifest, type ManifestPrinterInput } from "./manifest";
 import { resolvePrinters, type Policy } from "./resolve";
 import { agentUpdateForManifest } from "./agent-update";
-import { config } from "./config";
+import { autoSettings, config } from "./config";
+import { decideDriver, type DriverDecision, type PackageForMatch } from "./drivers/auto";
+import { listDriverPackages, toPackageForMatch } from "./drivers/store";
 
 export async function audit(
   actor: string,
@@ -46,7 +48,17 @@ export async function listPrinters() {
   return db().select().from(schema.printers).orderBy(schema.printers.name);
 }
 
-export function toManifestInput(p: typeof schema.printers.$inferSelect): ManifestPrinterInput {
+/** Driver packages in the shape auto mode matches against. */
+export async function loadPackagesForMatch(): Promise<PackageForMatch[]> {
+  return (await listDriverPackages(db())).map(toPackageForMatch);
+}
+
+/** The driver PCs get for this printer (manual setting or auto mode's decision). */
+export function driverDecision(p: typeof schema.printers.$inferSelect, packages: PackageForMatch[]): DriverDecision {
+  return decideDriver(p, packages, autoSettings());
+}
+
+export function toManifestInput(p: typeof schema.printers.$inferSelect, packages: PackageForMatch[] = []): ManifestPrinterInput {
   return {
     id: p.id,
     name: p.name,
@@ -63,15 +75,16 @@ export function toManifestInput(p: typeof schema.printers.$inferSelect): Manifes
     defaultSides: p.defaultSides,
     deviceUuid: p.deviceUuid,
     macAddresses: p.macAddresses,
+    driver: driverDecision(p, packages),
   };
 }
 
 export async function manifestForComputer(computer: ComputerObject) {
-  const [policy, printers] = await Promise.all([loadPolicy(), listPrinters()]);
+  const [policy, printers, packages] = await Promise.all([loadPolicy(), listPrinters(), loadPackagesForMatch()]);
   const resolution = resolvePrinters(policy, computer);
   return buildManifest({
     resolution,
-    printers: new Map(printers.map((p) => [p.id, toManifestInput(p)])),
+    printers: new Map(printers.map((p) => [p.id, toManifestInput(p, packages)])),
     computer: { objectGuid: computer.objectGuid, dn: computer.dn, name: computer.name },
     now: new Date(),
     ttlHours: config().MANIFEST_TTL_HOURS,

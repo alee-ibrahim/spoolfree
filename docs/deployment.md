@@ -203,6 +203,25 @@ with what was removed, or `printer.update` with the old and new name). An unknow
 already has, or an invalid name (empty, over 100 characters, or containing `\ / , !`) exits with status 1 and changes
 nothing; wrong arguments print the usage and exit with status 2. `printers --help` prints the usage.
 
+### Driver settings and testing from the CLI
+
+Bulk files also carry the driver settings (0.7):
+
+- `driverMode`: `auto` (the default), `driverless` or `vendor`;
+- `driverPackage` (the package name) and `driverName`, for vendor mode;
+- `protocol` (`raw9100`, `lpr` or `ipp`) and `lprQueue`.
+
+In CSV the columns are `driver_mode`, `driver_package`, `driver_name`, `protocol` and `lpr_queue`. Packages are
+uploaded with `drivers upload` ([docs/drivers.md](drivers.md#driver-packages)).
+
+`printers test [<name> ...]` runs the same IPP Test as the admin UI. With no names it tests every printer. It records
+what auto driver mode needs; `drivers decide` then shows the driver each printer gets.
+
+```sh
+kubectl exec -n <ns> deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers test "8F Bureau Brother HL-3150CDN"
+kubectl exec -n <ns> deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs drivers decide
+```
+
 ## Migrating from a print server
 
 1. List the old servers in `LEGACY_PRINT_SERVERS` (FQDN and/or short name, comma-separated).

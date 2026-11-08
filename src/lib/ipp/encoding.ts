@@ -193,6 +193,25 @@ export function getPrinterAttributesRequest(
   });
 }
 
+/** Get-Jobs for which-jobs (e.g. "completed"), at most `limit` jobs, of all users. */
+export function getJobsRequest(printerUri: string, requested: string[], whichJobs: string, limit: number, requestId = 1): Buffer {
+  return encodeRequest({
+    version: [2, 0],
+    operation: Operation.getJobs,
+    requestId,
+    operationAttributes: [
+      { tag: Tag.charset, name: "attributes-charset", values: ["utf-8"] },
+      { tag: Tag.naturalLanguage, name: "attributes-natural-language", values: ["en"] },
+      { tag: Tag.uri, name: "printer-uri", values: [printerUri] },
+      { tag: Tag.nameWithoutLanguage, name: "requesting-user-name", values: ["spoolfree"] },
+      { tag: Tag.keyword, name: "which-jobs", values: [whichJobs] },
+      { tag: Tag.integer, name: "limit", values: [limit] },
+      { tag: Tag.boolean, name: "my-jobs", values: [false] },
+      { tag: Tag.keyword, name: "requested-attributes", values: requested },
+    ],
+  });
+}
+
 class Reader {
   constructor(
     private buf: Buffer,

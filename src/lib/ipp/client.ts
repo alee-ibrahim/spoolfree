@@ -1,6 +1,6 @@
 import http from "node:http";
 import https from "node:https";
-import { decodeResponse, getPrinterAttributesRequest, isSuccess, printerAttributes, type IppValue } from "./encoding";
+import { decodeResponse, getJobsRequest, getPrinterAttributesRequest, isSuccess, printerAttributes, Tag, type IppResponse, type IppValue } from "./encoding";
 
 /**
  * Sends a Get-Printer-Attributes request over HTTP(S).
@@ -13,9 +13,21 @@ export async function getPrinterAttributes(
   timeoutMs: number,
   version: [number, number] = [2, 0],
 ): Promise<Record<string, IppValue[]>> {
+  const body = getPrinterAttributesRequest(uri, requested, Math.floor(Math.random() * 0x7fffffff) || 1, version);
+  return printerAttributes(await ippPost(uri, body, timeoutMs));
+}
+
+/** Completed jobs (Get-Jobs which-jobs=completed): one attribute record per job, newest first as the printer lists them. */
+export async function getCompletedJobs(uri: string, requested: string[], timeoutMs: number, limit = 20): Promise<Record<string, IppValue[]>[]> {
+  const body = getJobsRequest(uri, requested, "completed", limit, Math.floor(Math.random() * 0x7fffffff) || 1);
+  const res = await ippPost(uri, body, timeoutMs);
+  return res.groups.filter((g) => g.tag === Tag.jobAttributes).map((g) => g.attributes);
+}
+
+/** POSTs an IPP request and returns the decoded response; throws on HTTP or IPP errors. */
+export async function ippPost(uri: string, body: Buffer, timeoutMs: number): Promise<IppResponse> {
   const url = new URL(uri);
   const secure = url.protocol === "ipps:" || url.protocol === "https:";
-  const body = getPrinterAttributesRequest(uri, requested, Math.floor(Math.random() * 0x7fffffff) || 1, version);
   const port = url.port ? Number(url.port) : 631;
   const lib = secure ? https : http;
 
@@ -59,7 +71,7 @@ export async function getPrinterAttributes(
   if (!isSuccess(res.statusCode)) {
     throw new IppStatusError(res.statusCode, `IPP status 0x${res.statusCode.toString(16).padStart(4, "0")}`);
   }
-  return printerAttributes(res);
+  return res;
 }
 
 /** The device answered HTTP, but not with 200 (wrong path, IPP not served there). */

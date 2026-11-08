@@ -9,7 +9,7 @@ import { directory } from "@/lib/directory";
 import { shortDn } from "@/lib/format";
 import { buildManifest } from "@/lib/manifest";
 import { resolvePrinters } from "@/lib/resolve";
-import { listPrinters, loadPolicy, toManifestInput } from "@/lib/service";
+import { listPrinters, loadPackagesForMatch, loadPolicy, toManifestInput } from "@/lib/service";
 import { requireAdmin } from "@/lib/session";
 import { eq } from "drizzle-orm";
 import { ComputerPicker, OverridesEditor } from "./preview-client";
@@ -37,7 +37,7 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
   }
   const guid = typeof params.computer === "string" ? params.computer.toLowerCase() : null;
   const computer = computers.find((c) => c.objectGuid === guid) ?? null;
-  const [policy, printers] = await Promise.all([loadPolicy(), listPrinters()]);
+  const [policy, printers, packages] = await Promise.all([loadPolicy(), listPrinters(), loadPackagesForMatch()]);
   const byId = new Map(printers.map((p) => [p.id, p]));
   const name = (id: string) => byId.get(id)?.name ?? "(deleted)";
 
@@ -49,7 +49,7 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
     computer && resolution
       ? buildManifest({
           resolution,
-          printers: new Map(printers.map((p) => [p.id, toManifestInput(p)])),
+          printers: new Map(printers.map((p) => [p.id, toManifestInput(p, packages)])),
           computer: { objectGuid: computer.objectGuid, dn: computer.dn, name: computer.name },
           now: new Date(),
           ttlHours: 24,

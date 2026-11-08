@@ -4,17 +4,18 @@ import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { config } from "@/lib/config";
+import type { SpeedSample } from "@/lib/db/schema";
+import { deleteDriverPackage as deletePackage } from "@/lib/drivers/store";
 import { db, schema } from "@/lib/db";
 import { directory } from "@/lib/directory";
 import { normalizeDn } from "@/lib/dn";
 import { aliasList } from "@/lib/aliases";
 import { getPrinterAttributes } from "@/lib/ipp/client";
-import { detectIppPath, IppDetectError, type DetectedPath } from "@/lib/ipp/detect";
-import { checkDriverless, printerUri, TEST_ATTRIBUTES, type DriverlessCheck } from "@/lib/ipp/interpret";
+import { detectIppPath, type DetectedPath } from "@/lib/ipp/detect";
 import { requireAdmin } from "@/lib/session";
-import { refreshIdentity } from "@/lib/status/identity";
 import { audit, loadPolicy } from "@/lib/service";
 import { deletePrinterWithReferences, printerSnapshot } from "@/lib/printer-lifecycle";
+import { runPrinterTest, type TestResult } from "@/lib/printer-test";
 import {
   applyOuChanges,
   auditWith,
@@ -61,6 +62,21 @@ const PrinterInput = z.object({
     .transform((v) => [...new Set((v ?? "").split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean))])
     .pipe(z.array(z.string().max(80).regex(/^[^\\/]+$/, "Share names only, without \\\\server\\"))),
   legacyAliases: aliasList,
+  driverMode: z.enum(["auto", "driverless", "vendor"]).default("auto"),
+  driverPackageId: z
+    .string()
+    .optional()
+    .transform((v) => v || null)
+    .pipe(z.string().uuid("Choose a driver package").nullable()),
+  driverName: z.string().trim().max(200).optional().transform((v) => v || null),
+  vendorProtocol: z.enum(["raw9100", "lpr", "ipp"]).default("raw9100"),
+  lprQueue: z
+    .string()
+    .trim()
+    .max(64)
+    .optional()
+    .transform((v) => v || null)
+    .pipe(z.string().regex(/^[\x21-\x7e]+$/, "The LPR queue name must be printable ASCII without spaces").nullable()),
 });
 
 function formObject(fd: FormData) {
@@ -72,7 +88,7 @@ function firstError(e: z.ZodError): string {
 }
 
 function revalidateAll() {
-  for (const p of ["/", "/printers", "/assignments", "/preview", "/unassigned", "/agents", "/audit", "/analytics"]) revalidatePath(p);
+  for (const p of ["/", "/printers", "/drivers", "/assignments", "/preview", "/unassigned", "/agents", "/audit", "/analytics"]) revalidatePath(p);
 }
 
 /** Short timeout for detection while saving: an unreachable host fails fast and the path stays as it was. */
@@ -134,6 +150,13 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
       if (unknown) return { ok: false, error: unknown };
     }
     if (before) sidesWarning = sidesSupportWarning(rest.defaultSides, before.lastTest?.sidesSupported);
+    const driverError = await checkVendorDriver(rest);
+    if (driverError) return { ok: false, error: driverError };
+    if (rest.driverMode !== "vendor") {
+      // The package and driver only apply to vendor mode; auto mode matches its own.
+      rest.driverPackageId = null;
+      rest.driverName = null;
+    }
     // IPP detection talks to the device, so it runs before the transaction opens.
     const ipp = await resolveIppPath({ ...rest, ippPathOverride }, before ?? null);
     ippNote = ipp.note;
@@ -152,6 +175,8 @@ export async function savePrinter(_prev: ActionResult | null, fd: FormData): Pro
             updatedAt: new Date(),
             revision: endpointChanged ? before.revision + 1 : before.revision,
             ...(deviceChanged ? NO_IDENTITY : {}),
+            // A new driver mode (or a new device) starts auto mode's decision over.
+            ...(deviceChanged || before.driverMode !== values.driverMode ? NO_AUTO_DECISION : {}),
           })
           .where(eq(schema.printers.id, printerId));
         await auditWith(tx, admin.email, "printer.update", "printer", printerId, { before: pick(before), after: values });
@@ -222,6 +247,17 @@ export async function previewPrinterReach(printerId: string | null, ous: string[
   }
 }
 
+/** Vendor mode needs an existing package and one of its driver names. Error text, or null. */
+async function checkVendorDriver(v: { driverMode: string; driverPackageId: string | null; driverName: string | null }): Promise<string | null> {
+  if (v.driverMode !== "vendor") return null;
+  if (!v.driverPackageId) return "Vendor driver mode needs a driver package (upload one on the Drivers page)";
+  const [pkg] = await db().select().from(schema.driverPackages).where(eq(schema.driverPackages.id, v.driverPackageId));
+  if (!pkg) return "Driver package not found";
+  if (!v.driverName) return "Choose the driver to use from the package";
+  if (!pkg.infs.some((i) => i.models.some((m) => m.name === v.driverName))) return `"${v.driverName}" is not a driver in ${pkg.name}`;
+  return null;
+}
+
 /** Warns (but saves) when the printer's last IPP test did not list the chosen duplex mode. */
 function sidesSupportWarning(sides: string, supported: string[] | undefined): string {
   if (sides === "auto") return "";
@@ -233,7 +269,10 @@ function sidesSupportWarning(sides: string, supported: string[] | undefined): st
 const pick = printerSnapshot;
 
 /** Another device may answer at a new endpoint: forget its identity until Test or the poller reads it again. */
-const NO_IDENTITY = { deviceUuid: null, macAddresses: [] as string[], identityCheckedAt: null };
+const NO_IDENTITY = { deviceUuid: null, macAddresses: [] as string[], identityCheckedAt: null, deviceId: null };
+
+/** Auto driver mode starts over: no sticky vendor decision, no speed samples. */
+const NO_AUTO_DECISION = { autoVendorReason: null, autoVendorAt: null, speedSamples: [] as SpeedSample[], speedCheckedAt: null };
 
 const ReplaceInput = z.object({
   id: z.string().uuid(),
@@ -257,7 +296,7 @@ export async function replacePrinter(_prev: ActionResult | null, fd: FormData): 
   const rest = { ...endpoint, ippPath: ipp.ippPath, ippPathAuto: ipp.ippPathAuto };
   await d
     .update(schema.printers)
-    .set({ ...rest, revision: before.revision + 1, updatedAt: new Date(), lastTest: null, lastTestAt: null, ...NO_IDENTITY })
+    .set({ ...rest, revision: before.revision + 1, updatedAt: new Date(), lastTest: null, lastTestAt: null, ...NO_IDENTITY, ...NO_AUTO_DECISION })
     .where(eq(schema.printers.id, id));
   await d.delete(schema.printerStatus).where(eq(schema.printerStatus.printerId, id));
   await audit(admin.email, "printer.replace", "printer", id, { before: pick(before), after: rest, revision: before.revision + 1 });
@@ -273,59 +312,18 @@ export async function deletePrinter(id: string): Promise<ActionResult> {
   return { ok: true, message: `Deleted ${removed.printer.name}` };
 }
 
-export interface TestDetection {
-  /** true: the path was auto-detected; false: manual override. */
-  auto: boolean;
-  path: string | null;
-  /** IPP request version the device answered ("2.0" or "1.1"). */
-  version: string | null;
-  /** Auto mode only: the stored path changed (revision bumped; PCs re-create the queue). */
-  changed: boolean;
-  tried: DetectedPath["tried"];
-}
-
-export type TestResult =
-  | { ok: true; check: DriverlessCheck; uri: string; detection: TestDetection }
-  | { ok: false; error: string; uri: string; detection: TestDetection | null };
+export type { TestDetection, TestResult } from "@/lib/printer-test";
 
 /**
  * IPP Get-Printer-Attributes: confirms the device is reachable and driverless-capable. In auto mode the IPP path is
  * detected (/ipp/print, /ipp, /ipp/printer, /printers/lp1, /; IPP 2.0 then 1.1) and stored; a manual path is only
- * tested.
+ * tested. Also reads what auto driver mode needs (printer-device-id, compression-supported).
  */
 export async function testPrinter(id: string): Promise<TestResult> {
   const admin = await requireAdmin();
-  const d = db();
-  const [p] = await d.select().from(schema.printers).where(eq(schema.printers.id, id));
+  const [p] = await db().select().from(schema.printers).where(eq(schema.printers.id, id));
   if (!p) return { ok: false, error: "Printer not found", uri: "", detection: null };
-  let result: TestResult;
-  const timeout = Math.max(config().POLL_TIMEOUT_MS, 8000);
-  try {
-    const found = await detectIppPath(p, TEST_ATTRIBUTES, timeout, getPrinterAttributes, p.ippPathAuto ? undefined : [p.ippPath]);
-    const changed = p.ippPathAuto && found.path !== p.ippPath;
-    const check = checkDriverless(found.attrs);
-    result = { ok: true, check, uri: found.uri, detection: { auto: p.ippPathAuto, path: found.path, version: found.version, changed, tried: found.tried } };
-    await d
-      .update(schema.printers)
-      .set({
-        lastTest: { ...check, ippPath: found.path, ippRequestVersion: found.version },
-        lastTestAt: new Date(),
-        ...(changed ? { ippPath: found.path, revision: p.revision + 1, updatedAt: new Date() } : {}),
-      })
-      .where(eq(schema.printers.id, id));
-    if (changed) await audit(admin.email, "printer.ipp_path_detected", "printer", id, { before: p.ippPath, after: found.path, version: found.version });
-    // printer-uuid and MAC addresses go into the manifest for legacy queue matching on PCs.
-    await refreshIdentity({ ...p, ippPath: found.path }, { uuid: check.uuid, model: check.model }).catch(() => undefined);
-  } catch (e) {
-    const tried = e instanceof IppDetectError ? e.tried : [];
-    result = {
-      ok: false,
-      error: (e as Error).message,
-      uri: printerUri(p),
-      detection: { auto: p.ippPathAuto, path: null, version: null, changed: false, tried },
-    };
-  }
-  await audit(admin.email, "printer.test", "printer", id, { uri: result.uri, ok: result.ok && result.check.ok });
+  const result = await runPrinterTest(admin.email, p);
   revalidateAll();
   return result;
 }
@@ -443,6 +441,28 @@ export async function removeOverride(id: string): Promise<ActionResult> {
   if (row) await audit(admin.email, "override.remove", "computer", row.computerGuid, { computer: row.computerName, printerId: row.printerId });
   revalidateAll();
   return { ok: true };
+}
+
+/* ---------- driver packages ---------- */
+
+export async function deleteDriverPackage(id: string): Promise<ActionResult> {
+  const admin = await requireAdmin();
+  if (!z.string().uuid().safeParse(id).success) return { ok: false, error: "Driver package not found" };
+  const r = await deletePackage(db(), admin.email, id);
+  if (!r.ok) return r;
+  revalidateAll();
+  return { ok: true, message: `Deleted ${r.name}` };
+}
+
+/** Clears auto mode's sticky vendor decision so it is evaluated again. */
+export async function resetDriverDecision(id: string): Promise<ActionResult> {
+  const admin = await requireAdmin();
+  const [p] = await db().select().from(schema.printers).where(eq(schema.printers.id, id));
+  if (!p) return { ok: false, error: "Printer not found" };
+  await db().update(schema.printers).set(NO_AUTO_DECISION).where(eq(schema.printers.id, id));
+  await audit(admin.email, "printer.driver_auto_reset", "printer", id, { previous: p.autoVendorReason });
+  revalidateAll();
+  return { ok: true, message: `${p.name}: auto mode decides again (run Test to re-read the device)` };
 }
 
 /* ---------- agents ---------- */

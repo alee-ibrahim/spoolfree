@@ -71,6 +71,18 @@ queue.
 
 The agent checks whether `-IppURL` is available at runtime: `(Get-Command Add-Printer).Parameters.ContainsKey('IppURL')`.
 
+### Vendor-driver queues (0.7)
+
+For a printer that is in driver mode **vendor**, or that auto mode resolves to vendor, the agent first checks the
+package against the signed manifest's SHA-256 and the catalog's Authenticode signature. It then installs the signed
+driver package (`pnputil /add-driver /install`, `Add-PrinterDriver`) and creates the queue on a Standard TCP/IP port:
+RAW 9100 by default, or LPR or IPP.
+
+A switch between driverless and vendor creates the new queue first (make-before-break), so the PC is never left
+without the printer. Under Windows Protected Print Mode vendor drivers are not allowed, and the queue stays driverless.
+
+Details: [docs/drivers.md](drivers.md#what-the-agent-does-agents-07).
+
 ## Which queues it touches
 
 It only changes queues it created. Each one is recorded under `HKLM:\SOFTWARE\Spoolfree\Printers` and carries a `Managed by Spoolfree [...]` comment.

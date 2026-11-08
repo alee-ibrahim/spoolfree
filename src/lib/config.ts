@@ -127,6 +127,17 @@ const schema = z.object({
       }
     }, "ANALYTICS_TIME_ZONE must be an IANA time zone"),
 
+  // Vendor drivers (driver mode "vendor" / "auto"; see docs/drivers.md)
+  /** Largest driver package (zip) accepted, in MB. Packages are stored in Postgres. */
+  DRIVER_PACKAGE_MAX_MB: z.coerce.number().int().min(1).max(1000).default(200),
+  /** Auto mode: median seconds per page above this (over DRIVER_AUTO_SLOW_MIN_JOBS jobs) means "slow". */
+  DRIVER_AUTO_SLOW_SECONDS_PER_PAGE: z.coerce.number().positive().default(20),
+  DRIVER_AUTO_SLOW_MIN_JOBS: z.coerce.number().int().min(1).max(20).default(3),
+  /** Jobs with fewer pages are not measured (warm-up dominates a 1-page job). */
+  DRIVER_AUTO_SLOW_MIN_PAGES: z.coerce.number().int().min(1).default(2),
+  /** How often the poller reads completed jobs (IPP Get-Jobs) of auto-mode printers; 0 turns speed measuring off. */
+  DRIVER_AUTO_SPEED_INTERVAL_MINUTES: z.coerce.number().int().min(0).default(30),
+
   // Development only
   DEV_FAKE_AD: bool,
   /** Optional JSON file that replaces the sample directory (see directory/fake.ts). */
@@ -194,4 +205,10 @@ export function secretValue(value: string | undefined, file: string | undefined)
 /** Agents that have not reported since this instant are "stale". */
 export function agentStaleCutoff(): number {
   return Date.now() - config().AGENT_STALE_HOURS * 3600_000;
+}
+
+/** Auto driver mode thresholds from the environment. */
+export function autoSettings() {
+  const c = config();
+  return { slowSecondsPerPage: c.DRIVER_AUTO_SLOW_SECONDS_PER_PAGE, slowMinJobs: c.DRIVER_AUTO_SLOW_MIN_JOBS, slowMinPages: c.DRIVER_AUTO_SLOW_MIN_PAGES };
 }

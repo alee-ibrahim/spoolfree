@@ -60,15 +60,25 @@ export const PrinterSpec = z
     defaultSides: z.enum(["auto", "one-sided", "two-sided-long-edge", "two-sided-short-edge"]).default("auto"),
     legacyShares: list.pipe(z.array(z.string().max(80).regex(/^[^\\/]+$/, "share names only, without \\\\server\\"))),
     legacyAliases: aliasList,
+    /** auto (default), driverless or vendor (docs/drivers.md). */
+    driverMode: z.enum(["auto", "driverless", "vendor"]).default("auto"),
+    /** Driver package by name (vendor mode). */
+    driverPackage: optText(100),
+    driverName: optText(200),
+    /** Port of vendor-driver queues. */
+    protocol: z.enum(["raw9100", "lpr", "ipp"]).default("raw9100"),
+    lprQueue: optText(64),
     assignments: dnList,
     defaultFor: dnList,
   })
   .refine((p) => p.host || p.ip, { message: "host (or ip) is required" })
-  .transform(({ ip, ...p }) => ({
+  .refine((p) => p.driverMode !== "vendor" || (p.driverPackage && p.driverName), { message: "driverMode vendor needs driverPackage and driverName" })
+  .transform(({ ip, protocol, ...p }) => ({
     ...p,
     host: (p.host ?? ip)!,
     port: p.port ?? 631,
     ippPathAuto: p.ippPath === undefined,
+    vendorProtocol: protocol,
   }));
 export type PrinterSpec = z.output<typeof PrinterSpec>;
 
@@ -158,6 +168,11 @@ const CSV_COLUMNS: Record<string, string> = {
   aliases: "legacyAliases",
   legacy_aliases: "legacyAliases",
   legacy_hostnames: "legacyAliases",
+  driver_mode: "driverMode",
+  driver_package: "driverPackage",
+  driver_name: "driverName",
+  protocol: "protocol",
+  lpr_queue: "lprQueue",
   duplex: "defaultSides",
   sides: "defaultSides",
   default_sides: "defaultSides",
@@ -227,6 +242,8 @@ export interface CurrentState {
   ouSettings: { ouDn: string; defaultPrinterId: string | null }[];
   /** Per-computer overrides (absent: treated as none). */
   overrides?: OverrideRow[];
+  /** Driver packages (absent: none), for driverPackage names. */
+  driverPackages?: { id: string; name: string; infs: schema.DriverInf[] }[];
 }
 
 export interface OverrideRow {
@@ -244,8 +261,11 @@ export interface DirectoryComputer {
   name: string;
 }
 
+/** A printer spec with driverPackage resolved to the package id (the shape that is written). */
+export type ResolvedSpec = Omit<PrinterSpec, "driverPackage"> & { driverPackageId: string | null };
+
 export type Step =
-  | { kind: "create"; name: string; spec: PrinterSpec }
+  | { kind: "create"; name: string; spec: ResolvedSpec }
   | { kind: "update"; name: string; id: string; changes: Record<string, unknown>; bumpRevision: boolean }
   | { kind: "unchanged"; name: string }
   | { kind: "assign"; name: string; ouDn: string }
@@ -254,7 +274,37 @@ export type Step =
   | { kind: "override"; name: string; computer: string; computerGuid: string; action: "add" | "block"; makeDefault: boolean; previous: string | null }
   | { kind: "unoverride"; name: string; computer: string; computerGuid: string; printerId: string };
 
-const FIELDS = ["host", "port", "ippPathAuto", "ippPath", "useTls", "location", "model", "notes", "legacyTakeover", "legacyShares", "legacyAliases", "defaultSides"] as const;
+const FIELDS = [
+  "host",
+  "port",
+  "ippPathAuto",
+  "ippPath",
+  "useTls",
+  "location",
+  "model",
+  "notes",
+  "legacyTakeover",
+  "legacyShares",
+  "legacyAliases",
+  "defaultSides",
+  "driverMode",
+  "driverPackageId",
+  "driverName",
+  "vendorProtocol",
+  "lprQueue",
+] as const;
+
+/** driverPackage name -> id; checks that driverName is a driver of that package. */
+export function resolveSpec(spec: PrinterSpec, cur: CurrentState): ResolvedSpec {
+  const { driverPackage, ...rest } = spec;
+  if (!driverPackage) return { ...rest, driverPackageId: null };
+  const pkg = (cur.driverPackages ?? []).find((p) => p.name.toLowerCase() === driverPackage.toLowerCase());
+  if (!pkg) throw new Error(`${spec.name}: unknown driver package "${driverPackage}" (upload it with drivers upload first)`);
+  if (rest.driverName && !pkg.infs.some((i) => i.models.some((m) => m.name.toLowerCase() === rest.driverName!.toLowerCase())))
+    throw new Error(`${spec.name}: "${rest.driverName}" is not a driver in package "${pkg.name}"`);
+  const exact = rest.driverName ? pkg.infs.flatMap((i) => i.models).find((m) => m.name.toLowerCase() === rest.driverName!.toLowerCase())!.name : null;
+  return { ...rest, driverName: exact, driverPackageId: pkg.id };
+}
 const ENDPOINT = new Set(["host", "port", "ippPath", "useTls"]);
 
 export function plan(specs: PrinterSpec[], cur: CurrentState, opts: { pruneAssignments?: boolean } = {}): Step[] {
@@ -264,7 +314,8 @@ export function plan(specs: PrinterSpec[], cur: CurrentState, opts: { pruneAssig
   const assigned = new Set(cur.assignments.map((a) => `${a.printerId}|${normalizeDn(a.ouDn)}`));
   const defaults = new Map(cur.ouSettings.map((s) => [normalizeDn(s.ouDn), s.defaultPrinterId]));
 
-  for (const spec of specs) {
+  for (const raw of specs) {
+    const spec = resolveSpec(raw, cur);
     const existing = byName.get(spec.name.toLowerCase());
     if (!existing) steps.push({ kind: "create", name: spec.name, spec });
     else {
@@ -407,7 +458,7 @@ export function describe(s: Step): string {
 
 export async function loadState(): Promise<CurrentState> {
   const d = db();
-  const [printers, assignments, ouSettings, overrides] = await Promise.all([
+  const [printers, assignments, ouSettings, overrides, driverPackages] = await Promise.all([
     d.select().from(schema.printers),
     d.select({ ouDn: schema.ouAssignments.ouDn, printerId: schema.ouAssignments.printerId }).from(schema.ouAssignments),
     d.select({ ouDn: schema.ouSettings.ouDn, defaultPrinterId: schema.ouSettings.defaultPrinterId }).from(schema.ouSettings),
@@ -420,8 +471,9 @@ export async function loadState(): Promise<CurrentState> {
         makeDefault: schema.computerOverrides.makeDefault,
       })
       .from(schema.computerOverrides),
+    d.select({ id: schema.driverPackages.id, name: schema.driverPackages.name, infs: schema.driverPackages.infs }).from(schema.driverPackages),
   ]);
-  return { printers, assignments, ouSettings, overrides };
+  return { printers, assignments, ouSettings, overrides, driverPackages };
 }
 
 /** Applies a plan in one transaction; every change gets an audit entry with actor "cli". */
@@ -448,6 +500,8 @@ export async function apply(steps: Step[], actor = "cli"): Promise<void> {
           .set({
             ...s.changes,
             updatedAt: new Date(),
+            // A new driver mode starts auto mode's decision over (no sticky vendor decision).
+            ...("driverMode" in s.changes ? { autoVendorReason: null, autoVendorAt: null } : {}),
             // A new endpoint may be another device: its printer-uuid/MACs are read again by Test or the poller.
             ...(s.bumpRevision ? { revision: before.revision + 1, deviceUuid: null, macAddresses: [], identityCheckedAt: null } : {}),
           })
@@ -495,6 +549,7 @@ const andAssignment = (ouDn: string, printerId: string) => and(eq(schema.ouAssig
 
 export function toSpecs(cur: CurrentState): Record<string, unknown>[] {
   const out = [];
+  const pkgName = new Map((cur.driverPackages ?? []).map((p) => [p.id, p.name]));
   for (const p of [...cur.printers].sort((a, b) => a.name.localeCompare(b.name))) {
     const assignments = cur.assignments.filter((a) => a.printerId === p.id).map((a) => a.ouDn).sort();
     const defaultFor = cur.ouSettings.filter((s) => s.defaultPrinterId === p.id).map((s) => s.ouDn).sort();
@@ -511,6 +566,11 @@ export function toSpecs(cur: CurrentState): Record<string, unknown>[] {
       ...(p.legacyTakeover !== "off" ? { legacyTakeover: p.legacyTakeover } : {}),
       ...(p.legacyShares.length ? { legacyShares: p.legacyShares } : {}),
       ...(p.legacyAliases?.length ? { legacyAliases: p.legacyAliases } : {}),
+      ...(p.driverMode && p.driverMode !== "auto" ? { driverMode: p.driverMode } : {}),
+      ...(p.driverPackageId ? { driverPackage: pkgName.get(p.driverPackageId) ?? p.driverPackageId } : {}),
+      ...(p.driverName ? { driverName: p.driverName } : {}),
+      ...(p.vendorProtocol && p.vendorProtocol !== "raw9100" ? { protocol: p.vendorProtocol } : {}),
+      ...(p.lprQueue ? { lprQueue: p.lprQueue } : {}),
       ...(assignments.length ? { assignments } : {}),
       ...(defaultFor.length ? { defaultFor } : {}),
     });
@@ -553,11 +613,11 @@ const csvField = (v: unknown) => {
 };
 
 export function exportCsv(cur: CurrentState): string {
-  const cols = ["name", "host", "port", "ipp_path", "tls", "location", "model", "notes", "duplex", "takeover", "shares", "aliases", "assignments", "default_for"];
+  const cols = ["name", "host", "port", "ipp_path", "tls", "location", "model", "notes", "duplex", "takeover", "shares", "aliases", "driver_mode", "driver_package", "driver_name", "protocol", "lpr_queue", "assignments", "default_for"];
   const lines = [cols.join(",")];
   for (const p of toSpecs(cur)) {
     lines.push(
-      [p.name, p.host, p.port ?? 631, p.ippPath ?? "auto", p.useTls ? "true" : "false", p.location, p.model, p.notes, p.defaultSides ?? "auto", p.legacyTakeover ?? "off", p.legacyShares, p.legacyAliases, p.assignments, p.defaultFor]
+      [p.name, p.host, p.port ?? 631, p.ippPath ?? "auto", p.useTls ? "true" : "false", p.location, p.model, p.notes, p.defaultSides ?? "auto", p.legacyTakeover ?? "off", p.legacyShares, p.legacyAliases, p.driverMode ?? "auto", p.driverPackage, p.driverName, p.protocol ?? "raw9100", p.lprQueue, p.assignments, p.defaultFor]
         .map(csvField)
         .join(","),
     );
