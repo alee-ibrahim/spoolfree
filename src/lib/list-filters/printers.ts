@@ -6,6 +6,12 @@ import { countActive, flag, matchesWords, one, oneOf, words, type SearchParams }
 export const PRINTER_HEALTH = ["online", "offline", "error"] as const;
 export type PrinterHealth = (typeof PRINTER_HEALTH)[number] | "pending";
 export const PRINTER_SORTS = ["name", "location", "status"] as const;
+/**
+ * Driver filter: the stored mode (auto, driverless, vendor), or the result: "resolved-vendor" (PCs get a vendor
+ * driver, set by hand or by auto mode) and "needed" (auto mode wants a vendor driver but no package matches).
+ */
+export const DRIVER_FILTERS = [...DRIVER_MODES, "resolved-vendor", "needed"] as const;
+export type DriverFilter = (typeof DRIVER_FILTERS)[number];
 export type PrinterSort = (typeof PRINTER_SORTS)[number];
 
 export interface PrinterFilters {
@@ -18,7 +24,7 @@ export interface PrinterFilters {
   unassigned: boolean;
   takeover: LegacyTakeover | null;
   sides: DefaultSides | null;
-  driver: DriverMode | null;
+  driver: DriverFilter | null;
   sort: PrinterSort;
 }
 
@@ -32,7 +38,7 @@ export function parsePrinterFilters(sp: SearchParams): PrinterFilters {
     unassigned: flag(sp, "unassigned"),
     takeover: oneOf(sp, "takeover", LEGACY_TAKEOVER_MODES),
     sides: oneOf(sp, "sides", DEFAULT_SIDES),
-    driver: oneOf(sp, "driver", DRIVER_MODES),
+    driver: oneOf(sp, "driver", DRIVER_FILTERS),
     sort: oneOf(sp, "sort", PRINTER_SORTS) ?? "name",
   };
 }
@@ -58,7 +64,16 @@ export interface PrinterFilterRow {
   legacyTakeover: LegacyTakeover;
   defaultSides: DefaultSides;
   driverMode: DriverMode;
+  /** The driver PCs get (driverDecision); needed for the "resolved-vendor" and "needed" driver filters. */
+  resolvedDriver?: "driverless" | "vendor";
+  driverNeeded?: boolean;
   status: PrinterStatusLike | null;
+}
+
+function matchesDriver(p: PrinterFilterRow, f: DriverFilter): boolean {
+  if (f === "resolved-vendor") return p.resolvedDriver === "vendor";
+  if (f === "needed") return !!p.driverNeeded;
+  return p.driverMode === f;
 }
 
 const BRANDS: [RegExp, string][] = [
@@ -113,7 +128,7 @@ export function filterPrinters<T extends PrinterFilterRow>(rows: T[], f: Printer
     if (f.unassigned && p.ouDns.length > 0) return false;
     if (f.takeover && p.legacyTakeover !== f.takeover) return false;
     if (f.sides && p.defaultSides !== f.sides) return false;
-    if (f.driver && p.driverMode !== f.driver) return false;
+    if (f.driver && !matchesDriver(p, f.driver)) return false;
     return true;
   });
   if (f.sort === "status") return out.sort((a, b) => HEALTH_ORDER[printerHealth(a.status)] - HEALTH_ORDER[printerHealth(b.status)] || byName(a, b));
