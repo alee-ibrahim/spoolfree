@@ -177,6 +177,32 @@ From a checkout: `npx tsx scripts/printers.ts import printers.yaml --dry-run` (`
 The same bundle has the break-glass account commands: `node cli/spoolfree-cli.mjs local-user add <name>` with the
 password on stdin (docs/admin-access.md).
 
+### Deleting and renaming printers
+
+```sh
+kubectl exec -n spoolfree deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers delete "Old Copier" --dry-run
+kubectl exec -n spoolfree deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers delete "Old Copier"
+kubectl exec -n spoolfree deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers rename "Old Name" "New Name" --dry-run
+kubectl exec -n spoolfree deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers rename "Old Name" "New Name"
+```
+
+These run the same code as **Delete** and renaming a printer in the UI. Names match case-insensitively; quote names
+that contain spaces.
+
+- `printers delete <name> [--dry-run]` deletes the printer with its OU assignments, the OU defaults and OU blocks that
+  name it, and the per-computer overrides that reference it, in one transaction. Agents remove the managed queue at
+  their next sync (the printer is no longer in their manifest). Queues that someone changed so they no longer carry the
+  Spoolfree comment are left alone.
+- `printers rename <old-name> <new-name> [--dry-run]` changes only the name. The id stays, so assignments, defaults,
+  overrides, status and print history stay with the printer. At their next sync agents remove the old queue and add it
+  under the new name; users' default printer follows at their next logon
+  ([agent.md](agent.md#default-printer-after-a-rename-or-replace)). A change of case only is allowed.
+
+`--dry-run` prints what would change and writes nothing. Both write one audit row with actor `cli` (`printer.delete`
+with what was removed, or `printer.update` with the old and new name). An unknown name, a new name that another printer
+already has, or an invalid name (empty, over 100 characters, or containing `\ / , !`) exits with status 1 and changes
+nothing; wrong arguments print the usage and exit with status 2. `printers --help` prints the usage.
+
 ## Migrating from a print server
 
 1. List the old servers in `LEGACY_PRINT_SERVERS` (FQDN and/or short name, comma-separated).

@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { config } from "@/lib/config";
@@ -14,6 +14,7 @@ import { checkDriverless, printerUri, TEST_ATTRIBUTES, type DriverlessCheck } fr
 import { requireAdmin } from "@/lib/session";
 import { refreshIdentity } from "@/lib/status/identity";
 import { audit, loadPolicy } from "@/lib/service";
+import { deletePrinterWithReferences, printerSnapshot } from "@/lib/printer-lifecycle";
 import {
   applyOuChanges,
   auditWith,
@@ -229,22 +230,7 @@ function sidesSupportWarning(sides: string, supported: string[] | undefined): st
   return "";
 }
 
-function pick(p: typeof schema.printers.$inferSelect) {
-  return {
-    name: p.name,
-    host: p.host,
-    port: p.port,
-    ippPath: p.ippPath,
-    ippPathAuto: p.ippPathAuto,
-    useTls: p.useTls,
-    model: p.model,
-    location: p.location,
-    legacyTakeover: p.legacyTakeover,
-    legacyShares: p.legacyShares,
-    legacyAliases: p.legacyAliases,
-    defaultSides: p.defaultSides,
-  };
-}
+const pick = printerSnapshot;
 
 /** Another device may answer at a new endpoint: forget its identity until Test or the poller reads it again. */
 const NO_IDENTITY = { deviceUuid: null, macAddresses: [] as string[], identityCheckedAt: null };
@@ -281,17 +267,10 @@ export async function replacePrinter(_prev: ActionResult | null, fd: FormData): 
 
 export async function deletePrinter(id: string): Promise<ActionResult> {
   const admin = await requireAdmin();
-  const d = db();
-  const [before] = await d.select().from(schema.printers).where(eq(schema.printers.id, id));
-  if (!before) return { ok: false, error: "Printer not found" };
-  await d.delete(schema.printers).where(eq(schema.printers.id, id));
-  // Remove dangling references held in JSON.
-  await d.execute(
-    sql`update ou_settings set blocked_printer_ids = blocked_printer_ids - ${id}::text where blocked_printer_ids ? ${id}::text`,
-  );
-  await audit(admin.email, "printer.delete", "printer", id, pick(before));
+  const removed = await deletePrinterWithReferences(db(), admin.email, id);
+  if (!removed) return { ok: false, error: "Printer not found" };
   revalidateAll();
-  return { ok: true, message: `Deleted ${before.name}` };
+  return { ok: true, message: `Deleted ${removed.printer.name}` };
 }
 
 export interface TestDetection {
