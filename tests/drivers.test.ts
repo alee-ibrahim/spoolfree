@@ -151,11 +151,18 @@ describe("1284 device IDs and package matching", () => {
   it("prefers the exact model, then the brand's universal driver", () => {
     const hl3150 = printer({ deviceId: DEVICE_ID });
     expect(matchPackage(hl3150, [universalPkg, exactPkg])).toMatchObject({ match: "exact", driverName: "Brother HL-3150CDN series" });
-    const hl2250 = printer({ deviceId: "MFG:Brother;MDL:HL-2250DN series;" });
+    const hl2250 = printer({ deviceId: "MFG:Brother;MDL:HL-2250DN series;", lastTest: { color: false } });
     expect(matchPackage(hl2250, [universalPkg, exactPkg, hpUpd])).toMatchObject({ match: "universal", driverName: "Brother Mono Universal Printer (PCL)" });
     expect(matchPackage(printer({ lastTest: { model: "HP LaserJet P2055dn" } }), [universalPkg, hpUpd])).toMatchObject({ package: { name: "HP UPD" } });
     expect(matchPackage(printer({ model: "Hewlett-Packard LaserJet 4250" }), [hpUpd])).toMatchObject({ match: "universal" });
     expect(matchPackage(printer({ model: "Canon iR-ADV C5535" }), [universalPkg, exactPkg, hpUpd])).toBeNull();
+  });
+
+  it("never gives a colour printer a monochrome universal driver", () => {
+    const colourBrother = printer({ deviceId: "MFG:Brother;MDL:HL-3170CDW series;" });
+    expect(matchPackage(colourBrother, [universalPkg])).toBeNull();
+    const monoBrother = printer({ deviceId: "MFG:Brother;MDL:HL-2250DN series;", lastTest: { color: false } });
+    expect(matchPackage(monoBrother, [universalPkg])).toMatchObject({ match: "universal" });
   });
 
   it("matches by make and model when there is no device ID", () => {
@@ -176,6 +183,9 @@ describe("auto driver mode", () => {
     const hint = { ok: true, formats: ["image/urf", "image/pwg-raster"], ippVersions: ["1.1", "2.0"], color: true, compression: ["none"], maxRasterDpi: 600 };
     expect(vendorReason(printer({ lastTest: hint }))).toMatch(/raster only, no compression/);
     expect(vendorReason(printer({ lastTest: { ...hint, color: false } }))).toBeNull();
+    // A 300-dpi colour inkjet (Brother MFC-J3530DW) is not the slow-raster case.
+    expect(vendorReason(printer({ lastTest: { ...hint, maxRasterDpi: 300 } }))).toBeNull();
+    expect(vendorReason(printer({ lastTest: { ...hint, maxRasterDpi: null } }))).toBeNull();
     const at = "2026-11-08T00:00:00Z";
     const slow = [
       { jobId: 1, pages: 6, seconds: 300, at },
