@@ -37,7 +37,10 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
   const statusOf = new Map(statuses.map((s) => [s.printerId, s]));
   // Search and filters run here on the server; the list keeps the filter rows' order (sorted by f.sort).
   const printers = filterPrinters(
-    allPrinters.map((p) => ({ ...p, ouDns: byPrinter.get(p.id) ?? [], status: statusOf.get(p.id) ?? null })),
+    allPrinters.map((p) => {
+      const dec = driverDecision(p, packages);
+      return { ...p, ouDns: byPrinter.get(p.id) ?? [], status: statusOf.get(p.id) ?? null, resolvedDriver: dec.mode, driverNeeded: !!dec.needed };
+    }),
     f,
   );
   const assignedOus = [...new Map(assignments.map((a) => [normalizeDn(a.ouDn), a.ouDn])).values()].sort((a, b) => shortDn(a).localeCompare(shortDn(b)));
@@ -60,7 +63,13 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
         { value: "two-sided-short-edge", label: "Two-sided (short edge)" },
       ],
     },
-    { kind: "select", key: "driver", label: "Driver mode", allLabel: "Any driver mode", options: [{ value: "auto", label: "Auto" }, { value: "driverless", label: "Driverless" }, { value: "vendor", label: "Vendor" }] },
+    { kind: "select", key: "driver", label: "Driver mode", allLabel: "Any driver mode", options: [
+        { value: "auto", label: "Auto" },
+        { value: "driverless", label: "Driverless" },
+        { value: "vendor", label: "Vendor (set)" },
+        { value: "resolved-vendor", label: "PCs get a vendor driver" },
+        { value: "needed", label: "Vendor driver needed" },
+      ] },
     { kind: "sort", key: "sort", label: "Sort", defaultValue: "name", options: [{ value: "name", label: "Name" }, { value: "location", label: "Location / floor" }, { value: "status", label: "Status (problems first)" }] },
   ];
   const filtered = activePrinterFilters(f) > 0 || !!f.q;

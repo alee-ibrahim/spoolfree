@@ -266,3 +266,21 @@ describe("audit filter parsing", () => {
     ]);
   });
 });
+
+describe("printer driver filter: resolved vendor and needed", () => {
+  it("filters on the decision, not only the stored mode", async () => {
+    const { filterPrinters, parsePrinterFilters } = await import("@/lib/list-filters/printers");
+    const base = { host: "h", model: null, location: null, legacyAliases: [], legacyShares: [], ouDns: [], legacyTakeover: "off" as const, defaultSides: "auto" as const, status: null };
+    const rows = [
+      { ...base, name: "Auto vendor", driverMode: "auto" as const, resolvedDriver: "vendor" as const, driverNeeded: false },
+      { ...base, name: "Auto needs one", driverMode: "auto" as const, resolvedDriver: "driverless" as const, driverNeeded: true },
+      { ...base, name: "Manual vendor", driverMode: "vendor" as const, resolvedDriver: "vendor" as const, driverNeeded: false },
+      { ...base, name: "Plain", driverMode: "auto" as const, resolvedDriver: "driverless" as const, driverNeeded: false },
+    ];
+    const names = (driver: string) => filterPrinters(rows, parsePrinterFilters({ driver })).map((r) => r.name);
+    expect(names("resolved-vendor")).toEqual(["Auto vendor", "Manual vendor"]);
+    expect(names("needed")).toEqual(["Auto needs one"]);
+    expect(names("auto")).toEqual(["Auto needs one", "Auto vendor", "Plain"]);
+    expect(parsePrinterFilters({ driver: "bogus" }).driver).toBeNull();
+  });
+});
