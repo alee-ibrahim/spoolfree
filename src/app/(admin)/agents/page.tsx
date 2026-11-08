@@ -207,6 +207,13 @@ function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) 
                           ))}
                           {(r?.applied ?? []).length === 0 && <span className="text-muted-foreground">—</span>}
                         </div>
+                        {(r?.queues ?? [])
+                          .filter((q) => q.method === "Vendor")
+                          .map((q) => (
+                            <div key={`q${q.name}`} className="mt-1 max-w-md text-xs text-muted-foreground">
+                              {q.name}: {q.driver} on {q.port}
+                            </div>
+                          ))}
       </>
     ),
     result: (
@@ -232,6 +239,13 @@ function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) 
                         ) : (
                           <Badge variant="secondary">OK</Badge>
                         )}
+                        {(r?.drivers ?? [])
+                          .filter((x) => x.status !== "installed" && x.status !== "present")
+                          .map((x) => (
+                            <div key={`dr${x.printer}`} className={x.status === "failed" ? "mt-1 text-xs text-destructive" : "mt-1 text-xs text-amber-700 dark:text-amber-500"} title={x.message ?? undefined}>
+                              {x.printer}: {x.status === "wpp-blocked" ? "vendor driver not allowed under Windows Protected Print Mode; driverless used" : `vendor driver ${x.status}${x.message ? `: ${x.message}` : ""}`}
+                            </div>
+                          ))}
                         {(r?.fallbacks ?? []).map((f) => (
                           <div key={`fb${f.printer}`} className="mt-1 text-xs text-amber-700 dark:text-amber-500" title={f.reason}>
                             {f.printer}: created with the {f.method === "TcpIpPort" ? "TCP/IP port" : f.method} fallback

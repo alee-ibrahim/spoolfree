@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  customType,
   bigserial,
   boolean,
   date,
@@ -21,6 +22,45 @@ export type LegacyTakeover = "off" | "dry-run" | "on";
 export type DefaultSides = "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
 export const DEFAULT_SIDES: DefaultSides[] = ["auto", "one-sided", "two-sided-long-edge", "two-sided-short-edge"];
 export const LEGACY_TAKEOVER_MODES: LegacyTakeover[] = ["off", "dry-run", "on"];
+
+/**
+ * How PCs create the queue. "auto" (default): the server decides per printer (src/lib/drivers/auto.ts) and puts the
+ * resolved mode in the manifest. "driverless": always the IPP Class Driver. "vendor": always the chosen vendor driver.
+ */
+export type DriverMode = "auto" | "driverless" | "vendor";
+export const DRIVER_MODES: DriverMode[] = ["auto", "driverless", "vendor"];
+/** Port of a vendor-driver queue: Standard TCP/IP RAW 9100 (default), Standard TCP/IP LPR, or an IPP (Internet Port) URL. */
+export type VendorProtocol = "raw9100" | "lpr" | "ipp";
+export const VENDOR_PROTOCOLS: VendorProtocol[] = ["raw9100", "lpr", "ipp"];
+
+/** One printer driver INF in a driver package (read from the zip at upload). */
+export interface DriverInf {
+  /** Path of the INF inside the zip ("/" separators). */
+  path: string;
+  /** Path of its catalog (.cat) inside the zip. */
+  catalog: string;
+  /** [Version] DriverVer ("06/21/2006,10.0.19041.1"), Provider and Class. */
+  driverVer: string | null;
+  provider: string | null;
+  /** Manufacturer names from [Manufacturer] (resolved strings), e.g. "Brother". */
+  manufacturers: string[];
+  /** Printer drivers in the INF's NTamd64 models sections: the name (Add-PrinterDriver -Name) and its hardware IDs. */
+  models: { name: string; hardwareIds: string[] }[];
+}
+
+/** One completed IPP job measured by the poller (Get-Jobs): seconds per page. */
+export interface SpeedSample {
+  jobId: number;
+  pages: number;
+  seconds: number;
+  /** When the poller saw it (ISO). */
+  at: string;
+}
+
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType: () => "bytea",
+  fromDriver: (v) => (Buffer.isBuffer(v) ? v : Buffer.from(v as Uint8Array)),
+});
 
 export interface LegacyQueueResult {
   /** Spoolfree queue name. */
@@ -77,6 +117,29 @@ export const printers = pgTable(
     deviceUuid: text("device_uuid"),
     macAddresses: jsonb("mac_addresses").$type<string[]>().notNull().default([]),
     identityCheckedAt: timestamp("identity_checked_at", { withTimezone: true }),
+    /**
+     * "auto" (default, decided by the server), "driverless" (Add-Printer -IppURL with the IPP Class Driver) or
+     * "vendor": agents install driverPackageId (signed catalog checked) and create a queue with driverName on a
+     * vendorProtocol port.
+     */
+    driverMode: text("driver_mode").$type<DriverMode>().notNull().default("auto"),
+    driverPackageId: uuid("driver_package_id").references(() => driverPackages.id, { onDelete: "restrict" }),
+    /** Add-PrinterDriver -Name: one of the package's INF model names. */
+    driverName: text("driver_name"),
+    vendorProtocol: text("vendor_protocol").$type<VendorProtocol>().notNull().default("raw9100"),
+    /** LPR queue name for vendorProtocol "lpr" (null: "lp"). */
+    lprQueue: text("lpr_queue"),
+    /**
+     * Auto mode stickiness: set when auto mode first decided this printer needs a vendor driver (and why). Kept until
+     * an admin changes driverMode or replaces the device, so the decision never flaps back.
+     */
+    autoVendorReason: text("auto_vendor_reason"),
+    autoVendorAt: timestamp("auto_vendor_at", { withTimezone: true }),
+    /** IEEE 1284 device ID (IPP printer-device-id, or SNMP), used to match driver packages. */
+    deviceId: text("device_id"),
+    /** Recent completed IPP jobs measured by the poller (newest last, at most 20). */
+    speedSamples: jsonb("speed_samples").$type<SpeedSample[]>().notNull().default([]),
+    speedCheckedAt: timestamp("speed_checked_at", { withTimezone: true }),
     lastTestAt: timestamp("last_test_at", { withTimezone: true }),
     lastTest: jsonb("last_test").$type<DriverlessCheck & { error?: string | null; ippPath?: string; ippRequestVersion?: string }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -84,6 +147,54 @@ export const printers = pgTable(
   },
   (t) => [uniqueIndex("printers_name_unique").on(sql`lower(${t.name})`)],
 );
+
+/**
+ * Vendor driver packages (driver mode "vendor"): a zip of an INF/CAT/files tree uploaded by an admin. The bytes are
+ * stored in Postgres in driver_package_chunks (DRIVER_PACKAGE_MAX_MB, default 200), so they are backed up with the
+ * database and need no volume. Agents download them from /api/agent/drivers/<id> and check sha256 (from the signed
+ * manifest) and the catalog's Authenticode signature before installing.
+ */
+export const driverPackages = pgTable(
+  "driver_packages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Admin-chosen name, unique (case-insensitive). */
+    name: text("name").notNull(),
+    fileName: text("file_name"),
+    size: bigint("size", { mode: "number" }).notNull(),
+    /** Lower-case hex SHA-256 of the zip. */
+    sha256: text("sha256").notNull(),
+    /** Only "x64" is supported. */
+    architecture: text("architecture").notNull().default("x64"),
+    /**
+     * A brand's universal driver (Brother Universal, HP UPD): auto mode uses it for any printer of that manufacturer
+     * when no package names the exact model. universalDriver is the driver name used then.
+     */
+    universal: boolean("universal").notNull().default(false),
+    universalDriver: text("universal_driver"),
+    /** Manufacturer the package is for (from the INF; used for universal matching). */
+    manufacturer: text("manufacturer"),
+    infs: jsonb("infs").$type<DriverInf[]>().notNull().default([]),
+    uploadedBy: text("uploaded_by").notNull(),
+    uploadedAt: timestamp("uploaded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("driver_packages_name_unique").on(sql`lower(${t.name})`)],
+);
+
+/** The zip bytes of a driver package, in chunks of up to 4 MiB (seq 0, 1, ...). */
+export const driverPackageChunks = pgTable(
+  "driver_package_chunks",
+  {
+    packageId: uuid("package_id")
+      .notNull()
+      .references(() => driverPackages.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    data: bytea("data").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.packageId, t.seq] })],
+);
+
+export type DriverPackage = typeof driverPackages.$inferSelect;
 
 export const printerStatus = pgTable("printer_status", {
   printerId: uuid("printer_id")
@@ -159,6 +270,13 @@ export interface AgentReport {
   critical?: string[];
   /** Queues created with the TCP/IP port fallback because Add-Printer -IppURL failed (agents 0.4.6+). */
   fallbacks?: { printer: string; method: string; reason?: string }[];
+  /** The agent's queues with their driver and port (agents 0.7+). */
+  queues?: { name: string; driver?: string | null; port?: string | null; method?: string | null }[];
+  /**
+   * Vendor driver results (agents 0.7+): installed / present (already installed), wpp-blocked (Windows Protected
+   * Print Mode: driverless used instead), failed, fallback (driverless queue kept or created instead).
+   */
+  drivers?: { printer: string; status: "installed" | "present" | "wpp-blocked" | "failed" | "fallback"; driverName?: string | null; message?: string | null }[];
   /** Print analytics collection state (agents 0.5+). */
   analytics?: { enabled: boolean; logEnabled?: boolean | null; sent?: number; error?: string | null };
 }

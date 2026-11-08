@@ -4,6 +4,7 @@ import { normalizeMac, normalizeUuid } from "./identity";
 import { printerUri } from "./ipp/interpret";
 import type { Resolution } from "./resolve";
 import type { AgentUpdateOffer } from "./agent-bundle";
+import type { DriverDecision } from "./drivers/auto";
 import { keyId, publicKeyRaw, randomToken, signBytes } from "./crypto/signing";
 
 export const MANIFEST_SCHEMA = 1;
@@ -24,6 +25,26 @@ export interface ManifestPrinterInput {
   defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
   deviceUuid?: string | null;
   macAddresses?: string[];
+  /** The resolved driver (src/lib/drivers/auto.ts); absent or driverless = IPP Class Driver. */
+  driver?: DriverDecision | null;
+}
+
+/** Vendor driver for a queue (agents 0.7+; older agents ignore it and create the driverless queue). */
+export interface ManifestDriver {
+  mode: "vendor";
+  /** Driver package to download from url (machine token); the agent checks sha256 and size before using it. */
+  packageId: string;
+  packageName: string;
+  sha256: string;
+  size: number;
+  url: string;
+  /** Add-PrinterDriver -Name, the INF and its catalog (paths inside the zip, "/" separators). */
+  driverName: string;
+  inf: string;
+  catalog: string;
+  /** Port: raw9100 (Standard TCP/IP RAW, port 9100), lpr (Standard TCP/IP LPR, lprQueue) or ipp (ippUrl). */
+  protocol: "raw9100" | "lpr" | "ipp";
+  lprQueue: string | null;
 }
 
 export interface ManifestPrinter {
@@ -55,6 +76,9 @@ export interface ManifestPrinter {
    * ".local" optional) is a queue for this device. Lower-case; empty unless takeover is on or dry-run.
    */
   legacyAliases?: string[];
+  /** Agents 0.7+: "vendor" with driver set, or "driverless" (the IPP Class Driver). */
+  driverMode?: "driverless" | "vendor";
+  driver?: ManifestDriver;
 }
 
 /** Print analytics settings for agents (0.5+). */
@@ -132,6 +156,7 @@ export function buildManifest(args: {
       macAddresses: [...new Set((p.macAddresses ?? []).map((m) => normalizeMac(m)).filter((m): m is string => m !== null))].sort(),
       legacy: { mode: p.legacyTakeover ?? "off", shares: p.legacyTakeover && p.legacyTakeover !== "off" ? (p.legacyShares ?? []) : [] },
       legacyAliases: p.legacyTakeover && p.legacyTakeover !== "off" ? manifestAliases(p.legacyAliases) : [],
+      ...manifestDriver(p.driver ?? null),
     });
   }
   const def = list.find((p) => p.isDefault)?.name ?? null;
@@ -154,6 +179,26 @@ export function buildManifest(args: {
           agentAllowDowngrade: args.agentUpdate.allowDowngrade,
         }
       : {}),
+  };
+}
+
+function manifestDriver(d: DriverDecision | null): Pick<ManifestPrinter, "driverMode" | "driver"> {
+  if (!d || d.mode !== "vendor" || !d.package || !d.inf || !d.driverName) return { driverMode: "driverless" };
+  return {
+    driverMode: "vendor",
+    driver: {
+      mode: "vendor",
+      packageId: d.package.id,
+      packageName: d.package.name,
+      sha256: d.package.sha256,
+      size: d.package.size,
+      url: `/api/agent/drivers/${d.package.id}`,
+      driverName: d.driverName,
+      inf: d.inf.path,
+      catalog: d.inf.catalog,
+      protocol: d.protocol,
+      lprQueue: d.protocol === "lpr" ? (d.lprQueue ?? "lp") : null,
+    },
   };
 }
 

@@ -33,6 +33,11 @@ export function printerSnapshot(p: PrinterRow) {
     legacyShares: p.legacyShares,
     legacyAliases: p.legacyAliases,
     defaultSides: p.defaultSides,
+    driverMode: p.driverMode,
+    driverPackageId: p.driverPackageId,
+    driverName: p.driverName,
+    vendorProtocol: p.vendorProtocol,
+    lprQueue: p.lprQueue,
   };
 }
 

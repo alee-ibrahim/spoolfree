@@ -90,7 +90,7 @@ Printer lists are low-sensitivity, so the residual risk of the shared enrollment
 - `/api/internal/directory-snapshot` answers 404 unless `DIRECTORY_MODE=snapshot`, 503 when `DIRECTORY_SYNC_TOKEN` is unset or shorter than 32 characters, and 401 without the exact bearer token. Snapshots of another base DN, with objects outside it, duplicates or no computers are rejected.
 - No secrets in images. `*_FILE` variants are available for secrets mounted as files.
 - `/metrics` can require a bearer token (`METRICS_TOKEN`).
-- Admin-only routes are not reachable without a session. `/api/agent/*`, `/api/internal/*` (sync token), `/healthz` and `/metrics` are the only unauthenticated-by-session endpoints.
+- Admin-only routes are not reachable without a session (also `/api/admin/drivers`, the driver package upload, which in addition requires a custom header so that other sites cannot post to it with an admin's cookie). `/api/agent/*`, `/api/internal/*` (sync token), `/healthz` and `/metrics` are the only unauthenticated-by-session endpoints.
 
 ### Key rotation
 
@@ -115,3 +115,37 @@ sends them, and the server drops any it receives.
   before you turn analytics on.
 
 How to turn it off and delete the data: [docs/analytics.md](docs/analytics.md#privacy).
+
+### Vendor drivers (0.7.0+)
+
+Spoolfree's default is driverless printing with the inbox IPP Class Driver, and that stays the recommended setup.
+Driver mode **vendor** (set per printer, or chosen by **auto** mode for printers that cannot print driverless or are
+too slow) puts **third-party driver code** on every PC that gets the printer. That is the attack surface PrintNightmare
+showed and Windows Protected Print Mode removes. Use it only for printers that need it. Auto mode does that by
+default, and only when a matching package has been uploaded.
+
+- **Who supplies drivers.** Only admins upload driver packages: a zip of an INF/CAT/files tree, from the Drivers page
+  or the CLI. Every upload and delete is audit-logged with the uploader, size and SHA-256. Get packages from the
+  vendor's support site or the Microsoft Update Catalog, and check the catalog signature before you upload. Never
+  upload installers.
+- **What the server accepts.** It accepts a zip only when it has no unsafe paths or encrypted entries, and when at
+  least one printer-class INF has x64 models and names a `CatalogFile` that is in the zip. It never executes anything
+  in the package.
+- **What reaches PCs.** The signed manifest names the package by SHA-256 and size. Agents download it with their
+  machine token from `/api/agent/drivers/<id>`; the server serves only packages that this PC's manifest names. The
+  agent refuses the package if:
+  - its SHA-256 or size differs from the manifest;
+  - an entry would leave the extraction directory;
+  - the INF does not name the catalog;
+  - `Get-AuthenticodeSignature` on the catalog is not `Valid`.
+
+  A tampered download, a man in the middle or a compromised storage row therefore cannot get a different driver
+  installed. Extraction happens in a SYSTEM-only directory that is deleted afterwards. `pnputil` then verifies every
+  file against the signed catalog, and x64 Windows enforces kernel- and user-mode driver signing.
+- **What signing does not prove.** A valid signature shows who published the driver (usually "Microsoft Windows
+  Hardware Compatibility Publisher" for WHQL drivers), not that the driver is free of bugs. Keep the list of packages
+  short, prefer current vendor or WHQL releases, and delete packages you no longer need.
+- **Windows Protected Print Mode.** Under WPP the agent never installs a vendor driver. It reports *"vendor driver not
+  allowed under WPP"* and keeps the driverless queue.
+- **Storage.** Packages are stored in Postgres (`driver_package_chunks`) and are included in database backups. Treat
+  database write access as equivalent to choosing which signed drivers PCs install.

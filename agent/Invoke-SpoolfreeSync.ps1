@@ -120,7 +120,19 @@ foreach ($p in @($manifest.printers)) {
 foreach ($e in (Get-SpoolfreeUserTakeoverResults)) { if ($legacy.Count -lt 200) { $legacy.Add($e) } }
 
 $existing = @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-$plan = Get-SpoolfreePlan -Desired @($manifest.printers) -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter
+$plan = Get-SpoolfreePlan -Desired @($manifest.printers) -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter -VendorAllowed (-not $wpp)
+
+# Vendor drivers (0.7): not allowed under Windows Protected Print Mode; those printers stay driverless.
+$driverResults = New-Object System.Collections.Generic.List[object]
+foreach ($p in @($manifest.printers)) {
+    $v = Get-SpoolfreeVendorDriver $p
+    if ($v -and $wpp) {
+        $driverResults.Add([ordered]@{ printer = [string]$p.name; status = 'wpp-blocked'; driverName = $v.DriverName; message = 'vendor driver not allowed under WPP; driverless queue used' })
+        Write-Log "$($p.name): vendor driver not allowed under Windows Protected Print Mode; using the driverless queue."
+    } elseif ([string](Get-SpoolfreeProperty $p 'driverMode') -eq 'vendor' -and -not $v) {
+        $driverResults.Add([ordered]@{ printer = [string]$p.name; status = 'failed'; driverName = $null; message = 'invalid vendor driver entry in the manifest; driverless queue used' })
+    }
+}
 Write-Log ("Manifest {0}: {1} printer(s); method {2}; plan: {3}" -f $manifest.serial, @($manifest.printers).Count, $method, (($plan | ForEach-Object { "$($_.Action) $($_.Name)" }) -join '; '))
 
 # Rename/replace re-creates queues; users whose default was such a queue get it back at their next logon.
@@ -147,8 +159,35 @@ if ($PSCmdlet.ShouldProcess('Spoolfree Sync task', 'set interval')) {
 # fallback with the old queue's driver) so the PC is never left without the printer.
 $takeoverPrinters = Get-SpoolfreeTakeoverPrinters -RemovedMap (Get-SpoolfreeProperty (Get-SpoolfreeTakeoverState) 'removedMap') -Removed $legacyRemoved
 $lateRemoved = @{}
+
+# Installs the printer's vendor driver (download, hash + signature checks, pnputil) and creates its queue under
+# $QueueName. Throws on failure.
+function Install-VendorQueue($printer, [string]$QueueName) {
+    $v = Get-SpoolfreeVendorDriver $printer
+    $state = Install-SpoolfreeVendorDriver -Vendor $v -BaseUrl $base -Token $cfg.MachineToken
+    if ($state -eq 'installed') { Write-Log "$($printer.name): installed vendor driver '$($v.DriverName)' from package '$($v.PackageName)' (sha256 $($v.Sha256))." }
+    Install-SpoolfreePrinter -Printer $printer -Method 'Vendor' -ServerId $serverId -QueueName $QueueName
+    $driverResults.Add([ordered]@{ printer = [string]$printer.name; status = $state; driverName = $v.DriverName; message = "$($v.Protocol) port $(Get-SpoolfreeVendorPortName -Printer $printer -Vendor $v)" })
+}
+
 function Install-SyncStep($step) {
     $name = [string]$step.Name
+    # Vendor driver first (0.7); when it fails the driverless queue is created instead, so the PC is never left
+    # without the printer. The next sync tries the vendor driver again (make-before-break).
+    $v = Get-SpoolfreeVendorDriver $step.Printer
+    if ($v -and -not $wpp) {
+        try {
+            Install-VendorQueue $step.Printer $name
+            $added.Add($name)
+            return
+        } catch {
+            $why = $_.Exception.Message
+            $errors.Add("${name}: vendor driver failed: $why")
+            $driverResults.Add([ordered]@{ printer = $name; status = 'fallback'; driverName = $v.DriverName; message = "vendor driver failed ($why); driverless queue created instead" })
+            Write-Log "${name}: vendor driver failed: $why. Creating the driverless queue instead."
+            if (Get-SpoolfreeQueueByName -Name $name) { throw "a queue named $name exists after the failed vendor install" }
+        }
+    }
     $on = (Get-SpoolfreeLegacyMode $step.Printer) -eq 'on'
     $recovery = $on -or $takeoverPrinters.ContainsKey($name.ToLowerInvariant())
     $find = $null
@@ -172,14 +211,55 @@ function Install-SyncStep($step) {
     $added.Add($name)
 }
 
+# Make-before-break switch (0.7) to or from a vendor-driver queue: the new queue is created under a temporary name next
+# to the old one, then the old one is removed and the new one renamed. If the new vendor queue cannot be created the
+# old queue stays; a new driverless queue that cannot be created next to the old one falls back to remove-then-add.
+function Switch-SyncQueue($step) {
+    $name = [string]$step.Name
+    $tmp = "$name (Spoolfree)"
+    $left = Get-SpoolfreeQueueByName -Name $tmp
+    if ($left -and ([string]$left.Comment).StartsWith('Managed by Spoolfree')) { Remove-SpoolfreeQueue -Name $tmp }
+    $v = Get-SpoolfreeVendorDriver $step.Printer
+    $useVendor = [bool]($v -and -not $wpp)
+    try {
+        if ($useVendor) { Install-VendorQueue $step.Printer $tmp }
+        else { Install-SpoolfreePrinter -Printer $step.Printer -Method $method -ServerId $serverId -QueueName $tmp }
+    } catch {
+        $why = $_.Exception.Message
+        if (Get-SpoolfreeQueueByName -Name $tmp) { try { Remove-SpoolfreeQueue -Name $tmp } catch { Write-Log "${name}: could not remove ${tmp}: $($_.Exception.Message)" } }
+        if ($useVendor) {
+            $errors.Add("${name}: vendor driver failed, kept the current queue: $why")
+            $driverResults.Add([ordered]@{ printer = $name; status = 'fallback'; driverName = $v.DriverName; message = "vendor driver failed ($why); current queue kept" })
+            Write-Log "${name}: vendor driver failed ($why); the current queue stays."
+            return
+        }
+        Write-Log "${name}: the driverless queue could not be created next to the old one ($why); removing the old queue first."
+        Uninstall-SpoolfreePrinter -Name $name
+        Install-SyncStep $step
+        return
+    }
+    Uninstall-SpoolfreePrinter -Name $name
+    $q = Get-SpoolfreeQueueByName -Name $tmp
+    Rename-Printer -InputObject $q -NewName $name -ErrorAction Stop
+    $q = Get-SpoolfreeQueueByName -Name $name
+    if (-not $q) { throw "renaming $tmp to $name failed" }
+    if ($useVendor) { Set-SpoolfreeMarker -Printer $step.Printer -Method 'Vendor' -PortName ([string]$q.PortName) -ServerId $serverId -Target (Get-SpoolfreeQueueTarget $step.Printer) }
+    else { Set-SpoolfreeMarker -Printer $step.Printer -Method $method -PortName ([string]$q.PortName) -ServerId $serverId }
+    Write-Log "${name}: switched to the $(if ($useVendor) { "vendor driver '$($v.DriverName)'" } else { 'driverless queue' }) (new queue created first)."
+    $added.Add($name)
+}
+
 foreach ($step in $plan) {
     if (-not $PSCmdlet.ShouldProcess($step.Name, $step.Action)) { continue }
     try {
         switch ($step.Action) {
             'Add' { Install-SyncStep $step }
             'Replace' {
-                if (Get-SpoolfreeQueueByName -Name $step.Name) { Uninstall-SpoolfreePrinter -Name $step.Name }
-                Install-SyncStep $step
+                if ((Get-SpoolfreeProperty $step 'MakeBeforeBreak') -and (Get-SpoolfreeQueueByName -Name $step.Name)) { Switch-SyncQueue $step }
+                else {
+                    if (Get-SpoolfreeQueueByName -Name $step.Name) { Uninstall-SpoolfreePrinter -Name $step.Name }
+                    Install-SyncStep $step
+                }
             }
             'Remove' { Uninstall-SpoolfreePrinter -Name $step.Name; $removed.Add($step.Name) }
             'Conflict' { $errors.Add("$($step.Name): a queue with this name exists and was not created by Spoolfree; skipped.") }
@@ -254,9 +334,16 @@ foreach ($p in @($manifest.printers)) {
             $sides[$name] = $want
             Write-Log "${name}: default duplex set to $want."
         } catch {
-            $sides[$name] = "failed:$want"
-            $errors.Add("${name}: default duplex $want failed: $($_.Exception.Message)")
-            Write-Log "${name}: default duplex $want failed: $($_.Exception.Message)"
+            if ($marker.Method -eq 'Vendor') {
+                # Not every vendor driver supports setting duplex this way: noted, not an error; tried once per queue.
+                $sides[$name] = "unsupported:$want"
+                Set-SpoolfreeMarkerSides -Name $name -Sides $want
+                Write-Log "${name}: the vendor driver did not accept default duplex ${want}: $($_.Exception.Message)"
+            } else {
+                $sides[$name] = "failed:$want"
+                $errors.Add("${name}: default duplex $want failed: $($_.Exception.Message)")
+                Write-Log "${name}: default duplex $want failed: $($_.Exception.Message)"
+            }
         }
     } else {
         $sides[$name] = $want
@@ -293,6 +380,10 @@ if ($PSCmdlet.ShouldProcess('print analytics', 'collect and send')) {
 }
 
 $applied = @(Get-SpoolfreeInstalled | ForEach-Object { $_.Name })
+$queueReport = @(Get-SpoolfreeInstalled | ForEach-Object {
+        $q = Get-SpoolfreeQueueByName -Name ([string]$_.Name)
+        [ordered]@{ name = [string]$_.Name; driver = $(if ($q) { [string]$q.DriverName } else { $null }); port = $(if ($q) { [string]$q.PortName } else { $null }); method = [string]$_.Method }
+    } | Select-Object -First 200)
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 $report = [ordered]@{
     agentVersion   = Get-SpoolfreeAgentVersion
@@ -310,6 +401,8 @@ $report = [ordered]@{
     critical       = $critical.ToArray()
     fallbacks      = $fallbacks.ToArray()
     analytics      = $analytics
+    queues         = $queueReport
+    drivers        = @($driverResults | Select-Object -First 200)
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds
 }
 try {

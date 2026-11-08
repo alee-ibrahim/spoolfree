@@ -43,7 +43,26 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { OuPicker, type OuOption, type PickedOu } from "@/components/app/ou-picker";
-import { deletePrinter, previewPrinterReach, replacePrinter, savePrinter, testPrinter, type ActionResult, type TestResult } from "../actions";
+import { deletePrinter, previewPrinterReach, replacePrinter, resetDriverDecision, savePrinter, testPrinter, type ActionResult, type TestResult } from "../actions";
+
+export interface DriverPackageOption {
+  id: string;
+  name: string;
+  universal: boolean;
+  drivers: string[];
+}
+
+export interface DriverDecisionView {
+  mode: "driverless" | "vendor";
+  source: "manual" | "auto";
+  reason: string;
+  needed: string | null;
+  packageName: string | null;
+  driverName: string | null;
+  match: "manual" | "exact" | "universal" | null;
+  /** Auto mode's vendor decision is stored and no longer re-evaluated. */
+  sticky: boolean;
+}
 
 export interface PrinterView {
   id: string;
@@ -74,6 +93,15 @@ export interface PrinterView {
   assignedOus: number;
   /** OU assignments, with whether this printer is the OU's default. */
   ous: PickedOu[];
+  driverMode: "auto" | "driverless" | "vendor";
+  driverPackageId: string | null;
+  driverName: string | null;
+  vendorProtocol: "raw9100" | "lpr" | "ipp";
+  lprQueue: string | null;
+  /** ipp-versions-supported at the last Test. */
+  ippVersions: string[] | null;
+  /** The driver PCs get now. */
+  decision: DriverDecisionView;
 }
 
 function useResultToast(state: ActionResult | null, onOk: () => void) {
@@ -177,6 +205,148 @@ function SidesField({ printer }: { printer?: PrinterView }) {
   );
 }
 
+const MODE_LABEL: Record<PrinterView["driverMode"], string> = {
+  auto: "Auto (recommended): Spoolfree decides",
+  driverless: "Driverless: Microsoft IPP Class Driver",
+  vendor: "Vendor driver: a package you choose",
+};
+
+const PROTOCOL_LABEL: Record<PrinterView["vendorProtocol"], string> = {
+  raw9100: "RAW, port 9100 (recommended)",
+  lpr: "LPR, port 515",
+  ipp: "IPP (Internet Port, IPP address above)",
+};
+
+/** One line saying which driver PCs get and why. */
+export function decisionText(d: DriverDecisionView): string {
+  if (d.mode === "vendor") return `${d.driverName} (${d.packageName}${d.match === "universal" ? ", universal" : ""}): ${d.reason}`;
+  if (d.needed) return `Driverless for now: ${d.reason}; ${d.needed}`;
+  return `Driverless: ${d.reason}`;
+}
+
+function DriverField({ printer, packages }: { printer?: PrinterView; packages: DriverPackageOption[] }) {
+  const [mode, setMode] = useState<PrinterView["driverMode"]>(printer?.driverMode ?? "auto");
+  const [pkgId, setPkgId] = useState<string>(printer?.driverPackageId ?? "");
+  const [driver, setDriver] = useState<string>(printer?.driverName ?? "");
+  const [protocol, setProtocol] = useState<PrinterView["vendorProtocol"]>(printer?.vendorProtocol ?? "raw9100");
+  const pkg = packages.find((p) => p.id === pkgId) ?? null;
+  const d = printer?.decision;
+  // Suggest vendor mode for devices the IPP Class Driver handles badly (IPP 1.x only, not driverless).
+  const ipp1Only = !!printer?.ippVersions?.length && !printer.ippVersions.some((v) => v.startsWith("2."));
+  const suggest = mode === "driverless" && (ipp1Only || printer?.lastTestOk === false);
+  return (
+    <FieldGroup className="gap-4 rounded-lg border p-3">
+      <Field>
+        <FieldLabel htmlFor="driverMode">Driver</FieldLabel>
+        <Select name="driverMode" value={mode} onValueChange={(v) => setMode(v as PrinterView["driverMode"])}>
+          <SelectTrigger id="driverMode" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.entries(MODE_LABEL).map(([v, label]) => (
+              <SelectItem key={v} value={v}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <FieldDescription>
+          {mode === "auto"
+            ? "Vendor driver when the printer is IPP 1.x only, has no driverless format, or prints slowly (measured); driverless otherwise. Uses the matching package from Drivers."
+            : mode === "vendor"
+              ? "PCs install this signed driver package and print over a TCP/IP port. Use it only for printers that need it."
+              : "No third-party driver code on PCs."}
+        </FieldDescription>
+        {d && mode === printer?.driverMode && (
+          <p className="text-sm">
+            <span className="text-muted-foreground">PCs get: </span>
+            {decisionText(d)}
+            {d.sticky ? " (decision kept until you change the mode)" : ""}
+          </p>
+        )}
+        {suggest && (
+          <Alert>
+            <AlertTitle>Consider a vendor driver</AlertTitle>
+            <AlertDescription>
+              {ipp1Only ? `This printer answers IPP ${printer!.ippVersions!.join("/")} only.` : "The last Test found no driverless format."} Auto or vendor mode
+              installs a vendor driver instead.
+            </AlertDescription>
+          </Alert>
+        )}
+      </Field>
+      {mode === "vendor" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field>
+            <FieldLabel htmlFor="driverPackageId">Driver package</FieldLabel>
+            <Select
+              name="driverPackageId"
+              value={pkgId}
+              onValueChange={(v) => {
+                setPkgId(v);
+                const next = packages.find((p) => p.id === v);
+                setDriver(next?.drivers.length === 1 ? next.drivers[0] : "");
+              }}
+            >
+              <SelectTrigger id="driverPackageId" className="w-full">
+                <SelectValue placeholder={packages.length ? "Choose a package" : "No packages: upload one on Drivers"} />
+              </SelectTrigger>
+              <SelectContent>
+                {packages.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}
+                    {p.universal ? " (universal)" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="driverName">Driver</FieldLabel>
+            <Select name="driverName" value={driver} onValueChange={setDriver} disabled={!pkg}>
+              <SelectTrigger id="driverName" className="w-full">
+                <SelectValue placeholder="Choose the driver" />
+              </SelectTrigger>
+              <SelectContent>
+                {(pkg?.drivers ?? []).map((n) => (
+                  <SelectItem key={n} value={n}>
+                    {n}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        </div>
+      )}
+      {mode === "driverless" && <input type="hidden" name="vendorProtocol" value={protocol} />}
+      {mode !== "driverless" && (
+        <div className="grid gap-3 sm:grid-cols-[1fr_8rem]">
+          <Field>
+            <FieldLabel htmlFor="vendorProtocol">Vendor driver port</FieldLabel>
+            <Select name="vendorProtocol" value={protocol} onValueChange={(v) => setProtocol(v as PrinterView["vendorProtocol"])}>
+              <SelectTrigger id="vendorProtocol" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Object.entries(PROTOCOL_LABEL).map(([v, label]) => (
+                  <SelectItem key={v} value={v}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          {protocol === "lpr" && (
+            <Field>
+              <FieldLabel htmlFor="lprQueue">LPR queue</FieldLabel>
+              <Input id="lprQueue" name="lprQueue" defaultValue={printer?.lprQueue ?? ""} placeholder="lp" autoCapitalize="none" spellCheck={false} />
+            </Field>
+          )}
+        </div>
+      )}
+    </FieldGroup>
+  );
+}
+
 /** OU picker state plus the debounced "will reach N computers" preview. */
 function useOuSelection(printer: PrinterView | undefined, open: boolean) {
   const [ous, setOus] = useState<PickedOu[]>(printer?.ous ?? []);
@@ -203,11 +373,14 @@ export function PrinterFormDialog({
   printer,
   trigger,
   ouOptions,
+  packages,
 }: {
   printer?: PrinterView;
   trigger?: React.ReactNode;
   /** Directory OUs for the picker; null when the directory cannot be read. */
   ouOptions: OuOption[] | null;
+  /** Uploaded driver packages (vendor mode). */
+  packages: DriverPackageOption[];
 }) {
   const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState(savePrinter, null);
@@ -267,6 +440,7 @@ export function PrinterFormDialog({
               <Textarea id="notes" name="notes" rows={2} defaultValue={printer?.notes ?? ""} />
             </Field>
             <SidesField printer={printer} />
+            <DriverField printer={printer} packages={packages} />
             <Field>
               <FieldLabel htmlFor="legacyTakeover">Replace existing queues for this device</FieldLabel>
               <Select name="legacyTakeover" defaultValue={printer?.legacyTakeover ?? "off"}>
@@ -366,7 +540,7 @@ function ReplaceDialog({ printer, open, onOpenChange }: { printer: PrinterView; 
   );
 }
 
-function TestDialog({ result, onOpenChange }: { result: (TestResult & { name: string }) | null; onOpenChange: (o: boolean) => void }) {
+function TestDialog({ result, onOpenChange }: { result: (TestResult & { name: string; decision?: DriverDecisionView }) | null; onOpenChange: (o: boolean) => void }) {
   return (
     <Dialog open={!!result} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92svh] overflow-y-auto sm:max-w-lg">
@@ -418,6 +592,21 @@ function TestDialog({ result, onOpenChange }: { result: (TestResult & { name: st
                   <TableCell className="text-muted-foreground">IPP versions</TableCell>
                   <TableCell>{result.check.ippVersions.join(", ") || "—"}</TableCell>
                 </TableRow>
+                {result.check.deviceId && (
+                  <TableRow>
+                    <TableCell className="text-muted-foreground">Device ID</TableCell>
+                    <TableCell className="font-mono text-xs whitespace-normal break-all">{result.check.deviceId}</TableCell>
+                  </TableRow>
+                )}
+                {result.decision && (
+                  <TableRow>
+                    <TableCell className="text-muted-foreground">Driver on PCs</TableCell>
+                    <TableCell className="whitespace-normal">
+                      {decisionText(result.decision)}
+                      <div className="text-xs text-muted-foreground">Updated on the Printers page after the Test.</div>
+                    </TableCell>
+                  </TableRow>
+                )}
                 <TableRow>
                   <TableCell className="text-muted-foreground">Colour / duplex</TableCell>
                   <TableCell className="whitespace-normal">
@@ -460,6 +649,7 @@ function DetectionNote({ d }: { d: NonNullable<TestResult["detection"]> }) {
 function PrinterActions({
   p,
   ouOptions,
+  packages,
   pending,
   onTest,
   onReplace,
@@ -467,6 +657,7 @@ function PrinterActions({
 }: {
   p: PrinterView;
   ouOptions: OuOption[] | null;
+  packages: DriverPackageOption[];
   pending: boolean;
   onTest: () => void;
   onReplace: () => void;
@@ -483,8 +674,25 @@ function PrinterActions({
         <DropdownMenuItem disabled={pending} onSelect={onTest}>
           Test (IPP)
         </DropdownMenuItem>
-        <PrinterFormDialog printer={p} ouOptions={ouOptions} trigger={<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>} />
+        <PrinterFormDialog
+          printer={p}
+          ouOptions={ouOptions}
+          packages={packages}
+          trigger={<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>}
+        />
         <DropdownMenuItem onSelect={onReplace}>Replace device…</DropdownMenuItem>
+        {p.driverMode === "auto" && p.decision.sticky && (
+          <DropdownMenuItem
+            disabled={pending}
+            onSelect={async () => {
+              const r = await resetDriverDecision(p.id);
+              if (r.ok) toast.success(r.message ?? "Reset");
+              else toast.error(r.error);
+            }}
+          >
+            Re-evaluate driver (auto)
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onSelect={onDelete}>
           Delete
@@ -494,21 +702,38 @@ function PrinterActions({
   );
 }
 
+function DriverBadge({ p }: { p: PrinterView }) {
+  const d = p.decision;
+  if (d.mode === "vendor")
+    return (
+      <Badge variant="outline" title={decisionText(d)}>
+        Vendor{d.source === "auto" ? " (auto)" : ""}
+      </Badge>
+    );
+  if (d.needed)
+    return (
+      <Badge variant="destructive" title={decisionText(d)}>
+        Vendor driver needed
+      </Badge>
+    );
+  return null;
+}
+
 function DriverlessBadge({ p }: { p: PrinterView }) {
   if (p.lastTestOk === null) return <Badge variant="outline">Not tested</Badge>;
   if (p.lastTestOk) return <Badge variant="secondary">{p.lastTestFormats.map((f) => f.split("/")[1]).join(" · ")}</Badge>;
   return <Badge variant="destructive">Unsupported</Badge>;
 }
 
-export function PrintersTable({ printers, ouOptions }: { printers: PrinterView[]; ouOptions: OuOption[] | null }) {
+export function PrintersTable({ printers, ouOptions, packages }: { printers: PrinterView[]; ouOptions: OuOption[] | null; packages: DriverPackageOption[] }) {
   const [replacing, setReplacing] = useState<PrinterView | null>(null);
   const [deleting, setDeleting] = useState<PrinterView | null>(null);
-  const [testResult, setTestResult] = useState<(TestResult & { name: string }) | null>(null);
+  const [testResult, setTestResult] = useState<(TestResult & { name: string; decision?: DriverDecisionView }) | null>(null);
   const [pending, startTransition] = useTransition();
   const runTest = (p: PrinterView) =>
     startTransition(async () => {
       const r = await testPrinter(p.id);
-      setTestResult({ ...r, name: p.name });
+      setTestResult({ ...r, name: p.name, decision: p.decision });
     });
 
   if (printers.length === 0) {
@@ -541,12 +766,13 @@ export function PrintersTable({ printers, ouOptions }: { printers: PrinterView[]
                 {p.location ?? "No location"}
                 {p.model ? ` · ${p.model}` : ""} · {p.assignedOus} OU{p.assignedOus === 1 ? "" : "s"}
               </ItemDescription>
-              <div className="pt-1">
+              <div className="flex flex-wrap gap-1 pt-1">
                 <DriverlessBadge p={p} />
+                <DriverBadge p={p} />
               </div>
             </ItemContent>
             <ItemActions>
-              <PrinterActions p={p} ouOptions={ouOptions} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+              <PrinterActions p={p} ouOptions={ouOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
             </ItemActions>
           </Item>
         ))}
@@ -582,11 +808,14 @@ export function PrintersTable({ printers, ouOptions }: { printers: PrinterView[]
                 <TableCell>{p.location ?? "—"}</TableCell>
                 <TableCell>{p.model ?? "—"}</TableCell>
                 <TableCell>
-                  <DriverlessBadge p={p} />
+                  <div className="flex flex-wrap gap-1">
+                    <DriverlessBadge p={p} />
+                    <DriverBadge p={p} />
+                  </div>
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{p.assignedOus}</TableCell>
                 <TableCell className="pr-4">
-                  <PrinterActions p={p} ouOptions={ouOptions} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+                  <PrinterActions p={p} ouOptions={ouOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
                 </TableCell>
               </TableRow>
             ))}

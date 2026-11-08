@@ -43,6 +43,13 @@
       "when": 1793954926895,
       "tag": "0005_analytics_ipp_aliases",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794125172414,
+      "tag": "0006_vendor_drivers",
+      "breakpoints": true
     }
   ]
 }

@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.6.3'
+$script:AgentVersion = '0.7.0'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -202,7 +202,9 @@ function Get-SpoolfreePlan {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Desired,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Installed,
         [AllowEmptyCollection()][string[]]$Existing = @(),
-        [AllowNull()][string]$DefaultPrinter
+        [AllowNull()][string]$DefaultPrinter,
+        # $false under Windows Protected Print Mode: vendor-driver printers are planned as driverless.
+        [bool]$VendorAllowed = $true
     )
     $actions = New-Object System.Collections.Generic.List[object]
     $installedByName = @{}
@@ -224,6 +226,7 @@ function Get-SpoolfreePlan {
     foreach ($d in $Desired) {
         $key = ([string]$d.name).ToLowerInvariant()
         $mine = $installedByName[$key]
+        $target = Get-SpoolfreeQueueTarget $d -VendorAllowed $VendorAllowed
         if ($null -eq $mine) {
             if ($existingSet.ContainsKey($key)) {
                 # A queue with this name exists but we did not create it: never touch it.
@@ -231,8 +234,11 @@ function Get-SpoolfreePlan {
             } else {
                 $actions.Add([pscustomobject]@{ Action = 'Add'; Name = $d.name; Printer = $d })
             }
-        } elseif ([int]$mine.Revision -ne [int]$d.revision -or [string]$mine.Url -ne [string]$d.ippUrl -or -not $existingSet.ContainsKey($key)) {
-            $actions.Add([pscustomobject]@{ Action = 'Replace'; Name = $d.name; Printer = $d })
+        } elseif ([int]$mine.Revision -ne [int]$d.revision -or [string]$mine.Url -ne $target -or -not $existingSet.ContainsKey($key)) {
+            # 0.7: a switch to or from a vendor-driver queue creates the new queue first (a TCP/IP queue can exist next
+            # to the IPP queue of the same device), so the PC is never without the printer meanwhile.
+            $mbb = $existingSet.ContainsKey($key) -and ((Test-SpoolfreeVendorTarget ([string]$mine.Url)) -or (Test-SpoolfreeVendorTarget $target))
+            $actions.Add([pscustomobject]@{ Action = 'Replace'; Name = $d.name; Printer = $d; MakeBeforeBreak = $mbb })
         } else {
             $actions.Add([pscustomobject]@{ Action = 'Keep'; Name = $d.name; Printer = $d })
         }
@@ -985,13 +991,14 @@ function Get-SpoolfreeMarkerKey {
 }
 
 function Set-SpoolfreeMarker {
-    param([Parameter(Mandatory)]$Printer, [Parameter(Mandatory)][string]$Method, [string]$PortName = '', [string]$ServerId = '')
+    param([Parameter(Mandatory)]$Printer, [Parameter(Mandatory)][string]$Method, [string]$PortName = '', [string]$ServerId = '', [string]$Target = '')
+    if (-not $Target) { $Target = [string]$Printer.ippUrl }
     $key = Get-SpoolfreeMarkerKey -Name $Printer.name
     if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
     New-ItemProperty -Path $key -Name Name -Value $Printer.name -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Id -Value $Printer.id -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Revision -Value ([int]$Printer.revision) -PropertyType DWord -Force | Out-Null
-    New-ItemProperty -Path $key -Name Url -Value $Printer.ippUrl -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $key -Name Url -Value $Target -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Method -Value $Method -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name PortName -Value $PortName -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Server -Value $ServerId -PropertyType String -Force | Out-Null
@@ -1047,6 +1054,274 @@ function Remove-SpoolfreeMarker {
 }
 
 # ---------------------------------------------------------------------------
+# Vendor drivers (agents 0.7+). A manifest printer with driverMode "vendor" carries
+#   driver = { packageId, packageName, sha256, size, url, driverName, inf, catalog, protocol, lprQueue }
+# The agent downloads the package with its machine token, checks SHA-256 and size against the signed manifest,
+# extracts it to a SYSTEM-only directory, requires a Valid Authenticode signature on the INF's catalog, stages the
+# driver with pnputil, adds it with Add-PrinterDriver and creates the queue on a Standard TCP/IP (RAW 9100 / LPR)
+# or IPP port. Under Windows Protected Print Mode vendor drivers are not allowed: the printer stays driverless.
+# ---------------------------------------------------------------------------
+
+$script:DriverRegistry = 'HKLM:\SOFTWARE\Spoolfree\Drivers'
+$script:VendorProtocols = @('raw9100', 'lpr', 'ipp')
+$script:DriverPackageMaxBytes = 1GB
+
+function Test-SpoolfreeZipEntryPath {
+    <# Pure: $true when a zip entry path stays inside the extraction directory (no absolute path, drive, ".."). #>
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+    if (-not $Path) { return $false }
+    $p = $Path -replace '\\', '/'
+    if ($p.StartsWith('/') -or $p -match '^[A-Za-z]:' -or $p.Contains([string][char]0)) { return $false }
+    $segs = $p.Split('/')
+    for ($i = 0; $i -lt $segs.Count; $i++) {
+        if ($segs[$i] -eq '..') { return $false }
+        if ($segs[$i] -eq '' -and $i -ne $segs.Count - 1) { return $false }
+    }
+    return $true
+}
+
+function Get-SpoolfreeVendorDriver {
+    <#
+    .SYNOPSIS
+        Pure: the manifest printer's vendor driver as an object (PackageId, PackageName, Sha256, Size, Url, DriverName,
+        Inf, Catalog, Protocol, LprQueue), or $null when the printer is driverless or the entry is not valid.
+    #>
+    param($Printer)
+    if ([string](Get-SpoolfreeProperty $Printer 'driverMode') -ne 'vendor') { return $null }
+    $d = Get-SpoolfreeProperty $Printer 'driver'
+    if ($null -eq $d) { return $null }
+    $sha = ([string](Get-SpoolfreeProperty $d 'sha256')).ToLowerInvariant()
+    $name = [string](Get-SpoolfreeProperty $d 'driverName')
+    $inf = [string](Get-SpoolfreeProperty $d 'inf')
+    $cat = [string](Get-SpoolfreeProperty $d 'catalog')
+    $url = [string](Get-SpoolfreeProperty $d 'url')
+    $proto = [string](Get-SpoolfreeProperty $d 'protocol')
+    if (-not $proto) { $proto = 'raw9100' }
+    if ($sha -notmatch '^[0-9a-f]{64}$' -or -not $name -or $script:VendorProtocols -notcontains $proto) { return $null }
+    if (-not (Test-SpoolfreeZipEntryPath $inf) -or -not (Test-SpoolfreeZipEntryPath $cat) -or $inf -notmatch '\.inf$' -or $cat -notmatch '\.cat$') { return $null }
+    if ($url -notmatch '^/api/agent/drivers/[0-9a-fA-F-]{36}$') { return $null }
+    $lpr = [string](Get-SpoolfreeProperty $d 'lprQueue')
+    if (-not $lpr) { $lpr = 'lp' }
+    $size = 0L
+    [void][long]::TryParse([string](Get-SpoolfreeProperty $d 'size'), [ref]$size)
+    return [pscustomobject]@{
+        PackageId   = [string](Get-SpoolfreeProperty $d 'packageId')
+        PackageName = [string](Get-SpoolfreeProperty $d 'packageName')
+        Sha256      = $sha
+        Size        = $size
+        Url         = $url
+        DriverName  = $name
+        Inf         = $inf
+        Catalog     = $cat
+        Protocol    = $proto
+        LprQueue    = $lpr
+    }
+}
+
+function Get-SpoolfreeQueueTarget {
+    <#
+    .SYNOPSIS
+        Pure: what the queue for a printer must be, recorded in the agent's marker (Url). Driverless: the IPP URL (as
+        before 0.7, so existing queues are kept). Vendor: "vendor:<protocol>|<address>|<driver name>|<package sha256>",
+        so a new package, driver or port re-creates the queue. -VendorAllowed $false (Windows Protected Print Mode)
+        gives the driverless target.
+    #>
+    param($Printer, [bool]$VendorAllowed = $true)
+    $ipp = [string](Get-SpoolfreeProperty $Printer 'ippUrl')
+    $v = Get-SpoolfreeVendorDriver $Printer
+    if (-not $v -or -not $VendorAllowed) { return $ipp }
+    $h = [string](Get-SpoolfreeProperty $Printer 'host')
+    $addr = switch ($v.Protocol) { 'raw9100' { "${h}:9100" } 'lpr' { "$h/$($v.LprQueue)" } default { $ipp } }
+    return ('vendor:{0}|{1}|{2}|{3}' -f $v.Protocol, $addr, $v.DriverName, $v.Sha256)
+}
+
+function Test-SpoolfreeVendorTarget {
+    <# Pure: is a marker target a vendor-driver queue? #>
+    param([AllowNull()][AllowEmptyString()][string]$Target)
+    return ([string]$Target).StartsWith('vendor:')
+}
+
+function Get-SpoolfreeVendorPortName {
+    <# Pure: the port a vendor queue uses: SPOOLFREE_<host> (RAW 9100), SPOOLFREE_LPR_<host>_<queue>, or the IPP URL. #>
+    param([Parameter(Mandatory)]$Printer, [Parameter(Mandatory)]$Vendor)
+    $h = ([string](Get-SpoolfreeProperty $Printer 'host')) -replace '[^A-Za-z0-9\.\-]', '_'
+    switch ($Vendor.Protocol) {
+        'raw9100' { return "SPOOLFREE_$h" }
+        'lpr' { return ('SPOOLFREE_LPR_{0}_{1}' -f $h, ($Vendor.LprQueue -replace '[^A-Za-z0-9\.\-]', '_')) }
+        default { return [string](Get-SpoolfreeProperty $Printer 'ippUrl') }
+    }
+}
+
+function Get-SpoolfreeInfCatalog {
+    <# Pure: the CatalogFile an INF's [Version] names (CatalogFile.NTamd64 first), or $null. #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    if (-not $Text) { return $null }
+    $inVersion = $false
+    $plain = $null; $amd64 = $null
+    foreach ($raw in ($Text -split "`r?`n")) {
+        $line = ($raw -replace ';.*$', '').Trim()
+        if (-not $line) { continue }
+        if ($line -match '^\[(.+)\]$') { $inVersion = ($Matches[1].Trim() -ieq 'Version'); continue }
+        if (-not $inVersion) { continue }
+        if ($line -match '^(?i)CatalogFile\.NTamd64\s*=\s*"?([^"]+?)"?$') { $amd64 = $Matches[1].Trim() }
+        elseif ($line -match '^(?i)CatalogFile\s*=\s*"?([^"]+?)"?$') { $plain = $Matches[1].Trim() }
+    }
+    if ($amd64) { return $amd64 }
+    return $plain
+}
+
+function Get-SpoolfreeDriverState {
+    <# The driver package this agent installed with that SHA-256 (registry), or $null. #>
+    param([Parameter(Mandatory)][string]$Sha256)
+    $key = Join-Path $script:DriverRegistry $Sha256.ToLowerInvariant()
+    if (-not (Test-Path $key)) { return $null }
+    $p = Get-ItemProperty -Path $key
+    return [pscustomobject]@{ DriverNames = @($p.DriverNames); InstalledAt = [string]$p.InstalledAt; Signer = [string]$p.Signer }
+}
+
+function Set-SpoolfreeDriverState {
+    param([Parameter(Mandatory)][string]$Sha256, [Parameter(Mandatory)][string]$DriverName, [string]$Signer = '', [string]$Package = '')
+    $key = Join-Path $script:DriverRegistry $Sha256.ToLowerInvariant()
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    $names = @((Get-SpoolfreeDriverState -Sha256 $Sha256).DriverNames | Where-Object { $_ }) + @($DriverName) | Select-Object -Unique
+    New-ItemProperty -Path $key -Name DriverNames -Value ([string[]]$names) -PropertyType MultiString -Force | Out-Null
+    New-ItemProperty -Path $key -Name InstalledAt -Value ([datetime]::UtcNow.ToString('o')) -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $key -Name Signer -Value $Signer -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $key -Name Package -Value $Package -PropertyType String -Force | Out-Null
+}
+
+function New-SpoolfreeSystemDirectory {
+    <# Creates a directory only SYSTEM can access (protected ACL, inherited by everything below it). #>
+    param([Parameter(Mandatory)][string]$Path)
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $system = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
+    $acl.SetOwner($system)
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($system, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+    return $Path
+}
+
+function Save-SpoolfreeDownload {
+    <# Downloads a URL with the machine token to a file. #>
+    param([Parameter(Mandatory)][string]$Uri, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)][string]$Path)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $wc = New-Object Net.WebClient
+    try {
+        $wc.Headers['Authorization'] = "Bearer $Token"
+        $wc.Headers['User-Agent'] = "Spoolfree-Agent/$script:AgentVersion"
+        $wc.DownloadFile($Uri, $Path)
+    } finally { $wc.Dispose() }
+}
+
+function Expand-SpoolfreeZip {
+    <# Extracts a zip, refusing entries that would leave the destination or a total size above the limit. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Destination)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = [IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\'
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $zip = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $total = 0L
+        foreach ($e in $zip.Entries) { $total += $e.Length }
+        if ($total -gt $script:DriverPackageMaxBytes) { throw "The driver package expands to more than $($script:DriverPackageMaxBytes / 1GB) GB." }
+        foreach ($e in $zip.Entries) {
+            if (-not (Test-SpoolfreeZipEntryPath $e.FullName)) { throw "Unsafe path in the driver package: $($e.FullName)" }
+            $target = [IO.Path]::GetFullPath((Join-Path $root ($e.FullName -replace '/', '\')))
+            if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe path in the driver package: $($e.FullName)" }
+            if ($e.FullName.EndsWith('/')) { New-Item -ItemType Directory -Path $target -Force | Out-Null; continue }
+            $dir = Split-Path $target -Parent
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $target, $true)
+        }
+    } finally { $zip.Dispose() }
+}
+
+function Invoke-SpoolfreePnpUtil {
+    <# pnputil /add-driver <inf> /install: stages the driver package in the driver store. Returns Code and Output. #>
+    param([Parameter(Mandatory)][string]$Inf)
+    $out = & pnputil.exe /add-driver "$Inf" /install 2>&1
+    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = ((($out | Out-String).Trim()) -replace '\s+', ' ') }
+}
+
+function Install-SpoolfreeVendorDriver {
+    <#
+    .SYNOPSIS
+        Makes the vendor driver available: 'present' when this package's driver is already installed by this agent,
+        else downloads, verifies (SHA-256 + size from the signed manifest, catalog named by the INF, Authenticode
+        status Valid), stages with pnputil /add-driver /install and runs Add-PrinterDriver. Returns 'installed'.
+        Throws on any failure; the staging directory is always removed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Vendor, [Parameter(Mandatory)][string]$BaseUrl, [Parameter(Mandatory)][string]$Token)
+    $state = Get-SpoolfreeDriverState -Sha256 $Vendor.Sha256
+    if ($state -and (@($state.DriverNames) -contains $Vendor.DriverName) -and (Get-PrinterDriver -Name $Vendor.DriverName -ErrorAction SilentlyContinue)) { return 'present' }
+    $staging = Join-Path $env:ProgramData 'Spoolfree\DriverStaging'
+    if (-not (Test-Path $staging)) { New-SpoolfreeSystemDirectory -Path $staging | Out-Null }
+    $work = New-SpoolfreeSystemDirectory -Path (Join-Path $staging ([guid]::NewGuid().ToString('N')))
+    try {
+        $zip = Join-Path $work 'package.zip'
+        Save-SpoolfreeDownload -Uri ($BaseUrl.TrimEnd('/') + $Vendor.Url) -Token $Token -Path $zip
+        $len = (Get-Item -LiteralPath $zip).Length
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+        if ($hash -ne $Vendor.Sha256 -or ($Vendor.Size -gt 0 -and $len -ne $Vendor.Size)) {
+            throw "Driver package '$($Vendor.PackageName)' does not match the signed manifest (SHA-256 $hash, $len bytes); refusing it."
+        }
+        $dir = Join-Path $work 'x'
+        Expand-SpoolfreeZip -Path $zip -Destination $dir
+        $inf = Join-Path $dir ($Vendor.Inf -replace '/', '\')
+        $cat = Join-Path $dir ($Vendor.Catalog -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $inf -PathType Leaf)) { throw "The driver package has no $($Vendor.Inf)." }
+        if (-not (Test-Path -LiteralPath $cat -PathType Leaf)) { throw "The driver package has no $($Vendor.Catalog)." }
+        $named = Get-SpoolfreeInfCatalog -Text (Get-Content -LiteralPath $inf -Raw)
+        if (-not $named -or (Split-Path $named -Leaf) -ne (Split-Path $cat -Leaf)) { throw "$($Vendor.Inf) does not name the catalog $($Vendor.Catalog) (CatalogFile: '$named')." }
+        $sig = Get-AuthenticodeSignature -LiteralPath $cat
+        if ([string]$sig.Status -ne 'Valid') { throw "Catalog $($Vendor.Catalog) signature is $($sig.Status) ($($sig.StatusMessage)); refusing the driver." }
+        $signer = if ($sig.SignerCertificate) { [string]$sig.SignerCertificate.Subject } else { '' }
+        $pnp = Invoke-SpoolfreePnpUtil -Inf $inf
+        # 259: staged, no device to install it on (printers have none); 3010: reboot required (not needed for printing).
+        if (@(0, 259, 3010) -notcontains $pnp.Code) { throw "pnputil /add-driver failed (exit $($pnp.Code)): $($pnp.Output)" }
+        Add-PrinterDriver -Name $Vendor.DriverName -ErrorAction Stop
+        Set-SpoolfreeDriverState -Sha256 $Vendor.Sha256 -DriverName $Vendor.DriverName -Signer $signer -Package $Vendor.PackageName
+        return 'installed'
+    } finally {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function New-SpoolfreeVendorQueue {
+    <# Creates a queue with the (installed) vendor driver on its port. Returns the port name. #>
+    param(
+        [Parameter(Mandatory)]$Printer,
+        [Parameter(Mandatory)]$Vendor,
+        [Parameter(Mandatory)][string]$QueueName,
+        [Parameter(Mandatory)][string]$Comment,
+        [AllowEmptyString()][string]$Location = ''
+    )
+    $port = Get-SpoolfreeVendorPortName -Printer $Printer -Vendor $Vendor
+    $h = [string](Get-SpoolfreeProperty $Printer 'host')
+    switch ($Vendor.Protocol) {
+        'raw9100' {
+            if (-not (Get-PrinterPort -Name $port -ErrorAction SilentlyContinue)) { Add-PrinterPort -Name $port -PrinterHostAddress $h -PortNumber 9100 -ErrorAction Stop }
+            Add-Printer -Name $QueueName -DriverName $Vendor.DriverName -PortName $port -Comment $Comment -Location $Location -ErrorAction Stop
+        }
+        'lpr' {
+            if (-not (Get-PrinterPort -Name $port -ErrorAction SilentlyContinue)) { Add-PrinterPort -Name $port -LprHostAddress $h -LprQueueName $Vendor.LprQueue -LprByteCounting -ErrorAction Stop }
+            Add-Printer -Name $QueueName -DriverName $Vendor.DriverName -PortName $port -Comment $Comment -Location $Location -ErrorAction Stop
+        }
+        'ipp' {
+            # Internet Port (IPP over HTTP) with the vendor driver: printui creates the port for an http(s) URL.
+            & rundll32.exe printui.dll, PrintUIEntry /if /b "$QueueName" /r "$port" /m "$($Vendor.DriverName)" /u /Z /q
+            for ($i = 0; $i -lt 20 -and -not (Get-SpoolfreeQueueByName -Name $QueueName); $i++) { Start-Sleep -Milliseconds 500 }
+            if (-not (Get-SpoolfreeQueueByName -Name $QueueName)) { throw "Could not create the IPP (Internet Port) queue $QueueName for $port." }
+            Set-Printer -Name $QueueName -Comment $Comment -Location $Location -ErrorAction Stop
+        }
+    }
+    return $port
+}
+
+# ---------------------------------------------------------------------------
 # Printer install / remove
 # ---------------------------------------------------------------------------
 
@@ -1075,6 +1350,9 @@ function Install-SpoolfreePrinter {
         Creates a machine-wide driverless queue.
         Primary:  Add-Printer -IppURL (IPP class driver chosen by Windows; WPP-compatible).
         Fallback: Standard TCP/IP port + "Microsoft IPP Class Driver" (older Windows 10 only; not WPP-compatible).
+        Vendor:   the manifest's vendor driver (already installed: Install-SpoolfreeVendorDriver) on a RAW 9100, LPR or
+                  IPP port (0.7).
+        -QueueName creates the queue under another name (make-before-break); the marker is then left to the caller.
     #>
     [CmdletBinding()]
     param(
@@ -1082,25 +1360,34 @@ function Install-SpoolfreePrinter {
         [Parameter(Mandatory)][string]$Method,
         [AllowNull()][AllowEmptyString()][string]$ServerId,
         # TcpIpPort only: driver to use instead of the Microsoft IPP Class Driver (must be installed already).
-        [AllowNull()][AllowEmptyString()][string]$DriverName
+        [AllowNull()][AllowEmptyString()][string]$DriverName,
+        [AllowNull()][AllowEmptyString()][string]$QueueName
     )
     $comment = Get-SpoolfreeComment -Printer $Printer -ServerId $ServerId
     $location = if ($Printer.location) { [string]$Printer.location } else { '' }
+    $queue = if ($QueueName) { $QueueName } else { [string]$Printer.name }
+    $final = $queue -eq [string]$Printer.name
     switch ($Method) {
         'IppURL' {
             # Windows names IPP queues after the device; create, then rename to the logical name.
             $before = @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-            Add-Printer -IppURL $Printer.ippUrl -Name $Printer.name -ErrorAction Stop
-            $q = Get-SpoolfreeQueueByName -Name $Printer.name
+            Add-Printer -IppURL $Printer.ippUrl -Name $queue -ErrorAction Stop
+            $q = Get-SpoolfreeQueueByName -Name $queue
             if (-not $q) {
                 $new = @(Get-Printer | Where-Object { $before -notcontains $_.Name })
                 if ($new.Count -ne 1) { throw "Add-Printer -IppURL did not create a single identifiable queue for $($Printer.name)." }
-                Rename-Printer -InputObject $new[0] -NewName $Printer.name -ErrorAction Stop
-                $q = Get-SpoolfreeQueueByName -Name $Printer.name
-                if (-not $q) { throw "Renaming the new queue to $($Printer.name) failed." }
+                Rename-Printer -InputObject $new[0] -NewName $queue -ErrorAction Stop
+                $q = Get-SpoolfreeQueueByName -Name $queue
+                if (-not $q) { throw "Renaming the new queue to $queue failed." }
             }
-            Set-Printer -Name $Printer.name -Comment $comment -Location $location -ErrorAction SilentlyContinue
-            Set-SpoolfreeMarker -Printer $Printer -Method 'IppURL' -PortName ([string]$q.PortName) -ServerId ([string]$ServerId)
+            Set-Printer -Name $queue -Comment $comment -Location $location -ErrorAction SilentlyContinue
+            if ($final) { Set-SpoolfreeMarker -Printer $Printer -Method 'IppURL' -PortName ([string]$q.PortName) -ServerId ([string]$ServerId) }
+        }
+        'Vendor' {
+            $v = Get-SpoolfreeVendorDriver $Printer
+            if (-not $v) { throw "No valid vendor driver in the manifest for $($Printer.name)." }
+            $port = New-SpoolfreeVendorQueue -Printer $Printer -Vendor $v -QueueName $queue -Comment $comment -Location $location
+            if ($final) { Set-SpoolfreeMarker -Printer $Printer -Method 'Vendor' -PortName $port -ServerId ([string]$ServerId) -Target (Get-SpoolfreeQueueTarget $Printer) }
         }
         'TcpIpPort' {
             $port = 'SPOOLFREE_' + ([string]$Printer.host -replace '[^A-Za-z0-9\.\-]', '_')
@@ -1112,8 +1399,8 @@ function Install-SpoolfreePrinter {
             if ($driver -eq $script:IppDriver -and -not (Get-PrinterDriver -Name $script:IppDriver -ErrorAction SilentlyContinue)) {
                 Add-PrinterDriver -Name $script:IppDriver -ErrorAction Stop
             }
-            Add-Printer -Name $Printer.name -DriverName $driver -PortName $port -Comment $comment -Location $location -ErrorAction Stop
-            Set-SpoolfreeMarker -Printer $Printer -Method 'TcpIpPort' -PortName $port -ServerId ([string]$ServerId)
+            Add-Printer -Name $queue -DriverName $driver -PortName $port -Comment $comment -Location $location -ErrorAction Stop
+            if ($final) { Set-SpoolfreeMarker -Printer $Printer -Method 'TcpIpPort' -PortName $port -ServerId ([string]$ServerId) }
         }
         default { throw "No supported install method on this PC (method '$Method')." }
     }

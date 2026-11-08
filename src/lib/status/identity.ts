@@ -23,11 +23,13 @@ export async function refreshIdentity(
   const c = config();
   let uuid: string | null = known?.uuid ?? null;
   let model: string | null = known?.model ?? p.model;
+  let deviceId: string | null = null;
   if (!known) {
     try {
-      const attrs = await getPrinterAttributes(printerUri(p), ["printer-uuid", "printer-make-and-model"], c.POLL_TIMEOUT_MS);
+      const attrs = await getPrinterAttributes(printerUri(p), ["printer-uuid", "printer-make-and-model", "printer-device-id"], c.POLL_TIMEOUT_MS);
       uuid = (attrs["printer-uuid"]?.[0] as string | undefined) ?? null;
       model = (attrs["printer-make-and-model"]?.[0] as string | undefined) ?? model;
+      deviceId = (attrs["printer-device-id"]?.[0] as string | undefined) ?? null;
     } catch {
       uuid = null;
     }
@@ -41,7 +43,7 @@ export async function refreshIdentity(
   const next = mergeIdentity({ deviceUuid: p.deviceUuid, macAddresses: p.macAddresses }, { uuid, model, snmpMacs });
   await db()
     .update(schema.printers)
-    .set({ deviceUuid: next.deviceUuid, macAddresses: next.macAddresses, identityCheckedAt: new Date() })
+    .set({ deviceUuid: next.deviceUuid, macAddresses: next.macAddresses, identityCheckedAt: new Date(), ...(deviceId ? { deviceId } : {}) })
     .where(eq(schema.printers.id, p.id));
   return next;
 }

@@ -33,6 +33,7 @@ Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** th
 | **Entra ID login** | OIDC sign-in (automatic by default), limited to admins; optional break-glass local accounts. |
 | **Printers** | Add, edit, delete, [bulk import/export](docs/deployment.md#bulk-import-and-export), delete/rename from the [CLI](docs/deployment.md#deleting-and-renaming-printers). **Test** checks driverless support over IPP and detects the IPP path (`/ipp/print`, `/ipp`, `/ipp/printer`, `/printers/lp1`, `/`; manual override possible); **Replace** swaps the device and keeps the name; default duplex; opt-in takeover of old queues, including old host names that are no longer in DNS. |
 | **OU assignments** | Read-only LDAP(S) view of AD with inheritance, block rules, per-OU defaults and per-computer overrides. Assign OUs (and the per-OU default) straight from the Add/Edit printer form, with a live "will reach N computers" count. |
+| **Vendor drivers** | For printers the IPP Class Driver cannot drive, or drives too slowly (IPP 1.x only, no driverless format, slow old colour lasers): **auto driver mode** (default) switches just those printers to a signed vendor driver. It picks the exact-model package by IEEE 1284 device ID, or the brand's universal driver. Agents check the SHA-256 and the catalog's Authenticode signature, and switch without leaving the PC printerless. [docs/drivers.md](docs/drivers.md). |
 | **Preview** | "What will computer X get?", with a step-by-step trace and the exact manifest. |
 | **Unassigned PCs** | Computers in `CN=Computers`, or whose OU chain gets no printers. |
 | **Status dashboard** | IPP polling with SNMP fallback: online/offline, toner, jams, paper-out, page count; optional webhook alerts. |
@@ -177,6 +178,9 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `ANALYTICS_COLLECT_DOCUMENT_NAMES` | `0` | Also collect document names. Personal data: see the privacy notes first. |
 | `ANALYTICS_RETENTION_DAYS` | `365` | Print jobs and daily page counters older than this are deleted (hourly purge). |
 | `ANALYTICS_TIME_ZONE` | `UTC` | IANA time zone for daily buckets (charts, counters). |
+| `DRIVER_PACKAGE_MAX_MB` | `200` | Largest vendor driver package (zip), stored in Postgres ([docs/drivers.md](docs/drivers.md)). |
+| `DRIVER_AUTO_SLOW_SECONDS_PER_PAGE` | `20` | Auto driver mode: a median above this (over `DRIVER_AUTO_SLOW_MIN_JOBS`=3 jobs of at least `DRIVER_AUTO_SLOW_MIN_PAGES`=2 pages) means slow. |
+| `DRIVER_AUTO_SPEED_INTERVAL_MINUTES` | `30` | How often the poller reads completed IPP jobs to measure speed; `0` turns it off. |
 | `METRICS_TOKEN` | | Bearer token required to scrape `/metrics`. |
 | `DEV_FAKE_AD`, `DEV_FAKE_AD_FILE`, `DEV_LOGIN` | `0` | Development only; ignored by production builds. |
 
@@ -189,6 +193,7 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 - Manifests carry an **Ed25519 signature** over the exact bytes. Agents pin the public key and reject bad signatures, the wrong computer, or expired manifests, so a network attacker cannot inject printers.
 - PCs enroll with a shared token read from a Domain Computers-only share, then get a per-machine token (stored DPAPI-encrypted; only its hash is kept server-side).
 - Every agent request is checked live against AD by `objectGUID`; disabled or deleted computers are refused.
+- Vendor drivers (opt-in per printer, or auto mode) are installed only from admin-uploaded packages whose SHA-256 is in the signed manifest and whose catalog has a valid Authenticode signature; never under Windows Protected Print Mode.
 - Spoolfree never writes to AD.
 
 Full threat model and key rotation: [SECURITY.md](SECURITY.md).

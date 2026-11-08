@@ -2,7 +2,10 @@ import { sql } from "drizzle-orm";
 import { dayIn } from "../analytics/counters";
 import { config } from "../config";
 import { db, schema, sqlClient } from "../db";
-import { getPrinterAttributes } from "../ipp/client";
+import { getCompletedJobs, getPrinterAttributes } from "../ipp/client";
+import { autoSettings } from "../config";
+import { mergeSpeedSamples, newStickyReason } from "../drivers/auto";
+import { eq } from "drizzle-orm";
 import { lowMarkers, needsAttention, offlineStatus, printerUri, STATUS_ATTRIBUTES, statusFromIpp, type PrinterStatus } from "../ipp/interpret";
 import { identityDue, refreshIdentity } from "./identity";
 import { snmpStatus } from "./snmp";
@@ -105,12 +108,46 @@ export async function pollAll(): Promise<number> {
     if (s.online && s.pageCount !== null && s.pageCount >= 0) {
       await recordCounter(p, s.pageCount, now).catch((e) => console.warn(`[spoolfree] counter of ${p.name}: ${(e as Error).message}`));
     }
+    // Auto driver mode: measure seconds per page of completed IPP jobs (Get-Jobs) to spot slow printers.
+    if (s.online && speedDue(p, now)) {
+      await measureSpeed(p, now).catch((e) => console.warn(`[spoolfree] job speed of ${p.name}: ${(e as Error).message}`));
+    }
     // Device identity (printer-uuid, MACs) for legacy queue matching on PCs: once a day per printer.
     if (s.online && identityDue(p, now)) {
       await refreshIdentity(p).catch((e) => console.warn(`[spoolfree] identity of ${p.name}: ${(e as Error).message}`));
     }
   });
   return printers.length;
+}
+
+const JOB_ATTRIBUTES = ["job-id", "job-state", "time-at-processing", "time-at-completed", "job-impressions-completed", "job-media-sheets-completed"];
+
+/** Speed is measured for auto-mode printers that have not switched to a vendor driver yet. */
+export function speedDue(p: Pick<PrinterRow, "driverMode" | "autoVendorReason" | "speedCheckedAt">, now: Date): boolean {
+  const minutes = config().DRIVER_AUTO_SPEED_INTERVAL_MINUTES;
+  if (!minutes || p.driverMode !== "auto" || p.autoVendorReason) return false;
+  return !p.speedCheckedAt || now.getTime() - p.speedCheckedAt.getTime() >= minutes * 60_000;
+}
+
+/** Reads completed jobs, stores the samples and, when the printer is now "slow", auto mode's sticky vendor decision. */
+export async function measureSpeed(p: PrinterRow, now: Date) {
+  let samples = p.speedSamples;
+  try {
+    const jobs = await getCompletedJobs(printerUri(p), JOB_ATTRIBUTES, config().POLL_TIMEOUT_MS, 20);
+    samples = mergeSpeedSamples(p.speedSamples, jobs as Record<string, unknown[]>[], now);
+  } finally {
+    const sticky = newStickyReason({ ...p, speedSamples: samples }, autoSettings());
+    await db()
+      .update(schema.printers)
+      .set({ speedSamples: samples, speedCheckedAt: now, ...(sticky ? { autoVendorReason: sticky, autoVendorAt: now } : {}) })
+      .where(eq(schema.printers.id, p.id));
+    if (sticky) {
+      await db()
+        .insert(schema.auditLog)
+        .values({ actor: "poller", action: "printer.driver_auto", entityType: "printer", entityId: p.id, details: { mode: "vendor", reason: sticky, source: "job speed" } });
+      console.log(`[spoolfree] ${p.name}: auto driver mode switched to vendor (${sticky})`);
+    }
+  }
 }
 
 /** Upserts today's counter reading: first reading of the day stays, last is replaced. */

@@ -5,6 +5,7 @@
  *   printers export [--format yaml|csv]
  *   printers delete <name> [--dry-run]
  *   printers rename <old-name> <new-name> [--dry-run]
+ *   printers test [<name> ...]      IPP Test from the server (what the admin UI's Test does); all printers without names
  *
  * Idempotent: printers are matched by name (case-insensitive) and only changed fields are written;
  * assignments are added (and with --prune-assignments, assignments of the listed printers that are not
@@ -23,6 +24,7 @@ import { readFileSync } from "node:fs";
 import { apply, describe, exportCsv, exportYaml, loadState, parseDocument, plan, planComputers, type DirectoryComputer } from "../src/lib/bulk";
 import { config, directoryMode } from "../src/lib/config";
 import { db, schema, sqlClient } from "../src/lib/db";
+import { runPrinterTest } from "../src/lib/printer-test";
 import { checkPrinterRename, deletePrinterWithReferences, findPrinterByName, planPrinterDelete, renamePrinter } from "../src/lib/printer-lifecycle";
 
 const USAGE = `usage:
@@ -30,6 +32,7 @@ const USAGE = `usage:
   printers export [--format yaml|csv]
   printers delete <name> [--dry-run]
   printers rename <old-name> <new-name> [--dry-run]
+  printers test [<name> ...]
 Quote names that contain spaces. Audit actor: "cli". PCs follow at their next agent sync.`;
 
 /**
@@ -60,6 +63,7 @@ export async function printersCli(argv: string[]): Promise<number> {
     return 0;
   }
   if (argv[0] === "delete" || argv[0] === "rename") return deleteOrRename(argv);
+  if (argv[0] === "test") return testPrinters(argv.slice(1));
   const args = argv.filter((a) => !a.startsWith("--"));
   const flag = (f: string) => argv.includes(`--${f}`);
   const fmtIdx = argv.indexOf("--format");
@@ -95,6 +99,32 @@ export async function printersCli(argv: string[]): Promise<number> {
     console.log("applied.");
   }
   return 0;
+}
+
+/** IPP Test of the named printers (all when none are named): reachability, driverless check, auto driver inputs. */
+async function testPrinters(names: string[]): Promise<number> {
+  const d = db();
+  const all = await d.select().from(schema.printers).orderBy(schema.printers.name);
+  const missing = names.filter((n) => !all.some((p) => p.name.toLowerCase() === n.toLowerCase()));
+  if (missing.length) {
+    console.error(`error: no printer named ${missing.map((m) => `"${m}"`).join(", ")}`);
+    return 1;
+  }
+  const want = new Set(names.map((n) => n.toLowerCase()));
+  let failed = 0;
+  for (const p of all.filter((x) => !want.size || want.has(x.name.toLowerCase()))) {
+    const r = await runPrinterTest("cli", p);
+    if (!r.ok) {
+      failed++;
+      console.log(`${p.name}	unreachable	${r.error}`);
+      continue;
+    }
+    const c = r.check;
+    console.log(
+      `${p.name}	${c.ok ? "driverless" : "not driverless"}	IPP ${c.ippVersions.join("/") || "?"}	${c.driverlessFormats.map((f) => f.split("/")[1]).join(",") || "-"}	compression ${(c.compression ?? []).join(",") || "-"}	${c.model ?? "-"}${r.autoVendor ? `	auto -> vendor (${r.autoVendor})` : ""}`,
+    );
+  }
+  return failed ? 1 : 0;
 }
 
 async function deleteOrRename(argv: string[]): Promise<number> {

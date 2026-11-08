@@ -21,6 +21,8 @@ export const TEST_ATTRIBUTES = [
   "sides-supported",
   "sides-default",
   "printer-uri-supported",
+  "printer-device-id",
+  "compression-supported",
 ];
 
 export const STATUS_ATTRIBUTES = [
@@ -74,6 +76,12 @@ export interface DriverlessCheck {
   /** IPP sides-supported / sides-default (one-sided, two-sided-long-edge, two-sided-short-edge). */
   sidesSupported?: string[];
   sidesDefault?: string | null;
+  /** IEEE 1284 device ID (printer-device-id), used to match vendor driver packages. */
+  deviceId?: string | null;
+  /** compression-supported (none, deflate, gzip, ...); absent on old test results. */
+  compression?: string[];
+  /** Highest pwg-raster-document-resolution-supported (dpi), null when not advertised. */
+  maxRasterDpi?: number | null;
   problems: string[];
 }
 
@@ -109,8 +117,23 @@ export function checkDriverless(attrs: Record<string, IppValue[]>): DriverlessCh
     duplex: sides.some((s) => s.startsWith("two-sided")),
     sidesSupported: sides,
     sidesDefault: first<string>(attrs["sides-default"]),
+    deviceId: first<string>(attrs["printer-device-id"]),
+    compression: strings(attrs["compression-supported"]).map((c) => c.toLowerCase()),
+    maxRasterDpi: maxDpi(attrs["pwg-raster-document-resolution-supported"]),
     problems,
   };
+}
+
+function maxDpi(v: IppValue[] | undefined): number | null {
+  let best: number | null = null;
+  for (const r of v ?? []) {
+    if (r && typeof r === "object" && "x" in r && typeof r.x === "number") {
+      // units 3 = dots per inch, 4 = dots per cm.
+      const dpi = r.units === 4 ? Math.round(Math.max(r.x, r.y as number) * 2.54) : Math.max(r.x, r.y as number);
+      best = best === null ? dpi : Math.max(best, dpi);
+    }
+  }
+  return best;
 }
 
 const STATE_MAP: Record<number, PrinterState> = { 3: "idle", 4: "processing", 5: "stopped" };
