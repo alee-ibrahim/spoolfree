@@ -37,7 +37,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { PRINTER_NAME_RE, PRINTER_NAME_RULE } from "@/lib/printer-name";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -69,6 +70,9 @@ export interface DriverDecisionView {
   match: "manual" | "exact" | "universal" | null;
   /** Auto mode's vendor decision is stored and no longer re-evaluated. */
   sticky: boolean;
+  /** 0.8.1: driverless printers: the package a PC uses when driverless fails there (per-PC vendor fallback). */
+  fallbackPackageName: string | null;
+  fallbackDriverName: string | null;
 }
 
 export interface PrinterView {
@@ -113,6 +117,8 @@ export interface PrinterView {
   ippVersions: string[] | null;
   /** The driver PCs get now. */
   decision: DriverDecisionView;
+  /** PCs whose agent reports this printer's queue on the per-PC vendor fallback (0.8.1). */
+  vendorFallbackPcs: string[];
   /** Live status from the poller (null: not polled yet). */
   status: { online: boolean; state: string; stateReasons: string[]; markers: Marker[] } | null;
 }
@@ -258,7 +264,8 @@ const PROTOCOL_LABEL: Record<PrinterView["vendorProtocol"], string> = {
 export function decisionText(d: DriverDecisionView): string {
   if (d.mode === "vendor") return `${d.driverName} (${d.packageName}${d.match === "universal" ? ", universal" : ""}): ${d.reason}`;
   if (d.needed) return `Driverless for now: ${d.reason}; ${d.needed}`;
-  return `Driverless: ${d.reason}`;
+  const fallback = d.fallbackPackageName ? `; PCs where driverless fails use ${d.fallbackDriverName} (${d.fallbackPackageName})` : "";
+  return `Driverless: ${d.reason}${fallback}`;
 }
 
 function DriverField({ printer, packages }: { printer?: PrinterView; packages: DriverPackageOption[] }) {
@@ -497,10 +504,7 @@ export function PrinterFormDialog({
           </DialogHeader>
           {printer && <input type="hidden" name="id" value={printer.id} />}
           <FieldGroup className="py-4">
-            <Field>
-              <FieldLabel htmlFor="name">Name</FieldLabel>
-              <Input id="name" name="name" required defaultValue={printer?.name} placeholder="Staff Room Copier" />
-            </Field>
+            <PrinterNameField defaultValue={printer?.name} />
             <HostField p={printer} />
             <IppAddressField p={printer} />
             <div className="grid gap-3 sm:grid-cols-2">
@@ -811,6 +815,17 @@ function DriverBadge({ p }: { p: PrinterView }) {
   return null;
 }
 
+/** PCs where driverless failed and the agent uses the vendor fallback package for this printer (0.8.1). */
+function VendorFallbackBadge({ p }: { p: PrinterView }) {
+  const n = p.vendorFallbackPcs.length;
+  if (!n) return null;
+  return (
+    <Badge variant="outline" title={`Vendor fallback (${p.decision.fallbackDriverName ?? "vendor driver"}) on: ${p.vendorFallbackPcs.join(", ")}`}>
+      Vendor fallback on {n} PC{n === 1 ? "" : "s"}
+    </Badge>
+  );
+}
+
 function DriverlessBadge({ p }: { p: PrinterView }) {
   if (p.lastTestOk === null) return <Badge variant="outline">Not tested</Badge>;
   if (p.lastTestOk) return <Badge variant="secondary">{p.lastTestFormats.map((f) => f.split("/")[1]).join(" · ")}</Badge>;
@@ -886,6 +901,7 @@ export function PrintersTable({
               <div className="flex flex-wrap gap-1 pt-1">
                 <DriverlessBadge p={p} />
                 <DriverBadge p={p} />
+                <VendorFallbackBadge p={p} />
               </div>
             </ItemContent>
             <ItemActions className="flex-col items-end">
@@ -940,6 +956,7 @@ export function PrintersTable({
                   <div className="flex flex-wrap gap-1">
                     <DriverlessBadge p={p} />
                     <DriverBadge p={p} />
+                    <VendorFallbackBadge p={p} />
                   </div>
                 </TableCell>
                 <TableCell className="max-w-56 whitespace-normal">
@@ -993,5 +1010,19 @@ export function PrintersTable({
         </AlertDialogContent>
       </AlertDialog>
     </>
+  );
+}
+
+/** The queue name, checked as the admin types (the server checks it again): no \ / , ! " or control characters. */
+function PrinterNameField({ defaultValue }: { defaultValue?: string }) {
+  const [value, setValue] = useState(defaultValue ?? "");
+  const trimmed = value.trim();
+  const error = trimmed && !PRINTER_NAME_RE.test(trimmed) ? PRINTER_NAME_RULE : null;
+  return (
+    <Field data-invalid={error ? true : undefined}>
+      <FieldLabel htmlFor="name">Name</FieldLabel>
+      <Input id="name" name="name" required maxLength={100} value={value} onChange={(e) => setValue(e.target.value)} aria-invalid={error ? true : undefined} placeholder="Staff Room Copier" />
+      {error && <FieldError>{error}</FieldError>}
+    </Field>
   );
 }

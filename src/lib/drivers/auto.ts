@@ -65,6 +65,11 @@ export interface DriverDecision {
   match: "manual" | "exact" | "universal" | null;
   protocol: VendorProtocol;
   lprQueue: string | null;
+  /**
+   * 0.8.1, auto mode resolving to driverless: the package (exact model, or a universal one whose INF lists the device)
+   * that a PC uses only when Add-Printer -IppURL fails there (per-PC vendor fallback). Null or absent otherwise.
+   */
+  fallback?: PackageMatch | null;
 }
 
 /** Lower-case letters and digits only. */
@@ -206,10 +211,12 @@ export function decideDriver(p: PrinterForDecision, packages: PackageForMatch[],
   const reason = p.autoVendorReason ?? vendorReason(p, s);
   if (!reason) {
     const t = p.lastTest;
-    if (!t) return driverless("auto", "not tested yet");
+    // Per-PC vendor fallback (0.8.1): PCs stay driverless; a PC where -IppURL fails uses this package instead.
+    const fallback = matchPackage(p, packages);
+    if (!t) return { ...driverless("auto", "not tested yet"), fallback };
     const v2 = (t.ippVersions ?? []).filter((v) => v.startsWith("2.")).sort().at(-1);
     const formats = (t.driverlessFormats ?? []).map((f) => f.split("/")[1]).join(", ");
-    return driverless("auto", `driverless-capable (${v2 ? `IPP ${v2}` : "IPP"}${formats ? `, ${formats}` : ""})`);
+    return { ...driverless("auto", `driverless-capable (${v2 ? `IPP ${v2}` : "IPP"}${formats ? `, ${formats}` : ""})`), fallback };
   }
   const m = matchPackage(p, packages);
   if (!m) {

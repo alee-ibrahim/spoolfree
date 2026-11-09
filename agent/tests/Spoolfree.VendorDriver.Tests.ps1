@@ -251,3 +251,66 @@ Describe 'Get-SpoolfreeDriverState / Set-SpoolfreeDriverState' {
         }
     }
 }
+
+Describe 'Per-PC vendor fallback (0.8.1)' {
+    BeforeAll {
+        function script:FallbackPrinter([string]$Sha = $script:Sha) {
+            $p = DriverlessPrinter
+            $p | Add-Member -NotePropertyName fallbackDriver -NotePropertyValue (VendorPrinter -Sha $Sha).driver
+            $p
+        }
+        function script:FbMarker([string]$Url, [string]$Fallback = '', [string]$Tried = '') {
+            [pscustomobject]@{ Name = 'Bureau'; Id = 'p1'; Revision = 1; Url = $Url; VendorFallback = $Fallback; MigrateTried = $Tried }
+        }
+    }
+    It 'reads fallbackDriver only on driverless printers, with the same checks as vendor mode' {
+        (Get-SpoolfreeFallbackDriver (FallbackPrinter)).DriverName | Should -Be 'Brother HL-3150CDN series'
+        Get-SpoolfreeFallbackDriver (DriverlessPrinter) | Should -BeNullOrEmpty
+        Get-SpoolfreeFallbackDriver (FallbackPrinter -Sha 'nothex') | Should -BeNullOrEmpty
+        $v = VendorPrinter; $v | Add-Member -NotePropertyName fallbackDriver -NotePropertyValue $v.driver
+        Get-SpoolfreeFallbackDriver $v | Should -BeNullOrEmpty
+        # Without fallback the driverless printer has no vendor driver.
+        Get-SpoolfreeVendorDriver (FallbackPrinter) | Should -BeNullOrEmpty
+    }
+    It 'makes a vendor copy of the printer, leaving the manifest printer as it was' {
+        $p = FallbackPrinter
+        $fp = ConvertTo-SpoolfreeFallbackPrinter $p
+        $fp.driverMode | Should -Be 'vendor'
+        Test-SpoolfreeVendorFallbackPrinter $fp | Should -BeTrue
+        (Get-SpoolfreeVendorDriver $fp).Sha256 | Should -Be $script:Sha
+        Get-SpoolfreeQueueTarget $fp | Should -Be "vendor:raw9100|192.0.2.12:9100|Brother HL-3150CDN series|$($script:Sha)"
+        $p.driverMode | Should -Be 'driverless'
+        Test-SpoolfreeVendorFallbackPrinter $p | Should -BeFalse
+        ConvertTo-SpoolfreeFallbackPrinter (DriverlessPrinter) | Should -BeNullOrEmpty
+    }
+    It 'keeps the vendor fallback queue of this PC; PCs where driverless works stay driverless' {
+        $p = FallbackPrinter
+        $target = Get-SpoolfreeQueueTarget (ConvertTo-SpoolfreeFallbackPrinter $p)
+        # This PC: the marker says vendor fallback -> the effective printer is the vendor copy -> Keep.
+        $eff = Get-SpoolfreeEffectivePrinter -Printer $p -Marker (FbMarker $target 'Brother HL-3150CDN')
+        Test-SpoolfreeVendorFallbackPrinter $eff | Should -BeTrue
+        $plan = Get-SpoolfreePlan -Desired @($eff) -Installed @(FbMarker $target 'Brother HL-3150CDN') -Existing @('Bureau')
+        $plan[0].Action | Should -Be 'Keep'
+        # Another PC with a working driverless queue: nothing changes.
+        $eff2 = Get-SpoolfreeEffectivePrinter -Printer $p -Marker (FbMarker 'http://192.0.2.12:631/ipp/print')
+        Test-SpoolfreeVendorFallbackPrinter $eff2 | Should -BeFalse
+        (Get-SpoolfreePlan -Desired @($eff2) -Installed @(FbMarker 'http://192.0.2.12:631/ipp/print') -Existing @('Bureau'))[0].Action | Should -Be 'Keep'
+    }
+    It 'switches make-before-break to a new fallback package' {
+        $old = Get-SpoolfreeQueueTarget (ConvertTo-SpoolfreeFallbackPrinter (FallbackPrinter))
+        $p = FallbackPrinter -Sha ('cd' * 32)
+        $eff = Get-SpoolfreeEffectivePrinter -Printer $p -Marker (FbMarker $old 'x')
+        $plan = Get-SpoolfreePlan -Desired @($eff) -Installed @(FbMarker $old 'x') -Existing @('Bureau')
+        $plan[0].Action | Should -Be 'Replace'
+        $plan[0].MakeBeforeBreak | Should -BeTrue
+    }
+    It 'goes back to driverless (make-before-break) when the fallback is gone or vendor drivers are not allowed' {
+        $old = Get-SpoolfreeQueueTarget (ConvertTo-SpoolfreeFallbackPrinter (FallbackPrinter))
+        $eff = Get-SpoolfreeEffectivePrinter -Printer (DriverlessPrinter) -Marker (FbMarker $old 'x')
+        Test-SpoolfreeVendorFallbackPrinter $eff | Should -BeFalse
+        $plan = Get-SpoolfreePlan -Desired @($eff) -Installed @(FbMarker $old 'x') -Existing @('Bureau')
+        $plan[0].Action | Should -Be 'Replace'
+        $plan[0].MakeBeforeBreak | Should -BeTrue
+        Test-SpoolfreeVendorFallbackPrinter (Get-SpoolfreeEffectivePrinter -Printer (FallbackPrinter) -Marker (FbMarker $old 'x') -VendorAllowed $false) | Should -BeFalse
+    }
+}

@@ -15,6 +15,7 @@ import { detectIppPath, type DetectedPath } from "@/lib/ipp/detect";
 import { requireAdmin } from "@/lib/session";
 import { audit, loadPolicy } from "@/lib/service";
 import { deletePrinterWithReferences, printerSnapshot } from "@/lib/printer-lifecycle";
+import { PRINTER_NAME_RE, PRINTER_NAME_RULE } from "@/lib/printer-name";
 import { runPrinterTest, type TestResult } from "@/lib/printer-test";
 import {
   applyOuChanges,
@@ -46,7 +47,7 @@ const PrinterInput = z.object({
     .trim()
     .min(1, "Name is required")
     .max(100)
-    .regex(/^[^\\/,!]+$/, "Name cannot contain \\ / , or !"),
+    .regex(PRINTER_NAME_RE, PRINTER_NAME_RULE),
   host: z.string().trim().min(1, "Host is required").max(253).regex(hostRe, "Not a valid hostname or IP"),
   port: z.coerce.number().int().min(1).max(65535).default(631),
   /** Manual IPP path; empty = auto-detect. */

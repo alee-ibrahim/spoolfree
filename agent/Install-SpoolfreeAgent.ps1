@@ -35,14 +35,17 @@
       -ServerUrl https://spoolfree.example.org -PublicKey "BASE64KEY=" `
       -EnrollmentTokenPath \\fs01.example.org\spoolfree$\enroll.token
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Install')]
 param(
-    [Parameter(Mandatory)][ValidatePattern('^https?://')][string]$ServerUrl,
-    [Parameter(Mandatory)][string]$PublicKey,
-    [Parameter(Mandatory)][string]$EnrollmentTokenPath,
+    [Parameter(Mandatory, ParameterSetName = 'Install')][ValidatePattern('^https?://')][string]$ServerUrl,
+    [Parameter(Mandatory, ParameterSetName = 'Install')][string]$PublicKey,
+    [Parameter(Mandatory, ParameterSetName = 'Install')][string]$EnrollmentTokenPath,
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'Spoolfree'),
-    [ValidateRange(5, 240)][int]$SyncIntervalMinutes = 15,
-    [switch]$Force
+    [Parameter(ParameterSetName = 'Install')][ValidateRange(5, 240)][int]$SyncIntervalMinutes = 15,
+    [Parameter(ParameterSetName = 'Install')][switch]$Force,
+    # 0.8.1: stop the agent: removes its scheduled tasks (Spoolfree Sync, Spoolfree User Default, Spoolfree Commands and
+    # any test page task left over). Queues, drivers, files and settings stay; see docs/agent.md to remove those too.
+    [Parameter(Mandatory, ParameterSetName = 'Uninstall')][switch]$Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +56,17 @@ $launcherName = 'Start-SpoolfreeSync.ps1'
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Install-SpoolfreeAgent.ps1 must run as SYSTEM (GPO startup script) or an administrator.'
+}
+
+if ($Uninstall) {
+    $tasks = @(Get-ScheduledTask -TaskPath '\Spoolfree\' -ErrorAction SilentlyContinue)
+    foreach ($t in $tasks) {
+        Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath '\Spoolfree\' -Confirm:$false -ErrorAction Stop
+        Write-Output "Removed scheduled task \Spoolfree\$($t.TaskName)."
+    }
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Spoolfree' -Name CommandPollMinutes -ErrorAction SilentlyContinue
+    Write-Output "Spoolfree agent stopped ($($tasks.Count) task(s) removed). Its queues and files were left in place."
+    return
 }
 if ($ServerUrl -like 'http://*' -and $ServerUrl -notmatch '^http://(localhost|127\.0\.0\.1)') {
     Write-Warning 'ServerUrl is not HTTPS. Machine tokens would travel in clear text.'

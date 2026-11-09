@@ -37,8 +37,9 @@ closed printed nothing. From 0.7.7 an agent re-creates such queues that it made 
   agent tries again after 24 hours (`MigrateTried` in the queue's marker), because a failing `-IppURL` can take 90
   seconds.
 
-The fix for a printer that keeps reporting this is a vendor driver: upload its exact-model package and set it in the
-printer's Driver setting.
+The fix for a printer that keeps reporting this is a vendor driver: upload its exact-model package. From 0.8.1 that is
+enough: the package becomes the printer's per-PC vendor fallback (below), used only on the PCs where `-IppURL` fails.
+Setting it in the printer's Driver setting moves every PC to the vendor driver.
 
 Seen in 2026 with Brother lasers (HL-L5100DN, MFC-L5700DN, DCP-L3551CDW and others): `Add-Printer -IppURL` failed after
 about 90 seconds with "The specified WSD or IPP print device was not found", on Windows 10 and 11, while the same PCs
@@ -104,6 +105,26 @@ A switch between driverless and vendor creates the new queue first (make-before-
 without the printer. Under Windows Protected Print Mode vendor drivers are not allowed, and the queue stays driverless.
 
 Details: [docs/drivers.md](drivers.md#what-the-agent-does-agents-07).
+
+### Per-PC vendor fallback (0.8.1)
+
+A driverless printer can carry a **vendor fallback** package in the manifest (`fallbackDriver`, the same fields as
+`driver`): the server adds it when a package matches the printer's model exactly, or is a universal package whose INF
+lists the model. It changes nothing on PCs where the driverless queue works. On a PC where it does not:
+
+- a new queue: when `Add-Printer -IppURL` (and the recovery steps above) fail, the agent creates the queue with the
+  fallback vendor driver instead, after the same checks as a vendor-mode printer (SHA-256 and size from the signed
+  manifest, the catalog named by the INF, a Valid Authenticode signature);
+- an old-fallback queue (IPP Class Driver on a RAW port, 0.7.7): when the driverless queue cannot be created next to
+  it, the vendor queue is created next to it instead and then replaces it (make-before-break, same name);
+- the queue's marker records `VendorFallback` (the package name), so later syncs keep the vendor queue on that PC; a new
+  fallback package re-creates it make-before-break. The vendor driver's automatic two-sided mode is selected as for any
+  vendor queue (0.7.7);
+- when the manifest no longer offers a fallback (or Windows Protected Print Mode is on), the agent tries the driverless
+  queue next to it and keeps the vendor queue if that fails, retrying after 24 hours.
+
+The sync report shows it per queue (`queues[].vendorFallback`: the package name, or null) and as a `drivers[]` entry
+with status `vendor-fallback` when the queue is created. The Agents and Printers pages show it per PC.
 
 ## Which queues it touches
 
@@ -317,9 +338,17 @@ time, the model and driver mode, a reference id, an alignment box 10 mm from the
 **States** (shown with times in the dialog): *queued* → *picked up* (PC mode: the agent fetched the command) → *sent*
 (the printer accepted the job, or it is in the PC's queue) → *printing* → **printed** or **failed**. A command no
 agent ran in time ends as *expired*, and one the agent refused ends as *rejected*. In direct mode, a printer that drops
-a finished job from its list counts as printed. In PC mode, a spooler job that leaves the queue counts as printed. A
-job with a spooler error (Error, Offline, PaperOut, Blocked, ...), or one still in the queue after 120 s, fails, and
-the job status is reported.
+a finished job from its list counts as printed.
+
+In PC mode (0.8.1) the result comes from the PrintService events of that queue since the page was submitted, not from
+the job leaving the queue: `Microsoft-Windows-PrintService/Admin` event 372 (a document failed to print) gives
+**failed** with the Win32 error code, and `Microsoft-Windows-PrintService/Operational` event 307 (a document printed)
+gives **printed**. Events are matched on the queue name and the job id, never on the document name (Windows 11 records
+it as "Print Document"). Without either event the result is **unknown** (submitted, not confirmed): the agent never
+reports printed for a job it did not see printed. The agent turns the Operational log on (at least 20 MB, as print
+analytics does) before the first test print. A job with a spooler error (Error, Offline, PaperOut, Blocked, ...) or
+still in the queue after 120 s fails, and the agent removes that test job from the queue so it does not print later
+or block users' jobs; the result says so.
 
 **How the command reaches the PC.**
 
@@ -327,7 +356,19 @@ the job status is reported.
 - **Fast path:** the sync installs a *Spoolfree Commands* task (SYSTEM) that runs `Invoke-SpoolfreeSync.ps1
   -CommandsOnly` every `AGENT_COMMAND_POLL_MINUTES` (default 1; sent in the manifest as `commandPollMinutes`; `0`
   removes the task). Each run makes one small authenticated `GET /api/agent/commands` and stops there when nothing is
-  pending. It does no AD lookup and no signature work, and writes nothing to the log.
+  pending. From 0.8.1 that run reads its settings from the registry and does not load the agent module, does no AD
+  lookup (the computer's `objectGUID` is cached in `HKLM:\SOFTWARE\Spoolfree\ObjectGuid` at enrollment and by every
+  sync) and no signature work. It logs to `%ProgramData%\Spoolfree\Logs\commands.log`, not `sync.log`. A PC that
+  cannot reach the server (an off-network laptop) logs that once and then at most once an hour, and the task still
+  ends without an error.
+- The hourly sync does not run test prints itself while the *Spoolfree Commands* task exists; it leaves them to the
+  task. Without the task it runs them with no wait for the command lock and at most 60 s in total, so a stuck print
+  job can never push a sync past the launcher's 12-minute limit (which would count against a freshly updated agent).
+- One command run at a time per PC: a lock file in the install folder that only SYSTEM and Administrators can open
+  (0.8.0 used a named mutex, which a user could hold).
+- A rollback by the launcher removes the *Spoolfree Commands* task; the version rolled back to creates its own again
+  if it has one. `Install-SpoolfreeAgent.ps1 -Uninstall` removes all Spoolfree scheduled tasks (queues and files
+  stay).
 - Laptops in Modern Standby run it when they wake up.
 
 **What the agent checks** (details in [SECURITY.md](../SECURITY.md#test-prints-080)):
@@ -339,13 +380,23 @@ the job status is reported.
 - single use: ids are kept in `HKLM:\SOFTWARE\Spoolfree\Commands` for 2 days;
 - the queue is one this agent manages for that printer id.
 
-Results go to `POST /api/agent/commands/<id>`: `sent` (with the spooler job id), then `printed`, `failed` or
-`rejected`. The sync report carries `commands: { pollMinutes, ran, error }`.
+Results go to `POST /api/agent/commands/<id>`: `sent` (with the spooler job id), then `printed`, `failed`, `unknown`
+or `rejected`. The sync report carries `commands: { pollMinutes, ran, deferred, error }`.
 
-**How the PC prints the page.** `System.Drawing.Printing.PrintDocument` on the queue, mono and simplex, with the
-queue's own driver. When that fails (for example a missing GDI component), it falls back to the Windows test page:
-`rundll32 printui.dll,PrintUIEntry /k /q /n "<queue>"`. Both go through the real queue, so a driver that sends a
-format the printer does not understand prints garbage, just as it would for users.
+**How the PC prints the page.** As the **logged-on user**, not as SYSTEM (0.8.1): Print Support Apps (for example
+Brother's) run a per-user print workflow and fail jobs owned by SYSTEM, which has no user session. The agent creates a
+one-off task *\Spoolfree\Spoolfree Test Page <id>* with the interactive user as principal (the console user, else the
+owner of a Remote Desktop session's `explorer.exe`). It runs `Invoke-SpoolfreeSync.ps1 -TestPageJob <job.json>`; the
+queue name and the page text travel in that file (in `%ProgramData%\Spoolfree\TestPage\<id>`, which the user can only
+read, apart from the result file), never on a command line. The agent waits for the result, then removes the task and
+the files. With nobody logged on it does not print and reports *failed*: "can't test: no user session".
+
+The page is drawn with `System.Drawing.Printing.PrintDocument` on the queue, mono and simplex, with the queue's own
+driver. When that fails (for example a missing GDI component), it falls back to the Windows test page:
+`rundll32 printui.dll,PrintUIEntry /k /q /n "<queue>"`, and the result keeps the System.Drawing error. Both go through
+the real queue, so a driver that sends a format the printer does not understand prints garbage, just as it would for
+users. printui is only ever called with checked, quoted names: a queue, port or driver name with a double quote or a
+control character is refused.
 
 **Limits.** One test print per printer per `TEST_PRINT_MIN_INTERVAL_SECONDS` (default 60), across both modes. Only
 admins can start one, and every request and result is in the audit log (`printer.test_print`,

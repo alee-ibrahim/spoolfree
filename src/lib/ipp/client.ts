@@ -56,13 +56,18 @@ export async function getJobAttributes(uri: string, jobId: number, requested: st
   return Object.assign({}, ...res.groups.filter((g) => g.tag === Tag.jobAttributes).map((g) => g.attributes));
 }
 
-/** POSTs an IPP request and returns the decoded response; throws on HTTP or IPP errors. */
+/**
+ * POSTs an IPP request and returns the decoded response; throws on HTTP or IPP errors. timeoutMs is both the socket idle
+ * timeout and an overall deadline for the whole exchange (L8: a device that drips a byte every few seconds cannot keep
+ * the request open beyond it).
+ */
 export async function ippPost(uri: string, body: Buffer, timeoutMs: number): Promise<IppResponse> {
   const url = new URL(uri);
   const secure = url.protocol === "ipps:" || url.protocol === "https:";
   const port = url.port ? Number(url.port) : 631;
   const lib = secure ? https : http;
 
+  let deadline: NodeJS.Timeout | undefined;
   const buf = await new Promise<Buffer>((resolve, reject) => {
     const req = lib.request(
       {
@@ -96,8 +101,13 @@ export async function ippPost(uri: string, body: Buffer, timeoutMs: number): Pro
     );
     req.on("timeout", () => req.destroy(new Error(`timeout after ${timeoutMs} ms`)));
     req.on("error", reject);
+    deadline = setTimeout(() => {
+      const err = new Error(`no complete response within ${timeoutMs} ms`);
+      reject(err);
+      req.destroy(err);
+    }, timeoutMs);
     req.end(body);
-  });
+  }).finally(() => clearTimeout(deadline));
 
   const res = decodeResponse(buf);
   if (!isSuccess(res.statusCode)) {

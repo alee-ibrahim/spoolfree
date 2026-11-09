@@ -83,6 +83,28 @@ exact-model driver (the Microsoft Update Catalog has most older models) and set 
 kubectl exec -n <ns> deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs drivers decide
 ```
 
+### Per-PC vendor fallback (0.8.1)
+
+A driverless printer in **auto** mode can still fail on a few PCs: `Add-Printer -IppURL` times out or errors there,
+and before 0.8.1 such a PC kept an old queue (the IPP Class Driver on a RAW 9100 port, which prints raster as text on
+many printers) and reported *"needs a vendor driver"*. Switching the whole printer to vendor mode fixed those PCs but
+also moved every PC where driverless works.
+
+From 0.8.1, when such a printer has a matching package (step 1 or 2 above: the exact model, or a universal package
+whose INF lists the device), the manifest carries it as `fallbackDriver` next to `driverMode: "driverless"`. The agent
+uses it **only on a PC where `-IppURL` fails**:
+
+- it downloads and checks the package exactly as in vendor mode (SHA-256, size, catalog signature);
+- it creates the vendor-driver queue next to the old one and only then removes the old one (make-before-break),
+  including a legacy class-driver-on-RAW queue;
+- it selects automatic duplex as for any vendor queue (0.7.7);
+- later syncs keep that queue; PCs where driverless works stay driverless.
+
+The Printers list shows **Vendor fallback on N PCs** (hover for the PCs) and the printer's driver line names the
+fallback package. On the Agents page, the queue shows **Vendor fallback**, and the sync result says why. Printers set
+to **driverless** by hand never get a fallback: that setting means no vendor driver code on PCs. Without a matching
+package nothing changes: upload one to the Drivers page and the next sync uses it.
+
 ## Driver packages
 
 A package is a **zip of the driver's INF/CAT/files tree** for Windows x64: the INF, the catalog (`.cat`) it names, and
@@ -201,8 +223,9 @@ printer, and the next sync retries the vendor driver.
 *"vendor driver not allowed under WPP"* (Agents page) and uses the driverless queue.
 
 The agent's report lists each queue with its driver and port (`queues`) and the vendor driver results (`drivers`:
-`installed`, `present`, `wpp-blocked`, `failed`, `fallback`). On the Agents page, vendor queues show
-"<queue>: <driver> on <port>".
+`installed`, `present`, `wpp-blocked`, `failed`, `fallback`, and from 0.8.1 `vendor-fallback`). Each queue also
+says whether it is on the per-PC vendor fallback (`vendorFallback`: the package name, 0.8.1). On the Agents page,
+vendor queues show "<queue>: <driver> on <port>", with a **Vendor fallback** badge where it applies.
 
 ## Settings
 

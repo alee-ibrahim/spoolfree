@@ -274,3 +274,53 @@ describe("manifest", () => {
     expect(m.printers[1].driver).toBeUndefined();
   });
 });
+
+describe("per-PC vendor fallback (0.8.1)", () => {
+  const base = { id: "p1", name: "Bureau", host: "192.0.2.12", port: 631, ippPath: "/ipp/print", useTls: false, model: null, location: null, revision: 1 };
+  const build = (driver: ReturnType<typeof decideDriver>) =>
+    buildManifest({
+      resolution: { printers: [{ printerId: "p1", source: [] } as never], defaultPrinterId: null } as never,
+      printers: new Map([["p1", { ...base, driver }]]),
+      computer: { objectGuid: "g", dn: "CN=PC", name: "PC" },
+      now: new Date("2026-11-08T00:00:00Z"),
+      ttlHours: 1,
+    }).printers[0];
+
+  it("a driverless auto printer carries the exact package as fallbackDriver; PCs still get driverless", () => {
+    const d = decideDriver(printer({ deviceId: DEVICE_ID }), [universalPkg, exactPkg]);
+    expect(d).toMatchObject({ mode: "driverless", source: "auto", wantVendor: false });
+    expect(d.fallback).toMatchObject({ match: "exact", driverName: "Brother HL-3150CDN series" });
+    const m = build(d);
+    expect(m.driverMode).toBe("driverless");
+    expect(m.driver).toBeUndefined();
+    expect(m.fallbackDriver).toEqual({
+      mode: "vendor",
+      packageId: exactPkg.id,
+      packageName: "Brother HL-3150CDN",
+      sha256: "a".repeat(64),
+      size: 100,
+      url: `/api/agent/drivers/${exactPkg.id}`,
+      driverName: "Brother HL-3150CDN series",
+      inf: "BROCH12A.INF",
+      catalog: "BROCH12A.CAT",
+      protocol: "raw9100",
+      lprQueue: null,
+    });
+  });
+
+  it("uses a universal package only when its INF lists the device, never by brand alone", () => {
+    const listed = decideDriver(printer({ deviceId: "MFG:Brother;MDL:HL-L6415DW series;", lastTest: { ...printer().lastTest, color: false } }), [universalPkg]);
+    expect(listed.fallback).toMatchObject({ match: "universal", driverName: "Brother Mono Universal Printer (PCL)" });
+    const unlisted = decideDriver(printer({ deviceId: "MFG:Brother;MDL:HL-2250DN series;" }), [universalPkg, hpUpd]);
+    expect(unlisted.fallback).toBeNull();
+    expect(build(unlisted).fallbackDriver).toBeUndefined();
+  });
+
+  it("has no fallback for vendor printers, manual driverless printers or without a matching package", () => {
+    expect(decideDriver(printer({ deviceId: DEVICE_ID, lastTest: { ippVersions: ["1.1"] } }), [exactPkg]).fallback).toBeUndefined();
+    const manual = decideDriver(printer({ driverMode: "driverless", deviceId: DEVICE_ID }), [exactPkg]);
+    expect(manual.fallback).toBeUndefined();
+    expect(build(manual).fallbackDriver).toBeUndefined();
+    expect(decideDriver(printer({ deviceId: DEVICE_ID }), []).fallback).toBeNull();
+  });
+});

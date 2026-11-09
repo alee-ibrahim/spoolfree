@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.8.0'
+$script:AgentVersion = '0.8.1'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -982,7 +982,8 @@ function Get-SpoolfreeInstalled {
         $sides = if ($p.PSObject.Properties['Sides']) { [string]$p.Sides } else { '' }
         $auto = if ($p.PSObject.Properties['AutoDuplex']) { [string]$p.AutoDuplex } else { '' }
         $tried = if ($p.PSObject.Properties['MigrateTried']) { [string]$p.MigrateTried } else { '' }
-        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName; Sides = $sides; AutoDuplex = $auto; MigrateTried = $tried }
+        $vf = if ($p.PSObject.Properties['VendorFallback']) { [string]$p.VendorFallback } else { '' }
+        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName; Sides = $sides; AutoDuplex = $auto; MigrateTried = $tried; VendorFallback = $vf }
     }
     return @($list)
 }
@@ -1009,12 +1010,12 @@ function Set-SpoolfreeMarker {
     New-ItemProperty -Path $key -Name Method -Value $Method -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name PortName -Value $PortName -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Server -Value $ServerId -PropertyType String -Force | Out-Null
-    # 0.7.7: a (re)created queue starts without these.
-    Remove-ItemProperty -Path $key -Name AutoDuplex, MigrateTried -ErrorAction SilentlyContinue
+    # 0.7.7: a (re)created queue starts without these (0.8.1: and without VendorFallback; the caller sets it).
+    Remove-ItemProperty -Path $key -Name AutoDuplex, MigrateTried, VendorFallback -ErrorAction SilentlyContinue
 }
 
 function Set-SpoolfreeMarkerValue {
-    <# 0.7.7: one string value on an existing marker (AutoDuplex, MigrateTried). #>
+    <# 0.7.7: one string value on an existing marker (AutoDuplex, MigrateTried, VendorFallback). #>
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Property, [AllowEmptyString()][string]$Value)
     $key = Get-SpoolfreeMarkerKey -Name $Name
     if (Test-Path $key) { New-ItemProperty -Path $key -Name $Property -Value $Value -PropertyType String -Force | Out-Null }
@@ -1096,15 +1097,15 @@ function Test-SpoolfreeZipEntryPath {
     return $true
 }
 
-function Get-SpoolfreeVendorDriver {
+function ConvertTo-SpoolfreeVendorDriver {
     <#
     .SYNOPSIS
-        Pure: the manifest printer's vendor driver as an object (PackageId, PackageName, Sha256, Size, Url, DriverName,
-        Inf, Catalog, Protocol, LprQueue), or $null when the printer is driverless or the entry is not valid.
+        Pure: a manifest driver entry ({ packageId, packageName, sha256, size, url, driverName, inf, catalog, protocol,
+        lprQueue }) as an object (PackageId, PackageName, Sha256, Size, Url, DriverName, Inf, Catalog, Protocol,
+        LprQueue), or $null when the entry is missing or not valid.
     #>
-    param($Printer)
-    if ([string](Get-SpoolfreeProperty $Printer 'driverMode') -ne 'vendor') { return $null }
-    $d = Get-SpoolfreeProperty $Printer 'driver'
+    param($Driver)
+    $d = $Driver
     if ($null -eq $d) { return $null }
     $sha = ([string](Get-SpoolfreeProperty $d 'sha256')).ToLowerInvariant()
     $name = [string](Get-SpoolfreeProperty $d 'driverName')
@@ -1132,6 +1133,68 @@ function Get-SpoolfreeVendorDriver {
         Protocol    = $proto
         LprQueue    = $lpr
     }
+}
+
+function Get-SpoolfreeVendorDriver {
+    <#
+    .SYNOPSIS
+        Pure: the manifest printer's vendor driver as an object (see ConvertTo-SpoolfreeVendorDriver), or $null when
+        the printer is driverless or the entry is not valid.
+    #>
+    param($Printer)
+    if ([string](Get-SpoolfreeProperty $Printer 'driverMode') -ne 'vendor') { return $null }
+    return (ConvertTo-SpoolfreeVendorDriver (Get-SpoolfreeProperty $Printer 'driver'))
+}
+
+# ---------------------------------------------------------------------------
+# Per-PC vendor fallback (0.8.1). A driverless printer may carry fallbackDriver (same shape as driver): the package the
+# server matched to the printer's model (exact, or a universal package whose INF lists it). A PC where Add-Printer
+# -IppURL fails for the printer creates a queue with that vendor driver instead, on that PC only; its marker records
+# VendorFallback (the package name), so later syncs keep that queue. PCs where driverless works stay driverless.
+# ---------------------------------------------------------------------------
+
+function Get-SpoolfreeFallbackDriver {
+    <# Pure: the vendor fallback driver of a driverless manifest printer (fallbackDriver), or $null. #>
+    param($Printer)
+    if ([string](Get-SpoolfreeProperty $Printer 'driverMode') -eq 'vendor') { return $null }
+    return (ConvertTo-SpoolfreeVendorDriver (Get-SpoolfreeProperty $Printer 'fallbackDriver'))
+}
+
+function ConvertTo-SpoolfreeFallbackPrinter {
+    <#
+    .SYNOPSIS
+        Pure: a copy of a driverless manifest printer that uses its fallbackDriver as the vendor driver (driverMode
+        "vendor", driver = fallbackDriver, vendorFallback = $true), so the vendor code paths (target, queue, port)
+        apply on this PC. $null when the printer has no valid fallbackDriver.
+    #>
+    param($Printer)
+    if (-not (Get-SpoolfreeFallbackDriver $Printer)) { return $null }
+    $c = [pscustomobject]@{}
+    foreach ($p in $Printer.PSObject.Properties) { $c | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force }
+    $c | Add-Member -NotePropertyName driverMode -NotePropertyValue 'vendor' -Force
+    $c | Add-Member -NotePropertyName driver -NotePropertyValue (Get-SpoolfreeProperty $Printer 'fallbackDriver') -Force
+    $c | Add-Member -NotePropertyName vendorFallback -NotePropertyValue $true -Force
+    return $c
+}
+
+function Get-SpoolfreeEffectivePrinter {
+    <#
+    .SYNOPSIS
+        Pure: the printer as this PC should have it. A driverless printer whose queue here is a vendor fallback (marker
+        VendorFallback) keeps the vendor driver while the manifest still offers a fallbackDriver and vendor drivers are
+        allowed (a new package re-creates the queue, make-before-break). Everything else is the manifest printer.
+    #>
+    param($Printer, $Marker, [bool]$VendorAllowed = $true)
+    if (-not $VendorAllowed -or $null -eq $Marker -or -not [string](Get-SpoolfreeProperty $Marker 'VendorFallback')) { return $Printer }
+    $fp = ConvertTo-SpoolfreeFallbackPrinter $Printer
+    if ($fp) { return $fp }
+    return $Printer
+}
+
+function Test-SpoolfreeVendorFallbackPrinter {
+    <# Pure: is this (effective) printer a vendor fallback copy? #>
+    param($Printer)
+    return [bool](Get-SpoolfreeProperty $Printer 'vendorFallback')
 }
 
 function Get-SpoolfreeQueueTarget {
@@ -1334,13 +1397,54 @@ function New-SpoolfreeVendorQueue {
         }
         'ipp' {
             # Internet Port (IPP over HTTP) with the vendor driver: printui creates the port for an http(s) URL.
-            & rundll32.exe printui.dll, PrintUIEntry /if /b "$QueueName" /r "$port" /m "$($Vendor.DriverName)" /u /Z /q
+            # 0.8.1: the names go through Invoke-SpoolfreePrintUi, which refuses quotes and control characters.
+            Invoke-SpoolfreePrintUi -Arguments @('/if', '/b', $QueueName, '/r', $port, '/m', $Vendor.DriverName, '/u', '/Z', '/q') | Out-Null
             for ($i = 0; $i -lt 20 -and -not (Get-SpoolfreeQueueByName -Name $QueueName); $i++) { Start-Sleep -Milliseconds 500 }
             if (-not (Get-SpoolfreeQueueByName -Name $QueueName)) { throw "Could not create the IPP (Internet Port) queue $QueueName for $port." }
             Set-Printer -Name $QueueName -Comment $Comment -Location $Location -ErrorAction Stop
         }
     }
     return $port
+}
+
+function Test-SpoolfreeSafeName {
+    <# Pure: $true when a queue, port or driver name has no double quote and no control character (0.8.1). #>
+    param([AllowNull()][AllowEmptyString()][string]$Name)
+    if (-not $Name) { return $false }
+    return -not ($Name -match '["\x00-\x1f\x7f]')
+}
+
+function ConvertTo-SpoolfreePrintUiArguments {
+    <#
+    .SYNOPSIS
+        Pure: the rundll32 command line for printui.dll,PrintUIEntry with these arguments. Switches (/x) go as they
+        are; every other argument is quoted. rundll32 splits the command line itself, so an argument with a double
+        quote or a control character could add switches (L1, 0.8.1): such a name is refused (throws), never escaped.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments)
+    $parts = New-Object System.Collections.Generic.List[string]
+    $parts.Add('printui.dll,PrintUIEntry')
+    foreach ($a in $Arguments) {
+        if ($a -match '^/[A-Za-z0-9@]{1,3}$') { $parts.Add($a); continue }
+        if (-not (Test-SpoolfreeSafeName $a)) { throw "Refusing to pass '$($a -replace '[\x00-\x1f\x7f]', '?')' to printui: names with a double quote or a control character are not allowed." }
+        $parts.Add('"' + $a + '"')
+    }
+    return ($parts -join ' ')
+}
+
+function Invoke-SpoolfreePrintUi {
+    <# Runs rundll32 printui.dll,PrintUIEntry with checked, quoted arguments (no shell); returns the exit code. #>
+    param([Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSeconds = 120)
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = Join-Path $env:SystemRoot 'System32\rundll32.exe'
+    $psi.Arguments = ConvertTo-SpoolfreePrintUiArguments -Arguments $Arguments
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $p = [Diagnostics.Process]::Start($psi)
+    try {
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { try { $p.Kill() } catch { }; throw "printui did not finish within $TimeoutSeconds s." }
+        return $p.ExitCode
+    } finally { $p.Dispose() }
 }
 
 # ---------------------------------------------------------------------------
@@ -2765,11 +2869,15 @@ function Invoke-SpoolfreeAnalytics {
 # "spoolfree-command-v1`n" + the JSON payload, so a command can never pass as a manifest or an agent bundle. A command
 # runs only when its signature, computer, expiry and (single use) id check out, and only through a queue this agent
 # manages for the command's printer. It arrives in the manifest or from the cheap /api/agent/commands poll.
+# 0.8.1: the page is printed as the logged-on user (Print Support Apps drop jobs owned by SYSTEM), the result comes
+# from PrintService events (never "printed" for a job nobody saw), a stuck test job is removed from the queue, and
+# runs are serialised by a lock file only SYSTEM and Administrators can open.
 # ---------------------------------------------------------------------------
 
 $script:CommandRegistry = 'HKLM:\SOFTWARE\Spoolfree\Commands'
 $script:CommandPrefix = "spoolfree-command-v1`n"
 $script:CommandTaskName = 'Spoolfree Commands'
+$script:TestPageTaskPrefix = 'Spoolfree Test Page '
 
 function ConvertFrom-SpoolfreeCommand {
     <#
@@ -2862,18 +2970,100 @@ function Get-SpoolfreeJobOutcome {
     return 'pending'
 }
 
+function ConvertFrom-SpoolfreeJobEvent {
+    <#
+    .SYNOPSIS
+        Pure (0.8.1): a PrintService job event as XML (+ its rendered message) -> EventId, JobId (Param1), Params (all
+        ParamN values, in order), ErrorCode (372: "Win32 error code ...: <code>" from the message, else the last
+        numeric parameter) and Time. $null for anything that is not a parseable event 307 or 372.
+        Document names are never used: Windows 11 records them as "Print Document".
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Xml, [AllowNull()][AllowEmptyString()][string]$Message)
+    if (-not $Xml) { return $null }
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.XmlResolver = $null
+    try { $doc.LoadXml($Xml) } catch { return $null }
+    $sys = $doc.SelectSingleNode("/*[local-name()='Event']/*[local-name()='System']")
+    if ($null -eq $sys) { return $null }
+    $idNode = $sys.SelectSingleNode("*[local-name()='EventID']")
+    $eventId = 0
+    if ($null -eq $idNode -or -not [int]::TryParse($idNode.InnerText.Trim(), [ref]$eventId) -or @(307, 372) -notcontains $eventId) { return $null }
+    $time = $null
+    $tc = $sys.SelectSingleNode("*[local-name()='TimeCreated']/@SystemTime")
+    if ($null -ne $tc -and $tc.Value) {
+        $dt = [datetime]::MinValue
+        $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+        if ([datetime]::TryParse($tc.Value, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dt)) { $time = $dt }
+    }
+    $data = $doc.SelectSingleNode("/*[local-name()='Event']/*[local-name()='UserData']/*")
+    $params = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $data) {
+        for ($i = 1; $i -le 20; $i++) {
+            $n = $data.SelectSingleNode("*[local-name()='Param$i']")
+            if ($null -eq $n) { break }
+            $params.Add($n.InnerText.Trim())
+        }
+    }
+    $jobId = $null
+    $j = 0
+    if ($params.Count -and [int]::TryParse($params[0], [ref]$j)) { $jobId = $j }
+    $code = $null
+    if ($eventId -eq 372) {
+        $m = [regex]::Match([string]$Message, '(?i)error code[^:]*:\s*(0x[0-9a-f]+|\d+)')
+        if ($m.Success) { $code = $m.Groups[1].Value }
+        else {
+            $num = @($params | Where-Object { $_ -match '^(0x[0-9a-fA-F]+|\d+)$' })
+            if ($params.Count -gt 1 -and $params[$params.Count - 1] -match '^(0x[0-9a-fA-F]+|\d+)$') { $code = $params[$params.Count - 1] }
+            elseif ($num.Count -gt 1) { $code = $num[$num.Count - 1] }
+        }
+    }
+    return [pscustomobject]@{ EventId = $eventId; JobId = $jobId; Params = $params.ToArray(); ErrorCode = $code; Time = $time }
+}
+
+function Get-SpoolfreeJobEvents {
+    <#
+    .SYNOPSIS
+        PrintService events since -Since: Admin 372 (a document failed to print) and Operational 307 (a document
+        printed), parsed with ConvertFrom-SpoolfreeJobEvent. A log that is off or empty gives nothing; never throws.
+    #>
+    param([Parameter(Mandatory)][datetime]$Since)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($f in @(@{ LogName = 'Microsoft-Windows-PrintService/Admin'; Id = 372 }, @{ LogName = 'Microsoft-Windows-PrintService/Operational'; Id = 307 })) {
+        try {
+            $f['StartTime'] = $Since
+            foreach ($e in @(Get-WinEvent -FilterHashtable $f -MaxEvents 200 -ErrorAction Stop)) {
+                $msg = $null
+                try { $msg = $e.Message } catch { }
+                $r = ConvertFrom-SpoolfreeJobEvent -Xml $e.ToXml() -Message $msg
+                if ($r) { $out.Add($r) }
+            }
+        } catch { }
+    }
+    return $out.ToArray()
+}
+
 function Wait-SpoolfreePrintJob {
     <#
     .SYNOPSIS
-        Follows the test page in the queue (Get-PrintJob, by document name) until it is printed, fails or the timeout
-        passes. A job that was seen and then left the queue counts as printed (the spooler removes finished jobs).
-        Calls -OnSent once with the spooler job when it is first seen.
+        Follows the test print in a queue until PrintService says it printed or failed, or the timeout passes (0.8.1).
+        - Events since -Since for this queue (a parameter equal to the queue name; the job id too once the job was
+          seen): Admin 372 -> failed (with the Win32 error code), Operational 307 -> printed.
+        - Jobs in the queue that were not there before (-KnownJobIds): the first one is the test job; -OnSent is
+          called once with it; a spooler error status -> failed.
+        - Without an event the result is 'unknown' (submitted, not confirmed): never 'printed' for a job that was
+          not seen printing. Document names are not used (Windows 11 records them as "Print Document").
+        - On failure or timeout the test job is removed from the queue (-RemoveJob), so it does not print later.
     #>
     param(
         [Parameter(Mandatory)][string]$Queue,
-        [Parameter(Mandatory)][string[]]$DocumentNames,
+        [datetime]$Since = (Get-Date),
+        [AllowEmptyCollection()][int[]]$KnownJobIds = @(),
         [int]$TimeoutSeconds = 120,
+        # Polls without a job and without an event before giving up with 'unknown'.
+        [int]$QuietPolls = 5,
         [scriptblock]$GetJobs = { param($q) @(Get-PrintJob -PrinterName $q -ErrorAction Stop) },
+        [scriptblock]$GetEvents = { param($since) Get-SpoolfreeJobEvents -Since $since },
+        [scriptblock]$RemoveJob = { param($q, $id) Remove-PrintJob -PrinterName $q -ID $id -ErrorAction Stop },
         [scriptblock]$Sleep = { Start-Sleep -Seconds 2 },
         [scriptblock]$OnSent = { param($job) }
     )
@@ -2881,22 +3071,52 @@ function Wait-SpoolfreePrintJob {
     $seen = $null
     $status = $null
     $polls = 0
+    $gonePolls = 0
+    $remove = {
+        param($why)
+        if (-not $seen) { return $why }
+        try { & $RemoveJob $Queue ([int]$seen.Id); return "$why; the test job was removed from the queue" }
+        catch { return "$why; removing the test job from the queue failed: $($_.Exception.Message)" }
+    }
+    $result = { param($state, $msg) [pscustomobject]@{ State = $state; JobId = $(if ($seen) { [int]$seen.Id } else { $null }); JobStatus = $status; Message = $msg } }
     while ($true) {
         $polls++
-        $job = @(& $GetJobs $Queue | Where-Object { $DocumentNames -contains [string]$_.DocumentName }) | Sort-Object { [int]$_.Id } -Descending | Select-Object -First 1
+        $job = @(@(& $GetJobs $Queue) | Where-Object { $_ -and $KnownJobIds -notcontains [int]$_.Id }) | Sort-Object { [int]$_.Id } | Select-Object -First 1
         if ($job) {
             $status = [string]$job.JobStatus
             if (-not $seen) { $seen = $job; & $OnSent $job }
-            $o = Get-SpoolfreeJobOutcome $status
-            if ($o -ne 'pending') { return [pscustomobject]@{ State = $o; JobId = [int]$job.Id; JobStatus = $status; Message = "spooler job $($job.Id): $status" } }
-        } elseif ($seen) {
-            return [pscustomobject]@{ State = 'printed'; JobId = [int]$seen.Id; JobStatus = 'Printed'; Message = "spooler job $($seen.Id) left the queue (sent to the printer)" }
-        } elseif ($polls -ge 3) {
-            return [pscustomobject]@{ State = 'printed'; JobId = $null; JobStatus = 'Printed'; Message = 'the job left the queue before it could be followed (sent to the printer)' }
+            $gonePolls = 0
+        } elseif ($seen) { $gonePolls++ }
+
+        $events = @(@(& $GetEvents $Since) | Where-Object {
+                $_ -and (@($_.Params) -contains $Queue) -and (-not $seen -or $null -eq $_.JobId -or [int]$_.JobId -eq [int]$seen.Id)
+            })
+        $fail = @($events | Where-Object { $_.EventId -eq 372 }) | Select-Object -First 1
+        if ($fail) {
+            if (-not $seen -and $null -ne $fail.JobId) { $seen = [pscustomobject]@{ Id = [int]$fail.JobId; JobStatus = 'Error' } }
+            $code = if ($fail.ErrorCode) { " (Win32 error code $($fail.ErrorCode))" } else { '' }
+            $why = "Windows could not print the job$(if ($null -ne $fail.JobId) { " $($fail.JobId)" }) (PrintService event 372)$code"
+            if ($job) { $why = & $remove $why }
+            return (& $result 'failed' $why)
+        }
+        $ok = @($events | Where-Object { $_.EventId -eq 307 }) | Select-Object -First 1
+        if ($ok) {
+            if (-not $seen -and $null -ne $ok.JobId) { $seen = [pscustomobject]@{ Id = [int]$ok.JobId; JobStatus = 'Printed' } }
+            $status = 'Printed'
+            return (& $result 'printed' "job$(if ($null -ne $ok.JobId) { " $($ok.JobId)" }) printed: Windows sent it to the printer (PrintService event 307)")
+        }
+        if ($job -and (Get-SpoolfreeJobOutcome $status) -eq 'failed') {
+            return (& $result 'failed' (& $remove "spooler job $($job.Id): $status"))
+        }
+        if ($seen -and $gonePolls -ge 3) {
+            return (& $result 'unknown' "spooler job $($seen.Id) left the queue, but Windows logged no printed or failed event for it (is the PrintService Operational log on?)")
+        }
+        if (-not $seen -and $polls -ge $QuietPolls) {
+            return (& $result 'unknown' 'no job showed up in the queue and Windows logged no printed or failed event: the page may not have been sent')
         }
         if ((Get-Date) -ge $deadline) {
-            $jid = if ($seen) { [int]$seen.Id } else { $null }
-            return [pscustomobject]@{ State = 'failed'; JobId = $jid; JobStatus = $status; Message = "still in the queue after $TimeoutSeconds s ($status): check the printer and the queue on this PC" }
+            $why = "still in the queue after $TimeoutSeconds s ($status): check the printer and the queue on this PC"
+            return (& $result 'failed' (& $remove $why))
         }
         & $Sleep
     }
@@ -2904,13 +3124,13 @@ function Wait-SpoolfreePrintJob {
 
 function Get-SpoolfreeTestPageLines {
     <# Pure: the text of the PC test page (below its title). #>
-    param([Parameter(Mandatory)]$Command, [string]$Computer, [string]$Queue, [string]$Driver, [string]$Port, [datetime]$Now = (Get-Date))
+    param([Parameter(Mandatory)]$Command, [string]$Computer, [string]$Queue, [string]$Driver, [string]$Port, [string]$User, [datetime]$Now = (Get-Date))
     return @(
         "Printer:    $Queue",
         "Computer:   $Computer",
         "Driver:     $Driver",
         "Port:       $Port",
-        'Sent:       from this PC through its Spoolfree queue',
+        "Sent:       from this PC through its Spoolfree queue$(if ($User) { " as $User" })",
         "Time:       $($Now.ToString('yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture))",
         "Reference:  $($Command.id)",
         '',
@@ -2925,7 +3145,8 @@ function Send-SpoolfreeTestPage {
     .SYNOPSIS
         Prints the test page through the queue with its own driver (System.Drawing PrintDocument: mono, one-sided,
         an alignment box 10 mm from the paper edge). Falls back to the Windows test page (printui /k) when
-        System.Drawing cannot print. Returns the document names to look for in the queue.
+        System.Drawing cannot print. Returns Route ('page' or 'windows-test-page') and Warning (why System.Drawing
+        failed, kept for the result even when printui submits the Windows test page).
     #>
     param([Parameter(Mandatory)][string]$Queue, [Parameter(Mandatory)][string]$DocumentName, [Parameter(Mandatory)][AllowEmptyString()][string[]]$Lines, [string]$PrintToFile)
     try {
@@ -2966,22 +3187,222 @@ function Send-SpoolfreeTestPage {
         $doc.add_PrintPage($handler)
         $doc.Print()
         $doc.Dispose()
-        return @($DocumentName)
+        return [pscustomobject]@{ Route = 'page'; Warning = $null }
     } catch {
         $why = $_.Exception.Message
         if ($PrintToFile) { throw }
-        # The Windows test page, through the same queue and driver.
-        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\rundll32.exe') -ArgumentList "printui.dll,PrintUIEntry /k /q /n `"$Queue`"" -Wait -PassThru -WindowStyle Hidden
-        if ($p.ExitCode -ne 0) { throw "printing failed ($why) and printui /k exited with $($p.ExitCode)" }
-        return @('Test Page', $DocumentName)
+        # The Windows test page, through the same queue and driver. The queue name is checked and quoted (L1).
+        try { $code = Invoke-SpoolfreePrintUi -Arguments @('/k', '/q', '/n', $Queue) }
+        catch { throw "printing failed ($why) and the Windows test page could not be sent: $($_.Exception.Message)" }
+        if ($code -ne 0) { throw "printing failed ($why) and printui /k exited with $code" }
+        return [pscustomobject]@{ Route = 'windows-test-page'; Warning = "System.Drawing could not print ($why); the Windows test page was sent instead" }
     }
+}
+
+function Get-SpoolfreeInteractiveUser {
+    <#
+    .SYNOPSIS
+        The logged-on interactive user (DOMAIN\name): the console user (Win32_ComputerSystem.UserName), else the owner
+        of an explorer.exe (a Remote Desktop session). $null when nobody is logged on.
+    #>
+    param(
+        [scriptblock]$GetConsoleUser = { [string](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName },
+        [scriptblock]$GetShellOwners = {
+            @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | ForEach-Object {
+                    $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue
+                    if ($o -and $o.ReturnValue -eq 0 -and $o.User) { "$($o.Domain)\$($o.User)" }
+                })
+        }
+    )
+    $u = $null
+    try { $u = [string](& $GetConsoleUser) } catch { }
+    if ($u) { return $u }
+    try { $u = @(& $GetShellOwners | Where-Object { $_ }) | Select-Object -First 1 } catch { }
+    if ($u) { return [string]$u }
+    return $null
+}
+
+function Invoke-SpoolfreeTestPageJob {
+    <#
+    .SYNOPSIS
+        Runs in the user's session (the one-off "Spoolfree Test Page" task, Invoke-SpoolfreeSync.ps1 -TestPageJob):
+        reads queue, document name and lines from the job file, prints the page (Send-SpoolfreeTestPage) and writes
+        { ok, route, warning, error } to the result file next to it. Never throws.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [scriptblock]$Print = { param($q, $d, $l) Send-SpoolfreeTestPage -Queue $q -DocumentName $d -Lines $l })
+    $resultPath = Join-Path (Split-Path -Parent $Path) 'result.json'
+    $r = [ordered]@{ ok = $false; route = $null; warning = $null; error = $null; user = "$env:USERDOMAIN\$env:USERNAME" }
+    try {
+        $job = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sent = & $Print ([string]$job.queue) ([string]$job.documentName) ([string[]]@($job.lines | ForEach-Object { [string]$_ }))
+        $r.ok = $true
+        $r.route = [string](Get-SpoolfreeProperty $sent 'Route')
+        $r.warning = Get-SpoolfreeProperty $sent 'Warning'
+    } catch {
+        $r.error = $_.Exception.Message
+    }
+    try { [IO.File]::WriteAllText($resultPath, ($r | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false))) } catch { }
+}
+
+function New-SpoolfreeTestPageWorkDir {
+    <#
+    .SYNOPSIS
+        A job directory for one test page: SYSTEM and Administrators full control, the user read only, and a
+        result.json the user may write. Nothing else is shared with the user.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$User)
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+        $id = New-Object System.Security.Principal.SecurityIdentifier $sid
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    $userId = New-Object System.Security.Principal.NTAccount $User
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($userId, 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+    $result = Join-Path $Path 'result.json'
+    [IO.File]::WriteAllText($result, '')
+    $facl = Get-Acl -LiteralPath $result
+    $facl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($userId, 'Modify', 'Allow')))
+    Set-Acl -LiteralPath $result -AclObject $facl
+    return $Path
+}
+
+function Send-SpoolfreeTestPageAsUser {
+    <#
+    .SYNOPSIS
+        0.8.1: prints the test page as the logged-on interactive user, not as SYSTEM. Print Support Apps (for example
+        Brother's) run a per-user print workflow and fail jobs owned by SYSTEM, which has no user session. A one-off
+        task "\Spoolfree\Spoolfree Test Page <id>" with the user's interactive principal runs
+        Invoke-SpoolfreeSync.ps1 -TestPageJob <job.json>; the queue name and the page text travel in that file,
+        never on a command line. Waits for the result (at most -TimeoutSeconds), then removes the task and the files.
+        Throws "can't test: no user session ..." when nobody is logged on (nothing is printed), and on failure.
+        Returns Route, Warning and User.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Queue,
+        [Parameter(Mandatory)][string]$DocumentName,
+        [Parameter(Mandatory)][AllowEmptyString()][string[]]$Lines,
+        [int]$TimeoutSeconds = 90,
+        [string]$User,
+        [string]$WorkRoot = (Join-Path $env:ProgramData 'Spoolfree\TestPage'),
+        [string]$SyncScript = (Join-Path $PSScriptRoot 'Invoke-SpoolfreeSync.ps1'),
+        [scriptblock]$GetUser = { Get-SpoolfreeInteractiveUser },
+        [scriptblock]$NewWorkDir = { param($path, $user) New-SpoolfreeTestPageWorkDir -Path $path -User $user },
+        [scriptblock]$RegisterTask = {
+            param($name, $user, $script, $jobFile)
+            $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            # Only fixed paths on this command line (the install folder and a GUID-named job file): no names.
+            $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -TestPageJob `"$jobFile`""
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
+            Register-ScheduledTask -TaskName $name -TaskPath '\Spoolfree\' -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+            Start-ScheduledTask -TaskName $name -TaskPath '\Spoolfree\' -ErrorAction Stop
+        },
+        [scriptblock]$RemoveTask = { param($name) Unregister-ScheduledTask -TaskName $name -TaskPath '\Spoolfree\' -Confirm:$false -ErrorAction SilentlyContinue },
+        [scriptblock]$Sleep = { Start-Sleep -Milliseconds 500 }
+    )
+    if (-not $User) { $User = [string](& $GetUser) }
+    if (-not $User) { throw "can't test: no user session on this PC (nobody is logged on; the test page is printed as the logged-on user)" }
+    $id = [guid]::NewGuid().ToString('N')
+    $dir = Join-Path $WorkRoot $id
+    $task = "$($script:TestPageTaskPrefix)$id"
+    $registered = $false
+    try {
+        if (-not (Test-Path -LiteralPath $WorkRoot)) { New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null }
+        & $NewWorkDir $dir $User | Out-Null
+        $jobFile = Join-Path $dir 'job.json'
+        $resultFile = Join-Path $dir 'result.json'
+        $json = [ordered]@{ queue = $Queue; documentName = $DocumentName; lines = @($Lines) } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($jobFile, $json, (New-Object Text.UTF8Encoding($false)))
+        $registered = $true
+        & $RegisterTask $task $User $SyncScript $jobFile
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        $r = $null
+        while ((Get-Date) -lt $deadline) {
+            $text = ''
+            try { $text = [IO.File]::ReadAllText($resultFile) } catch { }
+            if ($text.Trim()) { try { $r = $text | ConvertFrom-Json; break } catch { } }
+            & $Sleep
+        }
+        if (-not $r) { throw "the test page task in $User's session did not finish within $TimeoutSeconds s" }
+        if (-not [bool](Get-SpoolfreeProperty $r 'ok')) { throw "printing as ${User} failed: $(Get-SpoolfreeProperty $r 'error')" }
+        return [pscustomobject]@{ Route = [string](Get-SpoolfreeProperty $r 'route'); Warning = (Get-SpoolfreeProperty $r 'warning'); User = $User }
+    } finally {
+        if ($registered) { try { & $RemoveTask $task } catch { } }
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-SpoolfreeTestPageTasks {
+    <#
+    .SYNOPSIS
+        Removes one-off test page tasks left by an interrupted run: registered more than 15 minutes ago (a running test
+        page is never touched), or with no readable registration date.
+    #>
+    param(
+        [scriptblock]$GetTasks = { @(Get-ScheduledTask -TaskPath '\Spoolfree\' -ErrorAction SilentlyContinue) },
+        [scriptblock]$Unregister = { param($name) Unregister-ScheduledTask -TaskName $name -TaskPath '\Spoolfree\' -Confirm:$false -ErrorAction SilentlyContinue },
+        [datetime]$Now = (Get-Date)
+    )
+    foreach ($t in @(& $GetTasks | Where-Object { $_ -and ([string]$_.TaskName).StartsWith($script:TestPageTaskPrefix) })) {
+        $at = [datetime]::MinValue
+        $date = [string](Get-SpoolfreeProperty $t 'Date')
+        if ($date -and [datetime]::TryParse($date, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$at) -and ($Now - $at).TotalMinutes -lt 15) { continue }
+        & $Unregister ([string]$t.TaskName)
+    }
+}
+
+function Enter-SpoolfreeCommandLock {
+    <#
+    .SYNOPSIS
+        0.8.1 (L4): one command run at a time on the machine. Opens a lock file exclusively (FileShare None) and
+        returns the open stream; close it to release (the system also releases it when the process ends). Returns
+        $null when another run holds it after -WaitSeconds (0 = do not wait) or the file cannot be opened. The file
+        lives in the install folder with an ACL of SYSTEM and Administrators only, so a user cannot open (squat) it,
+        unlike the 0.8.0 named mutex.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [int]$WaitSeconds = 0, [switch]$Secure, [scriptblock]$Sleep = { Start-Sleep -Milliseconds 500 })
+    $deadline = (Get-Date).AddSeconds([Math]::Max(0, $WaitSeconds))
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $new = -not (Test-Path -LiteralPath $Path)
+    while ($true) {
+        try {
+            $fs = New-Object IO.FileStream($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            if ($new -and $Secure) {
+                try {
+                    $acl = New-Object System.Security.AccessControl.FileSecurity
+                    $acl.SetAccessRuleProtection($true, $false)
+                    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+                        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), 'FullControl', 'Allow')))
+                    }
+                    $fs.SetAccessControl($acl)
+                } catch { }
+            }
+            return $fs
+        } catch {
+            if ((Get-Date) -ge $deadline) { return $null }
+            & $Sleep
+        }
+    }
+}
+
+function Get-SpoolfreeCommandLockPath {
+    <# The lock file: <install folder>\commands.lock (SYSTEM and Administrators only), else under %ProgramData%. #>
+    $root = Join-Path $env:ProgramFiles 'Spoolfree'
+    if (Test-Path -LiteralPath $root) { return (Join-Path $root 'commands.lock') }
+    return (Join-Path $env:ProgramData 'Spoolfree\commands.lock')
 }
 
 function Invoke-SpoolfreeCommands {
     <#
     .SYNOPSIS
         Verifies and runs signed commands (test prints) and reports each result to /api/agent/commands/<id>. Returns
-        how many ran. One run at a time on the machine (mutex), each id once.
+        how many ran. One run at a time on the machine (lock file), each id once.
+        -LockWaitSeconds: how long to wait for another run (the hourly sync passes 0). -BudgetSeconds: the total time
+        for this call (0 = no limit); a command that does not fit is left for the next run (it is not marked as run).
     #>
     param(
         [AllowEmptyCollection()]$Commands = @(),
@@ -2995,27 +3416,37 @@ function Invoke-SpoolfreeCommands {
         [scriptblock]$Print,
         [scriptblock]$Wait,
         [scriptblock]$GetQueues = { @(Get-Printer -ErrorAction SilentlyContinue) },
+        [scriptblock]$GetJobs = { param($q) @(Get-PrintJob -PrinterName $q -ErrorAction SilentlyContinue) },
+        [scriptblock]$EnableEventLog = { try { Enable-SpoolfreePrintLog | Out-Null } catch { } },
         [AllowEmptyCollection()]$Installed,
         [string]$RunKey = $script:CommandRegistry,
+        [string]$LockPath,
+        [int]$LockWaitSeconds = 30,
+        [int]$BudgetSeconds = 0,
         [datetime]$Now = [datetime]::UtcNow
     )
     $list = @($Commands | Where-Object { $_ })
     if ($list.Count -eq 0) { return 0 }
+    $started = Get-Date
     if (-not $Report) { $Report = { param($id, $body) Invoke-SpoolfreeHttp -Uri "$BaseUrl/api/agent/commands/$id" -Method POST -Token $Token -Body $body | Out-Null } }
-    if (-not $Print) { $Print = { param($queue, $docName, $lines) Send-SpoolfreeTestPage -Queue $queue -DocumentName $docName -Lines $lines } }
-    if (-not $Wait) { $Wait = { param($queue, $names, $onSent) Wait-SpoolfreePrintJob -Queue $queue -DocumentNames $names -OnSent $onSent } }
-    if ($null -eq $Installed) { $Installed = @(Get-SpoolfreeInstalled) }
+    if (-not $Print) { $Print = { param($queue, $docName, $lines, $timeout) Send-SpoolfreeTestPageAsUser -Queue $queue -DocumentName $docName -Lines $lines -TimeoutSeconds $timeout } }
+    if (-not $Wait) { $Wait = { param($queue, $since, $known, $onSent, $timeout) Wait-SpoolfreePrintJob -Queue $queue -Since $since -KnownJobIds $known -OnSent $onSent -TimeoutSeconds $timeout } }
     $send = {
         param($id, $body)
         try { & $Report $id $body } catch { & $Log "Command ${id}: reporting '$($body.state)' failed: $($_.Exception.Message)" }
     }
-    $mutex = New-Object Threading.Mutex($false, 'Global\SpoolfreeCommands')
-    $locked = $false
+    $secure = -not $LockPath
+    if (-not $LockPath) { $LockPath = Get-SpoolfreeCommandLockPath }
+    $lock = $null
+    try { $lock = Enter-SpoolfreeCommandLock -Path $LockPath -WaitSeconds $LockWaitSeconds -Secure:$secure } catch { $lock = $null }
+    if (-not $lock) { & $Log 'Commands: another run holds the lock (or it cannot be opened); trying again next time.'; return 0 }
     try {
-        try { $locked = $mutex.WaitOne([TimeSpan]::FromMinutes(5)) } catch [Threading.AbandonedMutexException] { $locked = $true }
-        if (-not $locked) { & $Log 'Commands: another run holds the lock; trying again next time.'; return 0 }
+        if ($null -eq $Installed) { $Installed = @(Get-SpoolfreeInstalled) }
         $ran = 0
+        $logReady = $false
         foreach ($envelope in $list) {
+            $left = if ($BudgetSeconds -gt 0) { $BudgetSeconds - ((Get-Date) - $started).TotalSeconds } else { 600 }
+            if ($left -lt 20) { & $Log 'Commands: no time left in this run; the rest is left for the next run.'; break }
             try {
                 $c = ConvertFrom-SpoolfreeCommand -Envelope $envelope -PublicKey $PublicKey -ObjectGuid $ObjectGuid -Now $Now
             } catch {
@@ -3037,22 +3468,30 @@ function Invoke-SpoolfreeCommands {
             $lines = Get-SpoolfreeTestPageLines -Command $c -Computer $env:COMPUTERNAME -Queue $queue -Driver ([string]$q.DriverName) -Port ([string]$q.PortName)
             $docName = "Spoolfree test page $id"
             & $Log "Command ${id}: test print through '$queue' (driver '$($q.DriverName)')."
+            if (-not $logReady) { & $EnableEventLog; $logReady = $true }
+            $printTimeout = [int][Math]::Max(10, [Math]::Min(90, $left / 2))
             try {
-                $names = @(& $Print $queue $docName $lines)
+                $known = @(@(& $GetJobs $queue) | Where-Object { $_ } | ForEach-Object { [int]$_.Id })
+                $since = (Get-Date).AddSeconds(-2)
+                $sent = & $Print $queue $docName $lines $printTimeout
+                $warning = [string](Get-SpoolfreeProperty $sent 'Warning')
                 $onSent = { param($job) & $send $id ([ordered]@{ state = 'sent'; jobId = [int]$job.Id; jobStatus = [string]$job.JobStatus; message = "spooler job $($job.Id) in '$queue'" }) }.GetNewClosure()
-                $r = & $Wait $queue $names $onSent
-                & $Log "Command ${id}: $($r.State): $($r.Message)"
-                & $send $id ([ordered]@{ state = [string]$r.State; jobId = $r.JobId; jobStatus = $(if ($r.JobStatus) { [string]$r.JobStatus } else { $null }); message = [string]$r.Message })
+                $waitLeft = if ($BudgetSeconds -gt 0) { [int][Math]::Max(5, $BudgetSeconds - ((Get-Date) - $started).TotalSeconds - 5) } else { 120 }
+                $r = & $Wait $queue $since $known $onSent ([Math]::Min(120, $waitLeft))
+                $msg = [string]$r.Message
+                if ($warning) { $msg = "$msg ($warning)" }
+                & $Log "Command ${id}: $($r.State): $msg"
+                & $send $id ([ordered]@{ state = [string]$r.State; jobId = $r.JobId; jobStatus = $(if ($r.JobStatus) { [string]$r.JobStatus } else { $null }); message = $msg })
             } catch {
                 $why = $_.Exception.Message
                 & $Log "Command ${id}: test print failed: $why"
-                & $send $id ([ordered]@{ state = 'failed'; message = "test print through '$queue' failed: $why" })
+                $msg = if ($why -like "can't test:*") { $why } else { "test print through '$queue' failed: $why" }
+                & $send $id ([ordered]@{ state = 'failed'; message = $msg })
             }
         }
         return $ran
     } finally {
-        if ($locked) { $mutex.ReleaseMutex() }
-        $mutex.Dispose()
+        try { $lock.Dispose() } catch { }
     }
 }
 
@@ -3064,6 +3503,25 @@ function Get-SpoolfreeCommandPollMinutes {
     if ($m -le 0) { return 0 }
     if ($m -gt 60) { return 60 }
     return $m
+}
+
+function Get-SpoolfreeSyncCommandPlan {
+    <#
+    .SYNOPSIS
+        Pure (0.8.1, M3): what the hourly sync does with the manifest's commands. 'defer' when the poll task runs them
+        (poll interval > 0 and the task exists): the sync must never wait on a test print, so a stuck job cannot make
+        the launcher count a timeout (and roll back a good agent version). Otherwise 'run' with no lock wait and a
+        time budget far below the launcher's 12-minute limit. 'none' without commands.
+    #>
+    param([int]$PollMinutes, [bool]$TaskExists, [int]$Count, [int]$BudgetSeconds = 60)
+    if ($Count -le 0) { return [pscustomobject]@{ Action = 'none'; LockWaitSeconds = 0; BudgetSeconds = 0 } }
+    if ($PollMinutes -gt 0 -and $TaskExists) { return [pscustomobject]@{ Action = 'defer'; LockWaitSeconds = 0; BudgetSeconds = 0 } }
+    return [pscustomobject]@{ Action = 'run'; LockWaitSeconds = 0; BudgetSeconds = $BudgetSeconds }
+}
+
+function Test-SpoolfreeCommandTask {
+    <# Does the "Spoolfree Commands" task exist? #>
+    return [bool](Get-ScheduledTask -TaskName $script:CommandTaskName -TaskPath '\Spoolfree\' -ErrorAction SilentlyContinue)
 }
 
 function Update-SpoolfreeCommandTask {
@@ -3094,6 +3552,20 @@ function Update-SpoolfreeCommandTask {
     Register-ScheduledTask -TaskName $script:CommandTaskName -TaskPath '\Spoolfree\' -Action $action -Trigger $trigger -Settings $settings -Principal $system -Force -ErrorAction Stop | Out-Null
     New-ItemProperty -Path $script:RegistryRoot -Name CommandPollMinutes -Value $m -PropertyType DWord -Force | Out-Null
     return $m
+}
+
+function Set-SpoolfreeIdentityCache {
+    <#
+    .SYNOPSIS
+        0.8.1 (M2): stores this computer's objectGUID in HKLM:\SOFTWARE\Spoolfree (ObjectGuid, also written at
+        enrollment), so the minute command poll never asks AD. Writes only when it changed. Returns $true when it wrote.
+    #>
+    param([Parameter(Mandatory)][string]$ObjectGuid, [string]$Key = $script:RegistryRoot)
+    $g = $ObjectGuid.ToLowerInvariant()
+    $cur = Get-ItemProperty -Path $Key -Name ObjectGuid -ErrorAction SilentlyContinue
+    if ($cur -and ([string]$cur.ObjectGuid).ToLowerInvariant() -eq $g) { return $false }
+    New-ItemProperty -Path $Key -Name ObjectGuid -Value $g -PropertyType String -Force | Out-Null
+    return $true
 }
 
 function Get-SpoolfreeAgentVersion { return $script:AgentVersion }

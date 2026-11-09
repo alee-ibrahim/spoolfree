@@ -4,7 +4,8 @@ import { normalizeMac, normalizeUuid } from "./identity";
 import { printerUri } from "./ipp/interpret";
 import type { Resolution } from "./resolve";
 import type { AgentUpdateOffer } from "./agent-bundle";
-import type { DriverDecision } from "./drivers/auto";
+import type { DriverDecision, PackageForMatch } from "./drivers/auto";
+import type { DriverInf } from "./db/schema";
 import { keyId, publicKeyRaw, randomToken, signBytes } from "./crypto/signing";
 import type { SignedCommand } from "./test-print/command";
 
@@ -80,6 +81,12 @@ export interface ManifestPrinter {
   /** Agents 0.7+: "vendor" with driver set, or "driverless" (the IPP Class Driver). */
   driverMode?: "driverless" | "vendor";
   driver?: ManifestDriver;
+  /**
+   * Agents 0.8.1+, driverless printers only: the vendor driver a PC uses when Add-Printer -IppURL fails on it (per-PC
+   * vendor fallback, make-before-break; PCs where driverless works stay driverless). Same checks as driver. Older
+   * agents ignore it.
+   */
+  fallbackDriver?: ManifestDriver;
 }
 
 /** Print analytics settings for agents (0.5+). */
@@ -194,24 +201,28 @@ export function buildManifest(args: {
   };
 }
 
-function manifestDriver(d: DriverDecision | null): Pick<ManifestPrinter, "driverMode" | "driver"> {
-  if (!d || d.mode !== "vendor" || !d.package || !d.inf || !d.driverName) return { driverMode: "driverless" };
+function toManifestDriver(d: Pick<DriverDecision, "protocol" | "lprQueue">, pkg: PackageForMatch, driverName: string, inf: DriverInf): ManifestDriver {
   return {
-    driverMode: "vendor",
-    driver: {
-      mode: "vendor",
-      packageId: d.package.id,
-      packageName: d.package.name,
-      sha256: d.package.sha256,
-      size: d.package.size,
-      url: `/api/agent/drivers/${d.package.id}`,
-      driverName: d.driverName,
-      inf: d.inf.path,
-      catalog: d.inf.catalog,
-      protocol: d.protocol,
-      lprQueue: d.protocol === "lpr" ? (d.lprQueue ?? "lp") : null,
-    },
+    mode: "vendor",
+    packageId: pkg.id,
+    packageName: pkg.name,
+    sha256: pkg.sha256,
+    size: pkg.size,
+    url: `/api/agent/drivers/${pkg.id}`,
+    driverName,
+    inf: inf.path,
+    catalog: inf.catalog,
+    protocol: d.protocol,
+    lprQueue: d.protocol === "lpr" ? (d.lprQueue ?? "lp") : null,
   };
+}
+
+function manifestDriver(d: DriverDecision | null): Pick<ManifestPrinter, "driverMode" | "driver" | "fallbackDriver"> {
+  if (!d || d.mode !== "vendor" || !d.package || !d.inf || !d.driverName) {
+    const f = d?.fallback;
+    return f ? { driverMode: "driverless", fallbackDriver: toManifestDriver(d, f.package, f.driverName, f.inf) } : { driverMode: "driverless" };
+  }
+  return { driverMode: "vendor", driver: toManifestDriver(d, d.package, d.driverName, d.inf) };
 }
 
 export function signManifest(payload: ManifestPayload, privateKey: KeyObject): SignedManifest {

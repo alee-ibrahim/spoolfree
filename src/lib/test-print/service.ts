@@ -2,7 +2,7 @@ import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import { config } from "../config";
 import { db, schema } from "../db";
 import { TEST_PRINT_FINAL, type Agent, type Printer, type TestPrint, type TestPrintEvent, type TestPrintMode, type TestPrintState } from "../db/schema";
-import { canTransition, COMMAND_KIND, COMMAND_MIN_AGENT_VERSION, signCommand, versionAtLeast, type CommandPayload, type SignedCommand } from "./command";
+import { canTransition, COMMAND_KIND, type AgentResultState, COMMAND_MIN_AGENT_VERSION, signCommand, versionAtLeast, type CommandPayload, type SignedCommand } from "./command";
 import type { KeyObject } from "node:crypto";
 
 /**
@@ -217,7 +217,7 @@ export async function deliverCommands(agent: Agent, rows: TestPrint[], key: KeyO
 }
 
 export interface AgentResult {
-  state: "sent" | "printing" | "printed" | "failed" | "rejected";
+  state: AgentResultState;
   jobId?: number | null;
   jobStatus?: string | null;
   message?: string | null;

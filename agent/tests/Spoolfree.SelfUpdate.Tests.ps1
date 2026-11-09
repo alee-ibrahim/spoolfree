@@ -190,6 +190,9 @@ Describe 'Launcher: confirm and roll back' {
         New-Item -ItemType Directory -Path $lr | Out-Null
         Write-Agent (Join-Path $lr 'previous') '0.4.3' "Add-Content -Path '$runs' -Value old; exit 0"
         Set-LauncherState $key @{ PendingVersion = '9.9.9'; PendingSha256 = ('c' * 64); FromVersion = '0.4.3'; Failures = 0 }
+        # Never touch the scheduled tasks of the machine running the tests.
+        Mock Get-ScheduledTask { $null }
+        Mock Unregister-ScheduledTask { }
     }
     It 'clears the pending state once the new version confirms' {
         $kp = $key -replace '^HKCU:', 'HKCU:'
@@ -231,6 +234,20 @@ Describe 'Launcher: confirm and roll back' {
         $r.error | Should -Match 'failed to run twice'
         $m = [pscustomobject]@{ agentVersion = '9.9.9'; agentBundle = [pscustomobject]@{ sha256 = ('c' * 64) } }
         (Get-SpoolfreeUpdateDecision -Manifest $m -CurrentVersion '0.4.3' -BadSha256 $s['BadSha256']).Action | Should -Be 'skip'
+    }
+    It 'removes the Spoolfree Commands task of the rolled-back version (L5)' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Spoolfree Commands' } } -ParameterFilter { $TaskName -eq 'Spoolfree Commands' }
+        Write-Agent (Join-Path $lr 'current') '9.9.9' 'exit 7'
+        Set-LauncherState $key @{ Failures = 2 }
+        Invoke-SpoolfreeLauncher -Root $lr -Key $key -LogFile $log | Should -Be 0
+        Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'Spoolfree Commands' -and $TaskPath -eq '\Spoolfree\' }
+        Get-Content $log -Raw | Should -Match 'removed the Spoolfree Commands task'
+    }
+    It 'does not touch the Commands task when nothing is rolled back' {
+        $kp = $key -replace '^HKCU:', 'HKCU:'
+        Write-Agent (Join-Path $lr 'current') '9.9.9' "New-ItemProperty -Path '$kp' -Name ConfirmedVersion -Value '9.9.9' -Force | Out-Null; exit 0"
+        Invoke-SpoolfreeLauncher -Root $lr -Key $key -LogFile $log | Should -Be 0
+        Should -Invoke Unregister-ScheduledTask -Times 0 -Exactly
     }
     It 'rolls back before running when two failures are already recorded (e.g. after a timeout)' {
         Write-Agent (Join-Path $lr 'current') '9.9.9' 'exit 7'
