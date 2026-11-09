@@ -157,7 +157,7 @@
   [data-slot="input-group"],
   [data-slot="tabs-trigger"],
   [data-slot="sidebar-menu-button"],
-  [data-slot="popover-trigger"],
+  [data-slot="popover-trigger"]:not([data-hit-area]),
   [data-slot="sheet-trigger"],
   [data-slot="command-item"],
   [data-slot="command-input-wrapper"] [data-slot="input-group"] {
@@ -166,13 +166,15 @@
   [data-slot="button"][data-size^="icon"] {
     min-width: 44px;
   }
-  /* Small controls get an invisible 44px hit area. */
+  /* Small controls (and badge links marked data-hit-area) get an invisible 44px hit area. */
   [data-slot="checkbox"],
-  [data-slot="switch"] {
+  [data-slot="switch"],
+  [data-hit-area] {
     position: relative;
   }
   [data-slot="checkbox"]::after,
-  [data-slot="switch"]::after {
+  [data-slot="switch"]::after,
+  [data-hit-area]::after {
     content: "";
     position: absolute;
     inset: 50% auto auto 50%;

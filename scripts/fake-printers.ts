@@ -1,10 +1,22 @@
 /**
  * Development IPP printer simulator: answers Get-Printer-Attributes on
  * 127.0.0.1:8631-8635 so the status dashboard and "Test" button can be
- * exercised without hardware. Run: pnpm tsx scripts/fake-printers.ts
+ * exercised without hardware. It also takes test prints: Print-Job (the document is kept in memory, never printed)
+ * and Get-Job-Attributes (a job is "processing" for a moment, then "completed").
+ * Run: pnpm tsx scripts/fake-printers.ts
  */
 import http from "node:http";
 import { decodeRequest, encodeMessage, Operation, Tag, type IppRequestAttribute } from "../src/lib/ipp/encoding";
+
+/** A job the simulator received (tests read these). */
+export interface SimJob {
+  id: number;
+  format: string;
+  name: string;
+  attributes: Record<string, unknown[]>;
+  document: Buffer;
+  at: number;
+}
 
 interface Sim {
   port: number;
@@ -14,6 +26,14 @@ interface Sim {
   reasons: string[];
   markers: [string, string, number][];
   pages: number;
+  /** Default ["1.1", "2.0"]. */
+  ippVersions?: string[];
+  /** Default PWG raster, URF, PDF and JPEG. */
+  formats?: string[];
+  /** Received Print-Job documents. */
+  jobs?: SimJob[];
+  /** How long a job stays "processing" (ms, default 1500). */
+  jobMs?: number;
 }
 
 export const SIMS: Sim[] = [
@@ -34,8 +54,11 @@ function attrs(s: Sim, uri: string): IppRequestAttribute[] {
     { tag: Tag.enum, name: "printer-state", values: [s.state] },
     kw("printer-state-reasons", s.reasons),
     { tag: Tag.boolean, name: "printer-is-accepting-jobs", values: [true] },
-    { tag: Tag.mimeMediaType, name: "document-format-supported", values: ["application/octet-stream", "image/pwg-raster", "image/urf", "application/pdf", "image/jpeg"] },
-    kw("ipp-versions-supported", ["1.1", "2.0"]),
+    { tag: Tag.mimeMediaType, name: "document-format-supported", values: s.formats ?? ["application/octet-stream", "image/pwg-raster", "image/urf", "application/pdf", "image/jpeg"] },
+    kw("ipp-versions-supported", s.ippVersions ?? ["1.1", "2.0"]),
+    kw("pwg-raster-document-type-supported", ["black_1", "sgray_8", "srgb_8"]),
+    kw("media-default", ["iso_a4_210x297mm"]),
+    kw("print-color-mode-supported", s.color ? ["auto", "color", "monochrome"] : ["monochrome"]),
     kw("ipp-features-supported", ["ipp-everywhere", "airprint-1.8"]),
     kw("urf-supported", ["V1.4", "W8", "SRGB24", "RS300-600", "DM1"]),
     { tag: Tag.boolean, name: "color-supported", values: [s.color] },
@@ -50,13 +73,70 @@ function attrs(s: Sim, uri: string): IppRequestAttribute[] {
   ];
 }
 
+function jobAttrs(s: Sim, j: SimJob): IppRequestAttribute[] {
+  const done = Date.now() - j.at >= (s.jobMs ?? 1500);
+  return [
+    { tag: Tag.integer, name: "job-id", values: [j.id] },
+    { tag: Tag.uri, name: "job-uri", values: [`ipp://127.0.0.1:${s.port}/ipp/print/${j.id}`] },
+    { tag: Tag.enum, name: "job-state", values: [done ? 9 : 5] },
+    { tag: Tag.keyword, name: "job-state-reasons", values: [done ? "job-completed-successfully" : "job-printing"] },
+  ];
+}
+
+/** Splits a Print-Job request into its attributes and the document after end-of-attributes. */
+function splitDocument(buf: Buffer): Buffer {
+  // Walk the attribute groups to find the end-of-attributes tag (0x03).
+  let pos = 8;
+  while (pos < buf.length) {
+    const tag = buf[pos];
+    if (tag === Tag.endOfAttributes) return buf.subarray(pos + 1);
+    if (tag < 0x10) {
+      pos += 1;
+      continue;
+    }
+    const nameLen = buf.readUInt16BE(pos + 1);
+    const valueLen = buf.readUInt16BE(pos + 3 + nameLen);
+    pos += 5 + nameLen + valueLen;
+  }
+  return Buffer.alloc(0);
+}
+
 export function startSim(s: Sim): http.Server {
+  s.jobs ??= [];
+  let nextJob = 1;
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       try {
-        const r = decodeRequest(Buffer.concat(chunks));
+        const raw = Buffer.concat(chunks);
+        // decodeRequest stops at end-of-attributes; a Print-Job document follows it.
+        const r = decodeRequest(raw);
+        const send = (code: number, groups: { tag: number; attributes: IppRequestAttribute[] }[]) => {
+          res.writeHead(200, { "Content-Type": "application/ipp" });
+          res.end(encodeMessage({ code, requestId: r.requestId, groups: [{ tag: Tag.operationAttributes, attributes: [{ tag: Tag.charset, name: "attributes-charset", values: ["utf-8"] }, { tag: Tag.naturalLanguage, name: "attributes-natural-language", values: ["en"] }] }, ...groups] }));
+        };
+        const op = r.groups.find((g) => g.tag === Tag.operationAttributes)?.attributes ?? {};
+        if (r.operation === Operation.printJob) {
+          if (!(s.ippVersions ?? ["2.0"]).some((v) => v.startsWith("2."))) return send(0x0501, []);
+          const format = String(op["document-format"]?.[0] ?? "application/octet-stream");
+          if (!(s.formats ?? ["image/pwg-raster", "image/urf", "application/pdf"]).includes(format)) return send(0x040a, []);
+          const job: SimJob = {
+            id: nextJob++,
+            format,
+            name: String(op["job-name"]?.[0] ?? ""),
+            attributes: (r.groups.find((g) => g.tag === Tag.jobAttributes)?.attributes ?? {}) as Record<string, unknown[]>,
+            document: Buffer.from(splitDocument(raw)),
+            at: Date.now(),
+          };
+          s.jobs!.push(job);
+          return send(0x0000, [{ tag: Tag.jobAttributes, attributes: jobAttrs(s, job).slice(0, 4).map((a) => (a.name === "job-state" ? { ...a, values: [3] } : a)) }]);
+        }
+        if (r.operation === Operation.getJobAttributes) {
+          const job = s.jobs!.find((j) => j.id === Number(op["job-id"]?.[0]));
+          if (!job) return send(0x0406, []);
+          return send(0x0000, [{ tag: Tag.jobAttributes, attributes: jobAttrs(s, job) }]);
+        }
         const ok = r.operation === Operation.getPrinterAttributes;
         const body = encodeMessage({
           code: ok ? 0x0000 : 0x0501,

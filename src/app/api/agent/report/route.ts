@@ -70,6 +70,13 @@ const Report = z.object({
     )
     .max(200)
     .optional(),
+  commands: z
+    .object({
+      pollMinutes: z.number().int().min(0).max(1440),
+      ran: z.number().int().nonnegative().optional(),
+      error: z.string().max(1000).nullable().optional(),
+    })
+    .optional(),
   analytics: z
     .object({
       enabled: z.boolean(),

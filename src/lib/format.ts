@@ -19,3 +19,9 @@ export function shortDn(dn: string): string {
     .reverse()
     .join(" / ");
 }
+
+/** Short name of an OU for a badge: its own name ("Finance"), not the whole path. */
+export function ouShortName(dn: string): string {
+  const first = dn.split(/,(?=(?:OU|CN|DC)=)/i)[0] ?? dn;
+  return first.replace(/^(OU|CN|DC)=/i, "").replace(/\\(.)/g, "$1") || dn;
+}

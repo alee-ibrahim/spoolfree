@@ -20,6 +20,7 @@ import { requireAdmin } from "@/lib/session";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemTitle } from "@/components/ui/item";
 import { activeAgentFilters, agentFacetOptions, agentOuOptions, filterAgents, parseAgentFilters, type AgentFilters } from "@/lib/list-filters/agents";
 import { RevokeButton } from "./revoke-button";
+import { AgentTestPrintButton } from "@/components/app/test-print-dialog";
 
 export const metadata = { title: "Agents" };
 
@@ -364,6 +365,15 @@ function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) 
                         )}
       </>
     ),
-    revoke: <>{!a.revokedAt && <RevokeButton id={a.id} name={a.computerName} />}</>,
+    revoke: (
+      <>
+        {!a.revokedAt && (
+          <div className="flex flex-wrap items-center justify-end gap-1">
+            {(r?.applied ?? []).length > 0 && <AgentTestPrintButton agentId={a.id} computerName={a.computerName} />}
+            <RevokeButton id={a.id} name={a.computerName} />
+          </div>
+        )}
+      </>
+    ),
   };
 }

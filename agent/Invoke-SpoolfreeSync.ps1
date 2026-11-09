@@ -12,9 +12,13 @@
 
 .PARAMETER WhatIf
     Show the plan without changing printers.
+
+.PARAMETER CommandsOnly
+    (0.8) Only fetch and run pending commands (test prints) from /api/agent/commands. The "Spoolfree Commands" task
+    runs this every AGENT_COMMAND_POLL_MINUTES; it is cheap when nothing is pending.
 #>
 [CmdletBinding(SupportsShouldProcess)]
-param()
+param([switch]$CommandsOnly)
 
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Spoolfree.Agent.psm1') -Force
@@ -40,6 +44,24 @@ if (-not $cfg.MachineToken) { Write-Log 'No machine token: re-run Install-Spoolf
 
 $identity = Get-SpoolfreeComputerIdentity
 $base = $cfg.ServerUrl.TrimEnd('/')
+
+# Fast path for commands (0.8): a small authenticated GET; signatures are checked only when something is pending.
+if ($CommandsOnly) {
+    try {
+        $resp = Invoke-SpoolfreeHttp -Uri "$base/api/agent/commands" -Token $cfg.MachineToken
+    } catch {
+        $status = $null
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        Write-Log "Command poll failed (HTTP $status): $($_.Exception.Message)"
+        exit 4
+    }
+    $pending = @(Get-SpoolfreeProperty $resp 'commands' | Where-Object { $_ })
+    if ($pending.Count -and -not $WhatIfPreference) {
+        $n = Invoke-SpoolfreeCommands -Commands $pending -PublicKey $cfg.PublicKey -ObjectGuid $identity.ObjectGuid -BaseUrl $base -Token $cfg.MachineToken -ServerId (Get-SpoolfreeServerId $cfg.PublicKey) -Log ${function:Write-Log}
+        Write-Log "Command poll: $($pending.Count) pending, $n run."
+    }
+    exit 0
+}
 
 try {
     $envelope = Invoke-SpoolfreeHttp -Uri "$base/api/agent/manifest" -Token $cfg.MachineToken
@@ -391,6 +413,27 @@ if ((Split-Path $PSScriptRoot -Leaf) -eq 'current' -and $PSCmdlet.ShouldProcess(
     }
 }
 
+# Commands (0.8): test prints that came with the manifest (the "Spoolfree Commands" task usually runs them sooner),
+# and the poll task's interval (manifest commandPollMinutes; 0 removes the task). Never fails the sync.
+$commandState = [ordered]@{ pollMinutes = (Get-SpoolfreeCommandPollMinutes (Get-SpoolfreeProperty $manifest 'commandPollMinutes')); ran = 0; error = $null }
+if ($PSCmdlet.ShouldProcess('commands', 'run test prints and update the poll task')) {
+    try {
+        $commandState.ran = Invoke-SpoolfreeCommands -Commands @(Get-SpoolfreeProperty $manifest 'commands') -PublicKey $cfg.PublicKey -ObjectGuid $identity.ObjectGuid -BaseUrl $base -Token $cfg.MachineToken -ServerId $serverId -Log ${function:Write-Log}
+    } catch {
+        $commandState.error = "commands: $($_.Exception.Message)"
+        Write-Log "Running commands failed: $($_.Exception.Message)"
+    }
+    if ((Split-Path $PSScriptRoot -Leaf) -eq 'current') {
+        try {
+            $poll = Update-SpoolfreeCommandTask -Minutes (Get-SpoolfreeProperty $manifest 'commandPollMinutes') -Root (Split-Path $PSScriptRoot -Parent)
+            if ($null -ne $poll) { Write-Log $(if ($poll -eq 0) { 'Command poll task removed.' } else { "Command poll task set to every $poll minute(s)." }) }
+        } catch {
+            $commandState.error = "command poll task: $($_.Exception.Message)"
+            Write-Log "Updating the command poll task failed: $($_.Exception.Message)"
+        }
+    }
+}
+
 # Print analytics (0.5.0, manifest analytics.enabled): event 307 records from the PrintService log go to
 # /api/agent/jobs. Runs before the report so the report carries its outcome; it never fails the sync.
 $analytics = [ordered]@{ enabled = $false; logEnabled = $null; sent = 0; error = $null }
@@ -426,6 +469,7 @@ $report = [ordered]@{
     critical       = $critical.ToArray()
     fallbacks      = $fallbacks.ToArray()
     analytics      = $analytics
+    commands       = $commandState
     queues         = $queueReport
     drivers        = @($driverResults | Select-Object -First 200)
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds

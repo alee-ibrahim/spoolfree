@@ -8,6 +8,7 @@ import { agentUpdateForManifest } from "./agent-update";
 import { autoSettings, config } from "./config";
 import { decideDriver, type DriverDecision, type PackageForMatch } from "./drivers/auto";
 import { listDriverPackages, toPackageForMatch } from "./drivers/store";
+import type { SignedCommand } from "./test-print/command";
 
 export async function audit(
   actor: string,
@@ -79,7 +80,7 @@ export function toManifestInput(p: typeof schema.printers.$inferSelect, packages
   };
 }
 
-export async function manifestForComputer(computer: ComputerObject) {
+export async function manifestForComputer(computer: ComputerObject, commands: SignedCommand[] = []) {
   const [policy, printers, packages] = await Promise.all([loadPolicy(), listPrinters(), loadPackagesForMatch()]);
   const resolution = resolvePrinters(policy, computer);
   return buildManifest({
@@ -95,6 +96,8 @@ export async function manifestForComputer(computer: ComputerObject) {
       enabled: config().ANALYTICS_ENABLED,
       collectDocumentNames: config().ANALYTICS_ENABLED && config().ANALYTICS_COLLECT_DOCUMENT_NAMES,
     },
+    commands,
+    commandPollMinutes: config().AGENT_COMMAND_POLL_MINUTES,
   });
 }
 

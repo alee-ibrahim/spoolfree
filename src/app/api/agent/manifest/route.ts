@@ -5,12 +5,16 @@ import { db, schema } from "@/lib/db";
 import { signingKey } from "@/lib/keys";
 import { signManifest } from "@/lib/manifest";
 import { manifestForComputer } from "@/lib/service";
+import { deliverCommands, pendingCommandRows } from "@/lib/test-print/service";
 
 export async function GET(req: Request) {
   try {
     const { agent, computer } = await authenticateAgent(req);
-    const payload = await manifestForComputer(computer);
-    const signed = signManifest(payload, signingKey().key);
+    const key = signingKey().key;
+    // Pending test print commands (agents 0.8+) travel in the manifest too, each signed on its own.
+    const commands = await deliverCommands(agent, await pendingCommandRows(agent.id), key);
+    const payload = await manifestForComputer(computer, commands);
+    const signed = signManifest(payload, key);
     await db().update(schema.agents).set({ lastManifestAt: new Date() }).where(eq(schema.agents.id, agent.id));
     return NextResponse.json(signed, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
