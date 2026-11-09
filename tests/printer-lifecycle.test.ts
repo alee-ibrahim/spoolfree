@@ -177,12 +177,15 @@ describe("printers rename", () => {
     expect(await cli("rename", "Copier", "other")).toBe(1);
     expect(await cli("rename", "Copier", "a/b")).toBe(1);
     expect(await cli("rename", "Copier", "x".repeat(101))).toBe(1);
+    // 0.8.1 (L1): a double quote could add printui arguments on PCs.
+    expect(await cli("rename", "Copier", 'X" /if /b "Y')).toBe(1);
     expect(await cli("rename", "Copier")).toBe(2);
-    expect(err.slice(0, 4)).toEqual([
+    expect(err.slice(0, 5)).toEqual([
       'error: no printer named "Nope"',
       'error: A printer named "Other" already exists',
-      "error: Name cannot contain \\ / , or !",
+      'error: Name cannot contain \\ / , ! " or control characters',
       "error: Name is longer than 100 characters",
+      'error: Name cannot contain \\ / , ! " or control characters',
     ]);
     expect((await d.select().from(schema.printers)).map((p) => p.name).sort()).toEqual(["Copier", "Other"]);
     expect(await auditRows()).toHaveLength(0);

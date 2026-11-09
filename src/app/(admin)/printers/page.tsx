@@ -14,6 +14,7 @@ import { requireAdmin } from "@/lib/session";
 import { driverNames } from "@/lib/drivers/package";
 import { loadPrinterAssignments } from "@/lib/printer-assignments";
 import { driverDecision, loadPackagesForMatch } from "@/lib/service";
+import { vendorFallbackByQueue } from "@/lib/agent-reports";
 import { shortDn } from "@/lib/format";
 import { activePrinterFilters, brandOptions, filterPrinters, parsePrinterFilters } from "@/lib/list-filters/printers";
 import { PrinterFormDialog, PrintersTable, type DriverPackageOption } from "./printers-client";
@@ -24,7 +25,7 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
   await requireAdmin();
   const d = db();
   const f = parsePrinterFilters(await searchParams);
-  const [allPrinters, statuses, assigned, settings, dir, packages] = await Promise.all([
+  const [allPrinters, statuses, assigned, settings, dir, packages, agentReports] = await Promise.all([
     d.select().from(schema.printers).orderBy(schema.printers.name),
     d.select().from(schema.printerStatus),
     // OUs and per-PC overrides of every printer in one aggregated query.
@@ -32,7 +33,9 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
     d.select().from(schema.ouSettings),
     loadDirectoryOptions(),
     loadPackagesForMatch(),
+    d.select({ computerName: schema.agents.computerName, lastReport: schema.agents.lastReport, revokedAt: schema.agents.revokedAt }).from(schema.agents),
   ]);
+  const vendorFallbackPcs = vendorFallbackByQueue(agentReports);
   const ouOptions = dir?.ous ?? null;
   const ouPathOf = new Map((dir?.ous ?? []).map((o) => [o.key, o.path]));
   const pcOptions = dir?.pcs ?? null;
@@ -151,7 +154,10 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
               driverName: dec.driverName,
               match: dec.match,
               sticky: !!p.autoVendorReason,
+              fallbackPackageName: dec.fallback?.package.name ?? null,
+              fallbackDriverName: dec.fallback?.driverName ?? null,
             },
+            vendorFallbackPcs: vendorFallbackPcs.get(p.name.toLowerCase()) ?? [],
             };
           })}
           ouOptions={options}

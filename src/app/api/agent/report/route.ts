@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { AgentAuthError, authenticateAgent } from "@/lib/agent-auth";
 import { db, schema } from "@/lib/db";
-import { AGENT_UPDATE_STATES } from "@/lib/db/schema";
+import { AGENT_DRIVER_STATES, AGENT_UPDATE_STATES } from "@/lib/db/schema";
 
 const list = z.array(z.string().max(512)).max(200).optional();
 
@@ -55,6 +55,8 @@ const Report = z.object({
         driver: z.string().max(256).nullable().optional(),
         port: z.string().max(512).nullable().optional(),
         method: z.string().max(32).nullable().optional(),
+        /** 0.8.1: the package name when this PC uses the per-PC vendor fallback for a driverless printer. */
+        vendorFallback: z.string().max(256).nullable().optional(),
       }),
     )
     .max(200)
@@ -63,7 +65,7 @@ const Report = z.object({
     .array(
       z.object({
         printer: z.string().max(256),
-        status: z.enum(["installed", "present", "wpp-blocked", "failed", "fallback"]),
+        status: z.enum(AGENT_DRIVER_STATES),
         driverName: z.string().max(256).nullable().optional(),
         message: z.string().max(1000).nullable().optional(),
       }),
@@ -74,6 +76,8 @@ const Report = z.object({
     .object({
       pollMinutes: z.number().int().min(0).max(1440),
       ran: z.number().int().nonnegative().optional(),
+      /** 0.8.1: commands the main sync left to the poll task. */
+      deferred: z.number().int().nonnegative().optional(),
       error: z.string().max(1000).nullable().optional(),
     })
     .optional(),

@@ -97,11 +97,27 @@ function Invoke-SpoolfreeRollback([string]$Root, [string]$Key, [string]$Reason, 
     if (Test-Path -LiteralPath $current) { [IO.Directory]::Move($current, $failed) }
     [IO.Directory]::Move($previous, $current)
     Remove-Item -LiteralPath $failed -Recurse -Force -ErrorAction SilentlyContinue
+    # 0.8.1 (L5): the "Spoolfree Commands" task belongs to the version that made it; the version rolled back to makes
+    # its own again (0.8+) or has none (older versions do not know -CommandsOnly).
+    Remove-LauncherCommandTask $LogFile
     $back = Get-LauncherVersion $current
     Clear-LauncherPending $Key @{ BadSha256 = $s['PendingSha256']; LastState = 'rolled-back'; LastVersion = $pending
         LastError = "Agent $pending $Reason; rolled back to $back."; LastAt = $now }
     Write-LauncherLog $LogFile "agent $pending $Reason; rolled back to $back."
     return $true
+}
+
+function Remove-LauncherCommandTask([string]$LogFile) {
+    <# Removes the "Spoolfree Commands" poll task (and its interval) after a rollback. Never throws. #>
+    try {
+        if (Get-ScheduledTask -TaskName 'Spoolfree Commands' -TaskPath '\Spoolfree\' -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName 'Spoolfree Commands' -TaskPath '\Spoolfree\' -Confirm:$false -ErrorAction Stop
+            Write-LauncherLog $LogFile 'removed the Spoolfree Commands task of the rolled-back version.'
+        }
+        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Spoolfree' -Name CommandPollMinutes -ErrorAction SilentlyContinue
+    } catch {
+        Write-LauncherLog $LogFile "could not remove the Spoolfree Commands task: $($_.Exception.Message)"
+    }
 }
 
 function Invoke-SpoolfreeChild([string]$Script, [int]$TimeoutMinutes) {

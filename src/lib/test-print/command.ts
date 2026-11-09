@@ -62,10 +62,11 @@ export function verifyCommand(signed: SignedCommand, publicRaw: Buffer, objectGu
 }
 
 /** Results an agent may report, and the states they move a test print to. */
-export const AGENT_RESULT_STATES = ["sent", "printing", "printed", "failed", "rejected"] as const;
+/** unknown (agents 0.8.1+): submitted, but no PrintService event said printed (307) or failed (372). */
+export const AGENT_RESULT_STATES = ["sent", "printing", "printed", "failed", "rejected", "unknown"] as const;
 export type AgentResultState = (typeof AGENT_RESULT_STATES)[number];
 
-const ORDER: Record<TestPrintState, number> = { queued: 0, delivered: 1, sent: 2, printing: 3, printed: 4, failed: 4, expired: 4, rejected: 4 };
+const ORDER: Record<TestPrintState, number> = { queued: 0, delivered: 1, sent: 2, printing: 3, printed: 4, failed: 4, expired: 4, rejected: 4, unknown: 4 };
 
 /**
  * Whether a test print may move from one state to another: forward only, never out of a final state, except that a

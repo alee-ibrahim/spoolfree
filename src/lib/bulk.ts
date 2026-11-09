@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db, schema } from "./db";
 import { aliasList } from "./aliases";
 import { normalizeDn } from "./dn";
+import { PRINTER_NAME_RE } from "./printer-name";
 
 /**
  * Bulk import/export of printers, OU assignments, OU default printers and per-computer overrides
@@ -13,7 +14,7 @@ import { normalizeDn } from "./dn";
 
 export const HOST_RE =
   /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$|^\[?[0-9a-fA-F:.]+\]?$/;
-export const NAME_RE = /^[^\\/,!]+$/;
+export const NAME_RE = PRINTER_NAME_RE;
 
 const list = z
   .union([z.array(z.string()), z.string()])
@@ -38,7 +39,7 @@ const bool = z
 
 export const PrinterSpec = z
   .object({
-    name: z.string().trim().min(1).max(100).regex(NAME_RE, "name cannot contain \\ / , or !"),
+    name: z.string().trim().min(1).max(100).regex(NAME_RE, 'name cannot contain \\ / , ! " or control characters'),
     host: z.string().trim().min(1).max(253).regex(HOST_RE, "not a valid hostname or IP").optional(),
     ip: z.string().trim().min(1).max(253).regex(HOST_RE, "not a valid hostname or IP").optional(),
     port: z.coerce.number().int().min(1).max(65535).optional(),

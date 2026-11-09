@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleCheckIcon, CircleDashedIcon, CircleXIcon, Loader2Icon, MonitorIcon, PrinterIcon, ServerIcon } from "lucide-react";
+import { CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, CircleXIcon, Loader2Icon, MonitorIcon, PrinterIcon, ServerIcon } from "lucide-react";
 import { useEffect, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -36,10 +36,12 @@ const STATE_LABEL: Record<TestPrintState, string> = {
   failed: "Failed",
   expired: "Expired",
   rejected: "Rejected",
+  unknown: "Not confirmed",
 };
 
 function stateVariant(s: TestPrintState): "default" | "secondary" | "destructive" | "outline" {
   if (s === "printed") return "default";
+  if (s === "unknown") return "outline";
   if (s === "failed" || s === "expired" || s === "rejected") return "destructive";
   return "secondary";
 }
@@ -69,7 +71,7 @@ function steps(t: TestPrintView): { state: TestPrintState; label: string; at: st
         ];
   const reached = new Map(t.events.map((e) => [e.state, e]));
   const out = plan.map(([state, label]) => ({ state, label, at: reached.get(state)?.at ?? null, message: reached.get(state)?.message ?? null }));
-  const final = t.events.find((e) => ["printed", "failed", "expired", "rejected"].includes(e.state));
+  const final = t.events.find((e) => ["printed", "failed", "expired", "rejected", "unknown"].includes(e.state));
   out.push(
     final
       ? { state: final.state, label: STATE_LABEL[final.state], at: final.at, message: final.message ?? t.error ?? null }
@@ -81,6 +83,7 @@ function steps(t: TestPrintView): { state: TestPrintState; label: string; at: st
 
 function StepIcon({ state, reached, current }: { state: TestPrintState; reached: boolean; current: boolean }) {
   if (reached && (state === "failed" || state === "expired" || state === "rejected")) return <CircleXIcon className="text-destructive" />;
+  if (reached && state === "unknown") return <CircleHelpIcon className="text-muted-foreground" />;
   if (reached) return <CircleCheckIcon className="text-primary" />;
   if (current) return <Loader2Icon className="animate-spin text-muted-foreground motion-reduce:animate-none" />;
   return <CircleDashedIcon className="text-muted-foreground" />;

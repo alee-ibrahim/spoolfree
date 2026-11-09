@@ -57,6 +57,13 @@
       "when": 1794195040488,
       "tag": "0007_test_prints",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794202382482,
+      "tag": "0008_printer_name_quotes",
+      "breakpoints": true
     }
   ]
 }

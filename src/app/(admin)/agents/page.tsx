@@ -272,6 +272,11 @@ function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) 
                           .map((q) => (
                             <div key={`q${q.name}`} className="mt-1 max-w-md text-xs text-muted-foreground">
                               {q.name}: {q.driver} on {q.port}
+                              {q.vendorFallback && (
+                                <Badge variant="outline" className="ml-1" title={`Driverless failed on this PC, so it uses the vendor fallback package ${q.vendorFallback}`}>
+                                  Vendor fallback
+                                </Badge>
+                              )}
                             </div>
                           ))}
       </>
@@ -303,7 +308,11 @@ function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) 
                           .filter((x) => x.status !== "installed" && x.status !== "present")
                           .map((x) => (
                             <div key={`dr${x.printer}`} className={x.status === "failed" ? "mt-1 text-xs text-destructive" : "mt-1 text-xs text-amber-700 dark:text-amber-500"} title={x.message ?? undefined}>
-                              {x.printer}: {x.status === "wpp-blocked" ? "vendor driver not allowed under Windows Protected Print Mode; driverless used" : `vendor driver ${x.status}${x.message ? `: ${x.message}` : ""}`}
+                              {x.printer}: {x.status === "wpp-blocked"
+                                ? "vendor driver not allowed under Windows Protected Print Mode; driverless used"
+                                : x.status === "vendor-fallback"
+                                  ? `vendor fallback: driverless failed on this PC, ${x.driverName ?? "vendor driver"} used${x.message ? ` (${x.message})` : ""}`
+                                  : `vendor driver ${x.status}${x.message ? `: ${x.message}` : ""}`}
                             </div>
                           ))}
                         {(r?.fallbacks ?? []).map((f) => (

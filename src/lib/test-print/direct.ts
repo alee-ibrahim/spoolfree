@@ -7,7 +7,7 @@ import type { Printer, TestPrint } from "../db/schema";
 import { getJobAttributes, getPrinterAttributes, IppStatusError, printJob } from "../ipp/client";
 import { Tag, type IppRequestAttribute, type IppValue } from "../ipp/encoding";
 import { printerUri } from "../ipp/interpret";
-import { pageSizeFor, renderPdf, renderPwgRaster, renderUrf, type RasterType, type TestPageInfo } from "./page";
+import { A4, assertRasterSize, choosePageSize, MAX_RENDER_DPI, rasterPixels, MAX_RASTER_PIXELS, renderPdf, renderPwgRaster, renderUrf, type PageSize, type RasterType, type TestPageInfo } from "./page";
 import { reserveTestPrint, TestPrintError, transitionTestPrint } from "./service";
 
 /**
@@ -22,6 +22,7 @@ export const FORMAT_ATTRIBUTES = [
   "pwg-raster-document-type-supported",
   "urf-supported",
   "media-default",
+  "media-supported",
   "sides-supported",
   "print-color-mode-supported",
   "ipp-versions-supported",
@@ -58,12 +59,18 @@ function strings(v: IppValue[] | undefined): string[] {
   return (v ?? []).filter((x): x is string => typeof x === "string").map((s) => s.toLowerCase());
 }
 
-/** Pick 300 dpi when offered, else the lowest from 300 up (at most 600), else the lowest offered, else 300. */
-export function pickDpi(offered: number[]): number {
-  const ok = [...new Set(offered.filter((d) => d >= 72 && d <= 1200))].sort((a, b) => a - b);
-  if (!ok.length) return 300;
+/**
+ * Pick 300 dpi when offered, else the lowest from 300 up to MAX_RENDER_DPI (600), else the highest offered below 300
+ * (at least 72), else 300 when the printer lists nothing. Null when it lists only resolutions above 600 dpi: the server
+ * never renders above that (M1), so the caller falls back to another format.
+ */
+export function pickDpi(offered: number[]): number | null {
+  const valid = offered.filter((d) => Number.isFinite(d) && d > 0);
+  if (!valid.length) return 300;
+  const ok = [...new Set(valid.filter((d) => d >= 72 && d <= MAX_RENDER_DPI))].sort((a, b) => a - b);
+  if (!ok.length) return null;
   if (ok.includes(300)) return 300;
-  return ok.find((d) => d > 300 && d <= 600) ?? ok.find((d) => d >= 150 && d < 300) ?? ok[0];
+  return ok.find((d) => d > 300) ?? ok.at(-1)!;
 }
 
 function pwgDpis(v: IppValue[] | undefined): number[] {
@@ -83,14 +90,16 @@ export function chooseDocument(attrs: Record<string, IppValue[]>): DocumentChoic
   if (formats.includes("image/pwg-raster")) {
     const types = strings(attrs["pwg-raster-document-type-supported"]);
     const type: RasterType | null = !types.length || types.includes("sgray_8") ? "sgray_8" : types.includes("black_1") ? "black_1" : types.includes("srgb_8") ? "srgb_8" : null;
-    if (type) return { format: "image/pwg-raster", type, dpi: pickDpi(pwgDpis(attrs["pwg-raster-document-resolution-supported"])) };
+    const dpi = pickDpi(pwgDpis(attrs["pwg-raster-document-resolution-supported"]));
+    if (type && dpi !== null) return { format: "image/pwg-raster", type, dpi };
   }
   if (formats.includes("image/urf")) {
     const urf = strings(attrs["urf-supported"]).map((s) => s.toUpperCase());
     const color = urf.includes("W8") || !urf.some((s) => s === "SRGB24") ? "W8" : "SRGB24";
     const rs = urf.find((s) => s.startsWith("RS"));
     const dpis = rs ? rs.slice(2).split("-").map(Number).filter(Number.isFinite) : [];
-    return { format: "image/urf", color, dpi: pickDpi(dpis) };
+    const dpi = pickDpi(dpis);
+    if (dpi !== null) return { format: "image/urf", color, dpi };
   }
   if (formats.includes("application/pdf")) return { format: "application/pdf" };
   return null;
@@ -105,8 +114,21 @@ export function jobAttributesFor(attrs: Record<string, IppValue[]>): IppRequestA
   return out;
 }
 
-export function renderDocument(choice: DocumentChoice, info: TestPageInfo, media: string | null): Buffer {
-  const size = pageSizeFor(media);
+/**
+ * The page size to render: A4 or Letter when the printer takes them (choosePageSize); a raster page that would still
+ * exceed the pixel cap is rendered on A4 instead, and throws when even that does not fit (never allocates it).
+ */
+export function pageSizeForChoice(choice: DocumentChoice, attrs: Record<string, IppValue[]>): PageSize {
+  const def = (attrs["media-default"]?.[0] as string | undefined) ?? null;
+  const supported = (attrs["media-supported"] ?? []).filter((x): x is string => typeof x === "string");
+  const size = choosePageSize(def, supported);
+  if (choice.format === "application/pdf") return size;
+  if (rasterPixels(size, choice.dpi) <= MAX_RASTER_PIXELS) return size;
+  assertRasterSize(A4, choice.dpi);
+  return A4;
+}
+
+export function renderDocument(choice: DocumentChoice, info: TestPageInfo, size: PageSize): Buffer {
   if (choice.format === "image/pwg-raster") return renderPwgRaster(info, size, choice.dpi, choice.type);
   if (choice.format === "image/urf") return renderUrf(info, size, choice.dpi, choice.color);
   return renderPdf(info, size);
@@ -157,7 +179,7 @@ export async function sendDirectTestPrint(printer: Printer, actor: string, drive
     const attrs = await deps.getPrinterAttributes(uri, FORMAT_ATTRIBUTES, timeout);
     if (attrs["printer-is-accepting-jobs"]?.[0] === false) throw new Error("the printer is not accepting jobs (printer-is-accepting-jobs = false)");
     const choice = chooseDocument(attrs);
-    if (!choice) throw new Error("the printer lists no PWG raster, URF or PDF format");
+    if (!choice) throw new Error("the printer lists no PWG raster, URF or PDF format the server can render (raster resolutions above 600 dpi only)");
     const model = (attrs["printer-make-and-model"]?.[0] as string | undefined) ?? printer.model;
     const info: TestPageInfo = {
       printerName: printer.name,
@@ -170,8 +192,7 @@ export async function sendDirectTestPrint(printer: Printer, actor: string, drive
       timeZone: config().ANALYTICS_TIME_ZONE,
       id: row.id,
     };
-    const media = (attrs["media-default"]?.[0] as string | undefined) ?? null;
-    const doc = renderDocument(choice, info, media);
+    const doc = renderDocument(choice, info, pageSizeForChoice(choice, attrs));
     const version: [number, number] = strings(attrs["ipp-versions-supported"]).some((v) => v.startsWith("2.")) ? [2, 0] : [1, 1];
     const job = await deps.printJob(uri, { documentFormat: choice.format, jobName: "Spoolfree test page", userName: "spoolfree", jobAttributes: jobAttributesFor(attrs), document: doc, version }, 60_000);
     const jobId = typeof job["job-id"]?.[0] === "number" ? (job["job-id"][0] as number) : null;
@@ -194,7 +215,8 @@ export async function sendDirectTestPrint(printer: Printer, actor: string, drive
 /** Follows a direct job (Get-Job-Attributes) and records its state. Gives up after 10 minutes without a final state. */
 export async function refreshDirectTestPrint(row: TestPrint, printer: Printer, getJob: typeof getJobAttributes = getJobAttributes, now = new Date()): Promise<TestPrint> {
   if (row.mode !== "direct" || !["sent", "printing"].includes(row.state)) return row;
-  if (row.jobId === null) return transitionTestPrint(row, "printed", { message: "the printer accepted the job but returned no job id to follow" }, "system", now);
+  // Honest results (0.8.1): a job that cannot be followed is "unknown", never "printed".
+  if (row.jobId === null) return transitionTestPrint(row, "unknown", { message: "the printer accepted the job but returned no job id to follow: check the paper" }, "system", now);
   if (now.getTime() - row.createdAt.getTime() > 10 * 60_000)
     return transitionTestPrint(row, "failed", { error: "no final job state from the printer after 10 minutes", message: `last state: ${row.jobStatus ?? "unknown"}` }, "system", now);
   try {

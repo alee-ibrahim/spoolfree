@@ -2,6 +2,9 @@ import { eq, sql } from "drizzle-orm";
 import type { db as dbFn } from "./db";
 import * as schema from "./db/schema";
 import { auditWith } from "./printer-ous";
+import { PRINTER_NAME_RE, PRINTER_NAME_RULE } from "./printer-name";
+
+export { PRINTER_NAME_RE };
 
 /**
  * Deleting and renaming a printer. Shared by the admin UI (actions.ts) and the CLI (scripts/printers.ts), so both
@@ -15,8 +18,6 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Executor = Db | Tx;
 type PrinterRow = typeof schema.printers.$inferSelect;
 
-/** Same rule as the printer form: 1-100 characters, no \ / , or !. */
-export const PRINTER_NAME_RE = /^[^\\/,!]+$/;
 
 /** Printer fields recorded in audit details (before/after of an update, the deleted printer). */
 export function printerSnapshot(p: PrinterRow) {
@@ -128,7 +129,7 @@ export function printerNameError(name: string): string | null {
   const n = name.trim();
   if (!n) return "Name is required";
   if (n.length > 100) return "Name is longer than 100 characters";
-  if (!PRINTER_NAME_RE.test(n)) return "Name cannot contain \\ / , or !";
+  if (!PRINTER_NAME_RE.test(n)) return PRINTER_NAME_RULE;
   return null;
 }
 

@@ -198,3 +198,27 @@ function int32(n: number) {
 function attr(tag: number, name: string, value: Buffer) {
   return Buffer.concat([Buffer.from([tag]), u16(name.length), Buffer.from(name), u16(value.length), value]);
 }
+
+describe("IPP client deadline (L8)", () => {
+  it("gives up on a device that drips bytes slower than the deadline but faster than the idle timeout", async () => {
+    const { createServer } = await import("node:http");
+    const timers: NodeJS.Timeout[] = [];
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/ipp" });
+      const t = setInterval(() => res.write(Buffer.from([0])), 100);
+      timers.push(t);
+      res.on("close", () => clearInterval(t));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    const started = Date.now();
+    try {
+      await expect(getPrinterAttributes(`ipp://127.0.0.1:${port}/ipp/print`, ["all"], 600)).rejects.toThrow(/600 ms/);
+      expect(Date.now() - started).toBeLessThan(3000);
+    } finally {
+      timers.forEach(clearInterval);
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+});

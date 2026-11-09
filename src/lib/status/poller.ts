@@ -180,6 +180,26 @@ async function purgeIfDue() {
   if (r.jobs || r.counters) console.log(`[spoolfree] analytics retention: deleted ${r.jobs} print jobs and ${r.counters} counter readings`);
 }
 
+/**
+ * Housekeeping after each poll cycle (inside the poll lock): analytics retention, and test prints whose command
+ * expired are finalised (L7) on a schedule instead of only when an admin opens them, so their audit rows are written on time.
+ */
+export async function runHousekeeping(deps: { purge?: () => Promise<void>; expire?: () => Promise<number> } = {}): Promise<void> {
+  await (deps.purge ?? purgeIfDue)().catch((e) => console.warn(`[spoolfree] analytics purge failed: ${(e as Error).message}`));
+  const expire =
+    deps.expire ??
+    (async () => {
+      const { expireTestPrints } = await import("../test-print/service");
+      return expireTestPrints();
+    });
+  try {
+    const n = await expire();
+    if (n) console.log(`[spoolfree] test prints: ${n} expired`);
+  } catch (e) {
+    console.warn(`[spoolfree] test print expiry failed: ${(e as Error).message}`);
+  }
+}
+
 const LOCK_ID = 0x5f001;
 
 /** One poll cycle, guarded by a Postgres advisory lock so only one replica polls. */
@@ -189,7 +209,7 @@ export async function pollOnce(): Promise<boolean> {
     const [{ locked }] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(${LOCK_ID}) as locked`;
     if (!locked) return false;
     await pollAll();
-    await purgeIfDue().catch((e) => console.warn(`[spoolfree] analytics purge failed: ${(e as Error).message}`));
+    await runHousekeeping();
     return true;
   });
 }

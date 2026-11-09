@@ -32,6 +32,46 @@ export interface PageSize {
 export const A4: PageSize = { name: "iso_a4_210x297mm", widthMm: 210, heightMm: 297 };
 export const LETTER: PageSize = { name: "na_letter_8.5x11in", widthMm: 215.9, heightMm: 279.4 };
 
+/** Highest resolution the server renders a test page at (M1: a printer-chosen 1200 dpi page is ~290 MB of canvas). */
+export const MAX_RENDER_DPI = 600;
+/** Hard cap on the canvas size in pixels (8-bit grey, one byte each): A4 at 600 dpi is about 35 MP. */
+export const MAX_RASTER_PIXELS = 40_000_000;
+
+/** Canvas size in pixels of a page at dpi. */
+export function rasterPixels(size: PageSize, dpi: number): number {
+  return Math.round((size.widthMm / 25.4) * dpi) * Math.round((size.heightMm / 25.4) * dpi);
+}
+
+export class RasterTooLargeError extends Error {}
+
+/** Throws RasterTooLargeError when a page at dpi would exceed MAX_RENDER_DPI or MAX_RASTER_PIXELS. */
+export function assertRasterSize(size: PageSize, dpi: number): void {
+  if (!(dpi > 0) || dpi > MAX_RENDER_DPI) throw new RasterTooLargeError(`${dpi} dpi is above the ${MAX_RENDER_DPI} dpi the server renders test pages at`);
+  const px = rasterPixels(size, dpi);
+  if (px > MAX_RASTER_PIXELS)
+    throw new RasterTooLargeError(`a ${size.widthMm}x${size.heightMm} mm page at ${dpi} dpi is ${Math.round(px / 1e6)} MP, above the ${MAX_RASTER_PIXELS / 1e6} MP limit`);
+}
+
+const isA4 = (m: string) => /^iso_a4_/i.test(m);
+const isLetter = (m: string) => /^na_letter_/i.test(m);
+
+/**
+ * The test page size: A4 or Letter whenever the printer takes them (media-default first, then media-supported, A4
+ * unless the default is a North American size), else media-default when it is a sane size, else A4. A test page never
+ * needs the printer's largest paper, and a large page means a large raster.
+ */
+export function choosePageSize(mediaDefault: string | null | undefined, mediaSupported: readonly string[] = []): PageSize {
+  const def = (mediaDefault ?? "").trim();
+  if (def && (isA4(def) || isLetter(def))) return pageSizeFor(def);
+  const sup = mediaSupported.map((m) => m.trim());
+  const a4 = sup.find(isA4);
+  const letter = sup.find(isLetter);
+  const preferLetter = /^na_/i.test(def);
+  const pick = preferLetter ? (letter ?? a4) : (a4 ?? letter);
+  if (pick) return pageSizeFor(pick);
+  return pageSizeFor(def || null);
+}
+
 /** Page size from a PWG media name (media-default); unknown, tiny or huge sizes give A4. */
 export function pageSizeFor(media: string | null | undefined): PageSize {
   const m = /_([\d.]+)x([\d.]+)(mm|in)$/.exec(media ?? "");
@@ -152,6 +192,7 @@ export class GrayCanvas {
     readonly width: number,
     readonly height: number,
   ) {
+    if (!(width > 0 && height > 0) || width * height > MAX_RASTER_PIXELS) throw new RasterTooLargeError(`a ${width}x${height} canvas is above the ${MAX_RASTER_PIXELS / 1e6} MP limit`);
     this.data = new Uint8Array(width * height).fill(255);
   }
   fill(x0: number, y0: number, x1: number, y1: number, v: number) {
@@ -168,6 +209,7 @@ export class GrayCanvas {
 
 /** Draws the layout at dpi into a grey canvas of the page size. */
 export function rasterize(els: El[], size: PageSize, dpi: number): GrayCanvas {
+  assertRasterSize(size, dpi);
   const px = (mm: number) => (mm / 25.4) * dpi;
   const c = new GrayCanvas(Math.round(px(size.widthMm)), Math.round(px(size.heightMm)));
   const minLine = Math.max(1, Math.round(dpi / 300));

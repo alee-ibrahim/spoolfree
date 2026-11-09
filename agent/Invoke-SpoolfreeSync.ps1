@@ -15,21 +15,119 @@
 
 .PARAMETER CommandsOnly
     (0.8) Only fetch and run pending commands (test prints) from /api/agent/commands. The "Spoolfree Commands" task
-    runs this every AGENT_COMMAND_POLL_MINUTES; it is cheap when nothing is pending.
+    runs this every AGENT_COMMAND_POLL_MINUTES. 0.8.1: it is cheap when nothing is pending: it reads the configuration
+    from the registry and makes one GET, without loading the agent module and without any AD lookup (the objectGUID is
+    cached in the registry). It logs to commands.log, and a PC that cannot reach the server (an off-network laptop)
+    logs that at most once an hour and still exits 0.
+
+.PARAMETER TestPageJob
+    (0.8.1) Internal: run by the one-off "Spoolfree Test Page" task in the logged-on user's session. Prints the test
+    page described by the job file and writes the result next to it.
 #>
 [CmdletBinding(SupportsShouldProcess)]
-param([switch]$CommandsOnly)
+param(
+    [switch]$CommandsOnly,
+    [string]$TestPageJob,
+    # Tests only: the configuration key and the log folder.
+    [string]$ConfigKey = 'HKLM:\SOFTWARE\Spoolfree',
+    [string]$LogDir
+)
 
 $ErrorActionPreference = 'Stop'
+if (-not $LogDir) { $LogDir = Join-Path $env:ProgramData 'Spoolfree\Logs' }
+
+# Test page as the logged-on user (0.8.1): no logs, no configuration (the user can read neither).
+if ($TestPageJob) {
+    Import-Module (Join-Path $PSScriptRoot 'Spoolfree.Agent.psm1') -Force
+    Invoke-SpoolfreeTestPageJob -Path $TestPageJob
+    exit 0
+}
+
+# Fast path for commands (0.8.1, M2): registry + one small authenticated GET; the module is loaded, and signatures
+# are checked, only when something is pending.
+if ($CommandsOnly) {
+    $pollLog = Join-Path $LogDir 'commands.log'
+    function Write-PollLog([string]$Message) {
+        try {
+            if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+            if ((Test-Path -LiteralPath $pollLog) -and (Get-Item -LiteralPath $pollLog).Length -gt 1MB) { Move-Item -LiteralPath $pollLog "$pollLog.1" -Force }
+            Add-Content -LiteralPath $pollLog -Value ('{0:u} {1}' -f (Get-Date).ToUniversalTime(), $Message)
+        } catch { }
+    }
+    # A problem (server unreachable, AD unreachable...) is logged once per kind and then at most once an hour.
+    function Write-PollProblem([string]$Kind, [string]$Message) {
+        $now = (Get-Date).ToUniversalTime()
+        $last = $null
+        try { $last = [string](Get-ItemProperty -Path $ConfigKey -Name CommandPollProblem -ErrorAction Stop).CommandPollProblem } catch { }
+        $at = [datetime]::MinValue
+        $parts = ([string]$last).Split([char]'|', 2)
+        $logged = $parts.Count -eq 2 -and $parts[1] -eq $Kind -and [datetime]::TryParse($parts[0], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$at) -and ($now - $at).TotalMinutes -lt 60
+        if ($logged) { return }
+        Write-PollLog "$Message (logged at most once an hour while it lasts)"
+        try { New-ItemProperty -Path $ConfigKey -Name CommandPollProblem -Value ('{0}|{1}' -f $now.ToString('o'), $Kind) -PropertyType String -Force | Out-Null } catch { }
+    }
+    $reg = Get-ItemProperty -Path $ConfigKey -ErrorAction SilentlyContinue
+    $value = { param($n) if ($reg -and $reg.PSObject.Properties[$n]) { [string]$reg.$n } else { '' } }
+    $serverUrl = & $value 'ServerUrl'
+    $publicKey = & $value 'PublicKey'
+    $protected = & $value 'MachineToken'
+    # Not installed or not enrolled yet: the main sync reports that; the poll stays quiet.
+    if (-not $serverUrl -or -not $publicKey -or -not $protected) { exit 0 }
+    try {
+        Add-Type -AssemblyName System.Security
+        $token = [Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($protected), $null, [Security.Cryptography.DataProtectionScope]::LocalMachine))
+    } catch {
+        Write-PollProblem 'token' "Command poll: cannot read the machine token: $($_.Exception.Message)"
+        exit 0
+    }
+    $base = $serverUrl.TrimEnd('/')
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $resp = Invoke-RestMethod -Uri "$base/api/agent/commands" -Headers @{ Authorization = "Bearer $token"; 'User-Agent' = 'Spoolfree-Agent-Poll' } -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+    } catch {
+        $status = $null
+        try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch { }
+        $kind = if ($status) { "http-$status" } else { 'unreachable' }
+        Write-PollProblem $kind "Command poll failed ($(if ($status) { "HTTP $status" } else { 'server unreachable' })): $($_.Exception.Message)"
+        exit 0
+    }
+    if (& $value 'CommandPollProblem') {
+        Write-PollLog 'Command poll works again.'
+        Remove-ItemProperty -Path $ConfigKey -Name CommandPollProblem -ErrorAction SilentlyContinue
+    }
+    $pending = @(if ($resp -and $resp.PSObject.Properties['commands']) { @($resp.commands) | Where-Object { $_ } })
+    if ($pending.Count -eq 0 -or $WhatIfPreference) { exit 0 }
+
+    Import-Module (Join-Path $PSScriptRoot 'Spoolfree.Agent.psm1') -Force
+    # The objectGUID cached at enrollment or by the main sync; AD only when there is no cache.
+    $objectGuid = & $value 'ObjectGuid'
+    if (-not $objectGuid) {
+        try {
+            $objectGuid = (Get-SpoolfreeComputerIdentity).ObjectGuid
+            Set-SpoolfreeIdentityCache -ObjectGuid $objectGuid -Key $ConfigKey | Out-Null
+        } catch {
+            Write-PollProblem 'identity' "Command poll: $($pending.Count) command(s) pending, but this computer's identity is not cached and AD cannot be reached: $($_.Exception.Message)"
+            exit 0
+        }
+    }
+    try {
+        $n = Invoke-SpoolfreeCommands -Commands $pending -PublicKey $publicKey -ObjectGuid $objectGuid -BaseUrl $base -Token $token -ServerId (Get-SpoolfreeServerId $publicKey) -Log ${function:Write-PollLog}
+        Write-PollLog "Command poll: $($pending.Count) pending, $n run."
+    } catch {
+        Write-PollLog "Running commands failed: $($_.Exception.Message)"
+    }
+    exit 0
+}
+
 Import-Module (Join-Path $PSScriptRoot 'Spoolfree.Agent.psm1') -Force
 
-$logDir = Join-Path $env:ProgramData 'Spoolfree\Logs'
-if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-$log = Join-Path $logDir 'sync.log'
-if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) { Move-Item $log "$log.1" -Force }
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+$log = Join-Path $LogDir 'sync.log'
+try { if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) { Move-Item $log "$log.1" -Force } } catch { }
+# 0.8.1 (L6): a log write that fails (the file is busy) never aborts the sync.
 function Write-Log([string]$Message) {
     $line = '{0:u} {1}' -f (Get-Date).ToUniversalTime(), $Message
-    Add-Content -Path $log -Value $line
+    try { Add-Content -Path $log -Value $line } catch { }
     Write-Verbose $line
 }
 
@@ -44,24 +142,10 @@ if (-not $cfg.MachineToken) { Write-Log 'No machine token: re-run Install-Spoolf
 
 $identity = Get-SpoolfreeComputerIdentity
 $base = $cfg.ServerUrl.TrimEnd('/')
-
-# Fast path for commands (0.8): a small authenticated GET; signatures are checked only when something is pending.
-if ($CommandsOnly) {
-    try {
-        $resp = Invoke-SpoolfreeHttp -Uri "$base/api/agent/commands" -Token $cfg.MachineToken
-    } catch {
-        $status = $null
-        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-        Write-Log "Command poll failed (HTTP $status): $($_.Exception.Message)"
-        exit 4
-    }
-    $pending = @(Get-SpoolfreeProperty $resp 'commands' | Where-Object { $_ })
-    if ($pending.Count -and -not $WhatIfPreference) {
-        $n = Invoke-SpoolfreeCommands -Commands $pending -PublicKey $cfg.PublicKey -ObjectGuid $identity.ObjectGuid -BaseUrl $base -Token $cfg.MachineToken -ServerId (Get-SpoolfreeServerId $cfg.PublicKey) -Log ${function:Write-Log}
-        Write-Log "Command poll: $($pending.Count) pending, $n run."
-    }
-    exit 0
-}
+# 0.8.1 (M2): cache the objectGUID for the minute command poll, which never asks AD.
+try { Set-SpoolfreeIdentityCache -ObjectGuid $identity.ObjectGuid | Out-Null } catch { Write-Log "Caching the computer identity failed: $($_.Exception.Message)" }
+# Leftovers of an interrupted test print (one-off tasks in a user's session).
+try { Remove-SpoolfreeTestPageTasks } catch { }
 
 try {
     $envelope = Invoke-SpoolfreeHttp -Uri "$base/api/agent/manifest" -Token $cfg.MachineToken
@@ -149,11 +233,23 @@ $migrate = @(Get-SpoolfreeInstalled | Where-Object {
         $q0 -and (Test-SpoolfreeClassOnRawQueue -Method ([string]$_.Method) -DriverName ([string]$q0.DriverName)) -and (Test-SpoolfreeMigrateDue $_.MigrateTried)
     } | ForEach-Object { [string]$_.Name })
 if ($migrate.Count) { Write-Log "Old-fallback queues (IPP Class Driver on a RAW port) to re-create: $($migrate -join '; ')" }
-$plan = Get-SpoolfreePlan -Desired @($manifest.printers) -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter -VendorAllowed (-not $wpp) -Migrate $migrate
+# 0.8.1: per-PC vendor fallback. A driverless printer whose queue here was created with its fallbackDriver (because
+# Add-Printer -IppURL failed on this PC) keeps that vendor queue; a new package re-creates it make-before-break. When the
+# manifest no longer offers a fallback, the driverless queue is tried (new queue first) and the vendor queue kept if that
+# fails, retried after 24 h.
+$markerByName = @{}
+foreach ($m in @(Get-SpoolfreeInstalled)) { $markerByName[([string]$m.Name).ToLowerInvariant()] = $m }
+$desired = @(foreach ($p in @($manifest.printers)) { Get-SpoolfreeEffectivePrinter -Printer $p -Marker $markerByName[([string]$p.name).ToLowerInvariant()] -VendorAllowed (-not $wpp) })
+$holdFallback = @(foreach ($d in $desired) {
+        $m = $markerByName[([string]$d.name).ToLowerInvariant()]
+        if ($m -and $m.VendorFallback -and -not (Test-SpoolfreeVendorFallbackPrinter $d) -and -not (Test-SpoolfreeMigrateDue $m.MigrateTried)) { [string]$d.name }
+    })
+$plan = Get-SpoolfreePlan -Desired $desired -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter -VendorAllowed (-not $wpp) -Migrate $migrate
+foreach ($step in $plan) { if ($step.Action -eq 'Replace' -and $holdFallback -contains [string]$step.Name) { $step.Action = 'Keep' } }
 
 # Vendor drivers (0.7): not allowed under Windows Protected Print Mode; those printers stay driverless.
 $driverResults = New-Object System.Collections.Generic.List[object]
-foreach ($p in @($manifest.printers)) {
+foreach ($p in $desired) {
     $v = Get-SpoolfreeVendorDriver $p
     if ($v -and $wpp) {
         $driverResults.Add([ordered]@{ printer = [string]$p.name; status = 'wpp-blocked'; driverName = $v.DriverName; message = 'vendor driver not allowed under WPP; driverless queue used' })
@@ -191,12 +287,23 @@ $lateRemoved = @{}
 
 # Installs the printer's vendor driver (download, hash + signature checks, pnputil) and creates its queue under
 # $QueueName. Throws on failure.
-function Install-VendorQueue($printer, [string]$QueueName) {
+function Install-VendorQueue($printer, [string]$QueueName, [string]$Status, [string]$Message) {
     $v = Get-SpoolfreeVendorDriver $printer
     $state = Install-SpoolfreeVendorDriver -Vendor $v -BaseUrl $base -Token $cfg.MachineToken
     if ($state -eq 'installed') { Write-Log "$($printer.name): installed vendor driver '$($v.DriverName)' from package '$($v.PackageName)' (sha256 $($v.Sha256))." }
     Install-SpoolfreePrinter -Printer $printer -Method 'Vendor' -ServerId $serverId -QueueName $QueueName
-    $driverResults.Add([ordered]@{ printer = [string]$printer.name; status = $state; driverName = $v.DriverName; message = "$($v.Protocol) port $(Get-SpoolfreeVendorPortName -Printer $printer -Vendor $v)" })
+    # 0.8.1: a vendor fallback queue is marked, so later syncs keep it (Get-SpoolfreeEffectivePrinter).
+    if ((Test-SpoolfreeVendorFallbackPrinter $printer) -and $QueueName -eq [string]$printer.name) { Set-SpoolfreeMarkerValue -Name $QueueName -Property 'VendorFallback' -Value (Get-FallbackLabel $printer) }
+    $port = "$($v.Protocol) port $(Get-SpoolfreeVendorPortName -Printer $printer -Vendor $v)"
+    $driverResults.Add([ordered]@{ printer = [string]$printer.name; status = $(if ($Status) { $Status } else { $state }); driverName = $v.DriverName; message = $(if ($Message) { "$Message; $port" } else { $port }) })
+}
+
+# The package a vendor fallback queue uses (marker VendorFallback, report queues[].vendorFallback).
+function Get-FallbackLabel($printer) {
+    $v = Get-SpoolfreeVendorDriver $printer
+    if ($v.PackageName) { return $v.PackageName }
+    if ($v.PackageId) { return $v.PackageId }
+    return $v.DriverName
 }
 
 function Install-SyncStep($step) {
@@ -228,8 +335,25 @@ function Install-SyncStep($step) {
                 Where-Object { $_.Kind -ne 'connection' -and -not ([string]$_.Queue).StartsWith('\') } | ForEach-Object { [string]$_.Queue }
         }
     }
-    $r = Install-SpoolfreePrinterResilient -Printer $step.Printer -Method $method -ServerId $serverId -ProtectedPrintMode $wpp `
-        -TakeoverRecovery $recovery -FindBlocking $find -FallbackDriver (Get-SpoolfreeLegacyDriver -Printer $name)
+    try {
+        $r = Install-SpoolfreePrinterResilient -Printer $step.Printer -Method $method -ServerId $serverId -ProtectedPrintMode $wpp `
+            -TakeoverRecovery $recovery -FindBlocking $find -FallbackDriver (Get-SpoolfreeLegacyDriver -Printer $name)
+    } catch {
+        # 0.8.1: the driverless queue cannot be created on this PC; use the printer's vendor fallback package, if any.
+        $why = $_.Exception.Message
+        $fp = if (-not $wpp -and -not (Test-SpoolfreeVendorFallbackPrinter $step.Printer)) { ConvertTo-SpoolfreeFallbackPrinter $step.Printer } else { $null }
+        if (-not $fp -or (Get-SpoolfreeQueueByName -Name $name)) { throw }
+        $fv = Get-SpoolfreeVendorDriver $fp
+        Write-Log "${name}: the driverless queue failed on this PC ($why); using the vendor fallback driver '$($fv.DriverName)' from package '$($fv.PackageName)'."
+        try {
+            Install-VendorQueue $fp $name 'vendor-fallback' "Add-Printer -IppURL failed on this PC; vendor driver used on this PC only"
+        } catch {
+            if (Get-SpoolfreeQueueByName -Name $name) { try { Remove-SpoolfreeQueue -Name $name } catch { } }
+            throw "$why; the vendor fallback driver '$($fv.DriverName)' failed too: $($_.Exception.Message)"
+        }
+        $added.Add($name)
+        return
+    }
     foreach ($n in @($r.Notes)) { Write-Log "${name}: $n" }
     foreach ($rq in @($r.RemovedQueues)) {
         $lateRemoved[$rq] = $name
@@ -251,6 +375,9 @@ function Switch-SyncQueue($step) {
     $v = Get-SpoolfreeVendorDriver $step.Printer
     $useVendor = [bool]($v -and -not $wpp)
     $isMigration = $migrate -contains $name
+    $target = $step.Printer
+    $oldMarker = $markerByName[$name.ToLowerInvariant()]
+    $wasFallback = [bool]($oldMarker -and $oldMarker.VendorFallback)
     try {
         if ($useVendor) { Install-VendorQueue $step.Printer $tmp }
         else { Install-SpoolfreePrinter -Printer $step.Printer -Method $method -ServerId $serverId -QueueName $tmp }
@@ -263,26 +390,53 @@ function Switch-SyncQueue($step) {
             Write-Log "${name}: vendor driver failed ($why); the current queue stays."
             return
         }
-        if ($isMigration -and -not $useVendor) {
+        if ($isMigration -or $wasFallback) {
             # 0.7.7: an old-fallback queue (IPP Class Driver on a RAW port) is only replaced by a working queue.
-            Set-SpoolfreeMarkerValue -Name $name -Property 'MigrateTried' -Value ((Get-Date).ToUniversalTime().ToString('o'))
-            $errors.Add("${name}: needs a vendor driver: the queue uses the IPP Class Driver on a RAW port (prints raster as text on many printers) and Add-Printer -IppURL failed ($why); kept, retried in 24 h")
-            Write-Log "${name}: Add-Printer -IppURL failed ($why); the old queue (IPP Class Driver on a RAW port) stays; retried in 24 h. Set a vendor driver for this printer."
+            # 0.8.1: with the printer's vendor fallback package when -IppURL fails here; a vendor fallback queue whose
+            # package the manifest no longer offers is kept the same way until the driverless queue works.
+            $fp = if ($isMigration -and -not $wasFallback -and -not $wpp) { ConvertTo-SpoolfreeFallbackPrinter $step.Printer } else { $null }
+            $fbWhy = $null
+            if ($fp) {
+                try {
+                    Install-VendorQueue $fp $tmp 'vendor-fallback' "Add-Printer -IppURL failed on this PC ($why); vendor driver used on this PC only"
+                } catch {
+                    $fbWhy = $_.Exception.Message
+                    if (Get-SpoolfreeQueueByName -Name $tmp) { try { Remove-SpoolfreeQueue -Name $tmp } catch { } }
+                }
+            }
+            if (-not $fp -or $fbWhy) {
+                Set-SpoolfreeMarkerValue -Name $name -Property 'MigrateTried' -Value ((Get-Date).ToUniversalTime().ToString('o'))
+                $more = if ($fbWhy) { "; the vendor fallback driver failed too ($fbWhy)" } else { '' }
+                if ($wasFallback) {
+                    $errors.Add("${name}: the vendor fallback package is no longer offered and Add-Printer -IppURL failed ($why); the vendor queue is kept, retried in 24 h")
+                    Write-Log "${name}: Add-Printer -IppURL failed ($why); the vendor fallback queue stays; retried in 24 h."
+                } else {
+                    $errors.Add("${name}: needs a vendor driver: the queue uses the IPP Class Driver on a RAW port (prints raster as text on many printers) and Add-Printer -IppURL failed ($why)$more; kept, retried in 24 h")
+                    Write-Log "${name}: Add-Printer -IppURL failed ($why)$more; the old queue (IPP Class Driver on a RAW port) stays; retried in 24 h. Set a vendor driver for this printer."
+                }
+                return
+            }
+            $target = $fp
+            $useVendor = $true
+            $v = Get-SpoolfreeVendorDriver $fp
+        } else {
+            Write-Log "${name}: the driverless queue could not be created next to the old one ($why); removing the old queue first."
+            Uninstall-SpoolfreePrinter -Name $name
+            Install-SyncStep $step
             return
         }
-        Write-Log "${name}: the driverless queue could not be created next to the old one ($why); removing the old queue first."
-        Uninstall-SpoolfreePrinter -Name $name
-        Install-SyncStep $step
-        return
     }
     Uninstall-SpoolfreePrinter -Name $name
     $q = Get-SpoolfreeQueueByName -Name $tmp
     Rename-Printer -InputObject $q -NewName $name -ErrorAction Stop
     $q = Get-SpoolfreeQueueByName -Name $name
     if (-not $q) { throw "renaming $tmp to $name failed" }
-    if ($useVendor) { Set-SpoolfreeMarker -Printer $step.Printer -Method 'Vendor' -PortName ([string]$q.PortName) -ServerId $serverId -Target (Get-SpoolfreeQueueTarget $step.Printer) }
-    else { Set-SpoolfreeMarker -Printer $step.Printer -Method $method -PortName ([string]$q.PortName) -ServerId $serverId }
-    Write-Log "${name}: switched to the $(if ($useVendor) { "vendor driver '$($v.DriverName)'" } else { 'driverless queue' }) (new queue created first)."
+    if ($useVendor) { Set-SpoolfreeMarker -Printer $target -Method 'Vendor' -PortName ([string]$q.PortName) -ServerId $serverId -Target (Get-SpoolfreeQueueTarget $target) }
+    else { Set-SpoolfreeMarker -Printer $target -Method $method -PortName ([string]$q.PortName) -ServerId $serverId }
+    $isFallback = Test-SpoolfreeVendorFallbackPrinter $target
+    if ($isFallback) { Set-SpoolfreeMarkerValue -Name $name -Property 'VendorFallback' -Value (Get-FallbackLabel $target) }
+    $what = if (-not $useVendor) { 'driverless queue' } elseif ($isFallback) { "vendor driver '$($v.DriverName)' (vendor fallback on this PC)" } else { "vendor driver '$($v.DriverName)'" }
+    Write-Log "${name}: switched to the $what (new queue created first)."
     $added.Add($name)
 }
 
@@ -415,14 +569,11 @@ if ((Split-Path $PSScriptRoot -Leaf) -eq 'current' -and $PSCmdlet.ShouldProcess(
 
 # Commands (0.8): test prints that came with the manifest (the "Spoolfree Commands" task usually runs them sooner),
 # and the poll task's interval (manifest commandPollMinutes; 0 removes the task). Never fails the sync.
-$commandState = [ordered]@{ pollMinutes = (Get-SpoolfreeCommandPollMinutes (Get-SpoolfreeProperty $manifest 'commandPollMinutes')); ran = 0; error = $null }
+# 0.8.1 (M3): when the poll task exists it runs them; the sync never waits for the command lock or a test print, so a
+# stuck job cannot push the sync past the launcher's time limit (which counts against a freshly updated version).
+# Without the task the sync runs them itself with no lock wait and at most 60 s in total.
+$commandState = [ordered]@{ pollMinutes = (Get-SpoolfreeCommandPollMinutes (Get-SpoolfreeProperty $manifest 'commandPollMinutes')); ran = 0; deferred = 0; error = $null }
 if ($PSCmdlet.ShouldProcess('commands', 'run test prints and update the poll task')) {
-    try {
-        $commandState.ran = Invoke-SpoolfreeCommands -Commands @(Get-SpoolfreeProperty $manifest 'commands') -PublicKey $cfg.PublicKey -ObjectGuid $identity.ObjectGuid -BaseUrl $base -Token $cfg.MachineToken -ServerId $serverId -Log ${function:Write-Log}
-    } catch {
-        $commandState.error = "commands: $($_.Exception.Message)"
-        Write-Log "Running commands failed: $($_.Exception.Message)"
-    }
     if ((Split-Path $PSScriptRoot -Leaf) -eq 'current') {
         try {
             $poll = Update-SpoolfreeCommandTask -Minutes (Get-SpoolfreeProperty $manifest 'commandPollMinutes') -Root (Split-Path $PSScriptRoot -Parent)
@@ -431,6 +582,21 @@ if ($PSCmdlet.ShouldProcess('commands', 'run test prints and update the poll tas
             $commandState.error = "command poll task: $($_.Exception.Message)"
             Write-Log "Updating the command poll task failed: $($_.Exception.Message)"
         }
+    }
+    try {
+        $pendingCommands = @(Get-SpoolfreeProperty $manifest 'commands' | Where-Object { $_ })
+        $taskExists = $false
+        if ($pendingCommands.Count) { try { $taskExists = Test-SpoolfreeCommandTask } catch { } }
+        $cp = Get-SpoolfreeSyncCommandPlan -PollMinutes $commandState.pollMinutes -TaskExists $taskExists -Count $pendingCommands.Count
+        if ($cp.Action -eq 'defer') {
+            $commandState.deferred = $pendingCommands.Count
+            Write-Log "$($pendingCommands.Count) command(s) in the manifest: left to the Spoolfree Commands task."
+        } elseif ($cp.Action -eq 'run') {
+            $commandState.ran = Invoke-SpoolfreeCommands -Commands $pendingCommands -PublicKey $cfg.PublicKey -ObjectGuid $identity.ObjectGuid -BaseUrl $base -Token $cfg.MachineToken -ServerId $serverId -Log ${function:Write-Log} -LockWaitSeconds $cp.LockWaitSeconds -BudgetSeconds $cp.BudgetSeconds
+        }
+    } catch {
+        $commandState.error = "commands: $($_.Exception.Message)"
+        Write-Log "Running commands failed: $($_.Exception.Message)"
     }
 }
 
@@ -450,7 +616,7 @@ if ($PSCmdlet.ShouldProcess('print analytics', 'collect and send')) {
 $applied = @(Get-SpoolfreeInstalled | ForEach-Object { $_.Name })
 $queueReport = @(Get-SpoolfreeInstalled | ForEach-Object {
         $q = Get-SpoolfreeQueueByName -Name ([string]$_.Name)
-        [ordered]@{ name = [string]$_.Name; driver = $(if ($q) { [string]$q.DriverName } else { $null }); port = $(if ($q) { [string]$q.PortName } else { $null }); method = [string]$_.Method }
+        [ordered]@{ name = [string]$_.Name; driver = $(if ($q) { [string]$q.DriverName } else { $null }); port = $(if ($q) { [string]$q.PortName } else { $null }); method = [string]$_.Method; vendorFallback = $(if ($_.VendorFallback) { [string]$_.VendorFallback } else { $null }) }
     } | Select-Object -First 200)
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 $report = [ordered]@{

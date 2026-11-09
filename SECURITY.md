@@ -164,7 +164,10 @@ print through its Spoolfree queue).
 - **Direct mode.** The server sends exactly one page that it rendered itself, in a format the printer lists (PWG
   raster, URF or PDF, in that order), mono and one-sided where the printer supports it. Nothing from the request
   reaches the document except the printer's own name, host and model. The mode is off for printers whose last Test
-  found IPP 1.x only or no driverless format.
+  found IPP 1.x only or no driverless format. The printer's answer cannot make the server allocate a huge page
+  (0.8.1): it renders at 600 dpi at most, on A4 or Letter whenever the printer takes them, and refuses any page above
+  40 megapixels instead of allocating it. Every IPP request also has an overall deadline, so a device that answers a
+  byte at a time cannot hold a request open.
 - **Commands to PCs.** A command is signed on its own with the manifest key, over `spoolfree-command-v1\n` + the JSON
   payload. Because of that domain prefix, a command signature never verifies as a manifest or an agent bundle (those
   are signed over their raw JSON), and the reverse. The agent runs a command only when all of these hold:
@@ -180,6 +183,18 @@ print through its Spoolfree queue).
 
   A command can only print the agent's fixed test page. It carries no script, file or path. The server hands a PC
   only its own commands, and an agent can report results only for its own commands.
+- **Queue names (0.8.1).** Printer names may not contain `"` or control characters (as well as `\ / , !`), checked in
+  the form, the bulk import, rename and the CLI; migration `0008` renames any existing name that does. On the PC, `printui`
+  (through `rundll32`, which takes one command line and splits it itself) is the only tool that gets a queue name on a
+  command line: the agent quotes every argument and refuses any name with `"` or a control character, and starts it
+  with no shell. Everything else uses PowerShell cmdlet parameters. The test page that runs as the logged-on user gets
+  the queue name in a job file, not on its command line.
+- **Test page as the user (0.8.1).** A PC test page is printed in the logged-on user's session (Print Support Apps
+  drop jobs owned by SYSTEM): a one-off scheduled task with that user's interactive principal (limited rights) runs the
+  agent's own script with the path of a job file. The job folder is writable only by SYSTEM and Administrators; the
+  user can read it and write only its result file. The task and the folder are removed afterwards. With nobody logged
+  on, nothing is printed and the result says "can't test: no user session". A result is `printed` only after
+  PrintService event 307 for that queue, `failed` after event 372, and `unknown` otherwise.
 - **Command poll.** `GET /api/agent/commands` (every `AGENT_COMMAND_POLL_MINUTES`, default 1; `0` turns it off) checks
   the machine token, which must be valid and not revoked. When nothing is pending, that is all it does. When commands
   are pending it also checks the computer in the directory, as the manifest does, before it signs and hands them out.

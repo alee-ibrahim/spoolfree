@@ -271,17 +271,21 @@ export interface AgentReport {
   /** Queues created with the TCP/IP port fallback because Add-Printer -IppURL failed (agents 0.4.6+). */
   fallbacks?: { printer: string; method: string; reason?: string }[];
   /** The agent's queues with their driver and port (agents 0.7+). */
-  queues?: { name: string; driver?: string | null; port?: string | null; method?: string | null }[];
-  /**
-   * Vendor driver results (agents 0.7+): installed / present (already installed), wpp-blocked (Windows Protected
-   * Print Mode: driverless used instead), failed, fallback (driverless queue kept or created instead).
-   */
-  drivers?: { printer: string; status: "installed" | "present" | "wpp-blocked" | "failed" | "fallback"; driverName?: string | null; message?: string | null }[];
+  queues?: { name: string; driver?: string | null; port?: string | null; method?: string | null; vendorFallback?: string | null }[];
+  /** Vendor driver results (agents 0.7+), see AGENT_DRIVER_STATES. */
+  drivers?: { printer: string; status: (typeof AGENT_DRIVER_STATES)[number]; driverName?: string | null; message?: string | null }[];
   /** Agents 0.8+: the command poll task (minutes; 0 = off), commands run in this sync, and a task error. */
-  commands?: { pollMinutes: number; ran?: number; error?: string | null };
+  commands?: { pollMinutes: number; ran?: number; deferred?: number; error?: string | null };
   /** Print analytics collection state (agents 0.5+). */
   analytics?: { enabled: boolean; logEnabled?: boolean | null; sent?: number; error?: string | null };
 }
+
+/**
+ * Vendor driver results in agent reports: installed / present (already installed), wpp-blocked (Windows Protected
+ * Print Mode: driverless used instead), failed, fallback (driverless queue kept or created instead), vendor-fallback
+ * (0.8.1: a driverless printer whose -IppURL failed on this PC got its vendor-driver queue instead).
+ */
+export const AGENT_DRIVER_STATES = ["installed", "present", "wpp-blocked", "failed", "fallback", "vendor-fallback"] as const;
 
 export const AGENT_UPDATE_STATES = ["current", "pending", "updated", "rolled-back", "failed", "skipped"] as const;
 
@@ -457,9 +461,10 @@ export type TestPrintMode = "direct" | "pc";
  * queue or the printer) -> printing -> printed | failed. A command that no agent ran in time ends as expired; one the
  * agent refused (bad signature, not its queue, ...) ends as rejected.
  */
-export const TEST_PRINT_STATES = ["queued", "delivered", "sent", "printing", "printed", "failed", "expired", "rejected"] as const;
+/** unknown (0.8.1): the job was submitted but nothing confirmed it printed or failed (final, never shown as printed). */
+export const TEST_PRINT_STATES = ["queued", "delivered", "sent", "printing", "printed", "failed", "expired", "rejected", "unknown"] as const;
 export type TestPrintState = (typeof TEST_PRINT_STATES)[number];
-export const TEST_PRINT_FINAL: TestPrintState[] = ["printed", "failed", "expired", "rejected"];
+export const TEST_PRINT_FINAL: TestPrintState[] = ["printed", "failed", "expired", "rejected", "unknown"];
 
 export interface TestPrintEvent {
   state: TestPrintState;

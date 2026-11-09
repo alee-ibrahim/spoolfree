@@ -131,7 +131,7 @@ export async function driversCli(argv: string[]): Promise<number> {
       const what =
         dec.mode === "vendor"
           ? `vendor   ${dec.driverName} from "${dec.package!.name}" (${dec.match}) via ${dec.protocol}`
-          : `driverless${dec.needed ? ` (${dec.needed})` : ""}`;
+          : `driverless${dec.needed ? ` (${dec.needed})` : ""}${dec.fallback ? `; per-PC vendor fallback ${dec.fallback.driverName} from "${dec.fallback.package.name}" (${dec.fallback.match})` : ""}`;
       console.log(`${p.name}\t[${p.driverMode}] ${what}\t${dec.reason}`);
     }
     return 0;
