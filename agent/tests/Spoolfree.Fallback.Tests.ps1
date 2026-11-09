@@ -64,14 +64,11 @@ Describe 'Install-SpoolfreePrinterResilient' {
         $r.Fallback | Should -BeFalse
         Should -Invoke -ModuleName Spoolfree.Agent Install-SpoolfreePrinter -Times 2 -Exactly -ParameterFilter { $Method -eq 'IppURL' }
     }
-    It 'falls back to the TCP/IP port method when -IppURL keeps failing' {
+    It 'never falls back to the class driver on a RAW port when -IppURL keeps failing: needs a vendor driver (0.7.7)' {
         Mock -ModuleName Spoolfree.Agent Install-SpoolfreePrinter { if ($Method -eq 'IppURL') { throw 'The specified WSD or IPP print device was not found.' } }
         Mock -ModuleName Spoolfree.Agent Clear-SpoolfreeStaleDevice { @() }
-        $r = Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's'
-        $r.Method | Should -Be 'TcpIpPort'
-        $r.Fallback | Should -BeTrue
-        @($r.Notes)[0] | Should -Match 'IppURL failed'
-        Should -Invoke -ModuleName Spoolfree.Agent Install-SpoolfreePrinter -Times 1 -Exactly -ParameterFilter { $Method -eq 'TcpIpPort' }
+        { Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's' } | Should -Throw '*device was not found*needs a vendor driver*'
+        Should -Invoke -ModuleName Spoolfree.Agent Install-SpoolfreePrinter -Times 0 -Exactly -ParameterFilter { $Method -eq 'TcpIpPort' }
     }
     It 'does not fall back on "already exists"' {
         Mock -ModuleName Spoolfree.Agent Install-SpoolfreePrinter { throw 'The printer already exists.' }
@@ -88,7 +85,8 @@ Describe 'Install-SpoolfreePrinterResilient' {
     It 'reports both errors when the fallback fails too' {
         Mock -ModuleName Spoolfree.Agent Install-SpoolfreePrinter { throw "$Method broke" }
         Mock -ModuleName Spoolfree.Agent Clear-SpoolfreeStaleDevice { @() }
-        { Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's' } | Should -Throw '*IppURL broke*TcpIpPort broke*'
+        Mock -ModuleName Spoolfree.Agent Get-PrinterDriver { [pscustomobject]@{ Name = 'Old Driver' } }
+        { Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's' -FallbackDriver 'Old Driver' } | Should -Throw '*IppURL broke*TcpIpPort broke*needs a vendor driver*'
     }
     It 'does not try the fallback for the TCP/IP method itself' {
         Mock -ModuleName Spoolfree.Agent Install-SpoolfreePrinter { throw 'port failed' }

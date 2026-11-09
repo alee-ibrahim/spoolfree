@@ -7,8 +7,7 @@ The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A 
 | Windows | Method | Notes |
 |---|---|---|
 | Windows 11 (all), Windows 10 builds whose `Add-Printer` has `-IppURL` | `Add-Printer -IppURL http(s)://printer:631/ipp/print` | **Primary.** Windows picks the Microsoft IPP Class Driver from the printer's IPP attributes. Creates a local, machine-wide queue. The only method reported to keep working with **Windows Protected Print Mode** on. The printer must be reachable when the queue is created; the agent retries at the next sync. |
-| Older Windows 10 without `-IppURL`, WPP off | `Add-PrinterPort` (Standard TCP/IP) + `Add-Printer -DriverName "Microsoft IPP Class Driver"` | **Fallback.** Not WPP-compatible. Whether the class driver's output prints correctly over a raw TCP port depends on the printer model, so test it first. |
-| No `-IppURL` and WPP on | none | Reported as an error. |
+| Older Windows 10 without `-IppURL` | none (0.7.7) | Reported as an error. Set a vendor driver for the printer (docs/drivers.md); vendor queues work on these PCs. Up to 0.7.6 this was a Standard TCP/IP port with the IPP Class Driver (see below). |
 
 **When `-IppURL` fails** (0.4.6; any error except "already exists"), the agent does not give up on the queue:
 
@@ -20,9 +19,32 @@ The agent is a set of Windows PowerShell 5.1 scripts in [`agent/`](../agent). A 
 
    Nothing that is in use, present, or belongs to another UUID is touched. When something was removed, the agent
    retries `-IppURL` once.
-2. Otherwise, when Windows Protected Print Mode is off, it creates the queue with the TCP/IP fallback (row 2 above). The
-   Agents view shows "created with the TCP/IP port fallback" for that PC. Under WPP there is no fallback.
-3. If both fail, the error names both attempts.
+2. Otherwise, when Windows Protected Print Mode is off and takeover replaced a legacy queue whose driver is still
+   installed, it creates a Standard TCP/IP queue with that driver (see "already exists" below).
+3. Otherwise the error says the printer needs a vendor driver: set one in its Driver setting (docs/drivers.md).
+   0.7.7: the agent no longer creates a TCP/IP queue with the IPP Class Driver.
+
+**The IPP Class Driver is never put on a RAW 9100 port (0.7.7).** Up to 0.7.6 the fallback was a Standard TCP/IP port
+with the IPP Class Driver. That queue sends the class driver's raster straight to port 9100, which expects PCL,
+PostScript or another page language. Printers without PWG raster (for example the Brother HL-2250DN, HL-5350DN and
+MFC-7860DW, which take only PJL, PCL and PCL XL, or PostScript) printed it as pages of text. Printers with port 9100
+closed printed nothing. From 0.7.7 an agent re-creates such queues that it made itself:
+
+- if the printer has a vendor driver (Driver setting), the vendor queue replaces it as usual;
+- otherwise it tries `Add-Printer -IppURL` under a temporary name next to the old queue, then removes the old queue and
+  renames the new one (make-before-break), so the queue name and users' default printer stay;
+- if that fails, the old queue stays and the PC reports *"needs a vendor driver"* for the printer (Agents page). The
+  agent tries again after 24 hours (`MigrateTried` in the queue's marker), because a failing `-IppURL` can take 90
+  seconds.
+
+The fix for a printer that keeps reporting this is a vendor driver: upload its exact-model package and set it in the
+printer's Driver setting.
+
+Seen in 2026 with Brother lasers (HL-L5100DN, MFC-L5700DN, DCP-L3551CDW and others): `Add-Printer -IppURL` failed after
+about 90 seconds with "The specified WSD or IPP print device was not found", on Windows 10 and 11, while the same PCs
+added HP and Xerox printers in a few seconds. An *Internet Port* (`printui /if /r http://printer:631/ipp/print`) with
+the IPP Class Driver was tried as another fallback and dropped: the queue is created, but the class driver cannot
+read the device's capabilities there, and `Set-Printer` and `Set-PrintConfiguration` hang or fail on it.
 
 Seen on Windows 11 21H2 (build 22000): after takeover removed the PC's WSD queue for the device, `Add-Printer -IppURL`
 kept failing with "The specified WSD or IPP print device was not found". The same flow worked on 24H2.
@@ -41,9 +63,9 @@ for the printer or already removed a legacy queue for it on this PC, the agent:
    `%ProgramData%\Spoolfree\Backup\daf-*.reg`), the device's `SWD\DAFWSDProvider\urn:uuid:<uuid>` nodes, then restarts
    the Device Association service, and retries `-IppURL`. Nothing is touched while a queue still uses a WSD/IPP port of
    the device;
-3. as a last resort (WPP off) creates the TCP/IP fallback queue, with the **driver of the legacy queue it replaced** when
-   that driver is still installed (remembered in `HKLM:\SOFTWARE\Spoolfree\LegacyDrivers`), otherwise the Microsoft IPP
-   Class Driver. The PC is never left without the printer.
+3. as a last resort (WPP off) creates a Standard TCP/IP queue with the **driver of the legacy queue it replaced** when
+   that driver is still installed (remembered in `HKLM:\SOFTWARE\Spoolfree\LegacyDrivers`). Up to 0.7.6 it otherwise
+   used the Microsoft IPP Class Driver on that port; from 0.7.7 the error says the printer needs a vendor driver.
 
 In dry-run nothing changes: the error still names the blocking queue. Queue names are matched literally from 0.6.2
 (`Get-Printer -Name` / `Remove-Printer -Name` treat `[ ]` as wildcards, so a queue such as
@@ -176,7 +198,8 @@ matching queue the original Windows error is reported.
 hex digits each), `serverPrinterIds` (every printer id on the server). Older agents ignore them.
 
 **Report.** From 0.4.6 the report also has `critical` (strings, see "PC left without a printer" above) and
-`fallbacks` (`{ printer, method, reason }` for queues created with the TCP/IP fallback).
+`fallbacks` (`{ printer, method, reason }` for queues created with the TCP/IP fallback and the replaced queue's
+driver).
 
 Each match is recorded in the agent report's `legacy` field: `{ printer, queue, reason, action: removed | would-remove | failed, scope: machine | user:<DOMAIN\user>, error? }`, at most 200 entries. Matches are also written to `sync.log`. `Invoke-SpoolfreeSync.ps1 -WhatIf` removes nothing.
 

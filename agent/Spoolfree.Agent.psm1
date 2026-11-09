@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.7.6'
+$script:AgentVersion = '0.7.7'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -204,9 +204,13 @@ function Get-SpoolfreePlan {
         [AllowEmptyCollection()][string[]]$Existing = @(),
         [AllowNull()][string]$DefaultPrinter,
         # $false under Windows Protected Print Mode: vendor-driver printers are planned as driverless.
-        [bool]$VendorAllowed = $true
+        [bool]$VendorAllowed = $true,
+        # 0.7.7: names of this agent's queues made by the old fallback (IPP Class Driver on a RAW port): re-created.
+        [AllowEmptyCollection()][string[]]$Migrate = @()
     )
     $actions = New-Object System.Collections.Generic.List[object]
+    $migrateSet = @{}
+    foreach ($m in $Migrate) { if ($m) { $migrateSet[$m.ToLowerInvariant()] = $true } }
     $installedByName = @{}
     foreach ($i in $Installed) { $installedByName[([string]$i.Name).ToLowerInvariant()] = $i }
     $existingSet = @{}
@@ -234,10 +238,11 @@ function Get-SpoolfreePlan {
             } else {
                 $actions.Add([pscustomobject]@{ Action = 'Add'; Name = $d.name; Printer = $d })
             }
-        } elseif ([int]$mine.Revision -ne [int]$d.revision -or [string]$mine.Url -ne $target -or -not $existingSet.ContainsKey($key)) {
+        } elseif ([int]$mine.Revision -ne [int]$d.revision -or [string]$mine.Url -ne $target -or -not $existingSet.ContainsKey($key) -or $migrateSet.ContainsKey($key)) {
             # 0.7: a switch to or from a vendor-driver queue creates the new queue first (a TCP/IP queue can exist next
-            # to the IPP queue of the same device), so the PC is never without the printer meanwhile.
-            $mbb = $existingSet.ContainsKey($key) -and ((Test-SpoolfreeVendorTarget ([string]$mine.Url)) -or (Test-SpoolfreeVendorTarget $target))
+            # to the IPP queue of the same device), so the PC is never without the printer meanwhile. 0.7.7: so does
+            # replacing an old-fallback queue (IPP Class Driver on a RAW port).
+            $mbb = $existingSet.ContainsKey($key) -and ((Test-SpoolfreeVendorTarget ([string]$mine.Url)) -or (Test-SpoolfreeVendorTarget $target) -or $migrateSet.ContainsKey($key))
             $actions.Add([pscustomobject]@{ Action = 'Replace'; Name = $d.name; Printer = $d; MakeBeforeBreak = $mbb })
         } else {
             $actions.Add([pscustomobject]@{ Action = 'Keep'; Name = $d.name; Printer = $d })
@@ -975,7 +980,9 @@ function Get-SpoolfreeInstalled {
     $list = foreach ($k in Get-ChildItem -Path $script:PrinterRegistry) {
         $p = Get-ItemProperty -Path $k.PSPath
         $sides = if ($p.PSObject.Properties['Sides']) { [string]$p.Sides } else { '' }
-        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName; Sides = $sides }
+        $auto = if ($p.PSObject.Properties['AutoDuplex']) { [string]$p.AutoDuplex } else { '' }
+        $tried = if ($p.PSObject.Properties['MigrateTried']) { [string]$p.MigrateTried } else { '' }
+        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName; Sides = $sides; AutoDuplex = $auto; MigrateTried = $tried }
     }
     return @($list)
 }
@@ -1002,6 +1009,15 @@ function Set-SpoolfreeMarker {
     New-ItemProperty -Path $key -Name Method -Value $Method -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name PortName -Value $PortName -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Server -Value $ServerId -PropertyType String -Force | Out-Null
+    # 0.7.7: a (re)created queue starts without these.
+    Remove-ItemProperty -Path $key -Name AutoDuplex, MigrateTried -ErrorAction SilentlyContinue
+}
+
+function Set-SpoolfreeMarkerValue {
+    <# 0.7.7: one string value on an existing marker (AutoDuplex, MigrateTried). #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Property, [AllowEmptyString()][string]$Value)
+    $key = Get-SpoolfreeMarkerKey -Name $Name
+    if (Test-Path $key) { New-ItemProperty -Path $key -Name $Property -Value $Value -PropertyType String -Force | Out-Null }
 }
 
 function Set-SpoolfreeMarkerSides {
@@ -1346,8 +1362,69 @@ function Test-SpoolfreeProtectedPrintMode {
 function Get-SpoolfreeInstallMethod {
     param([bool]$IppUrlSupported, [bool]$ProtectedPrintMode)
     if ($IppUrlSupported) { return 'IppURL' }
-    if ($ProtectedPrintMode) { return 'Unsupported' }
-    return 'TcpIpPort'
+    # 0.7.7: no TCP/IP + IPP Class Driver queue any more (its raster on a RAW 9100 port prints as pages of text on
+    # printers without PWG raster). Without -IppURL a printer needs a vendor driver.
+    return 'Unsupported'
+}
+
+function Test-SpoolfreeClassOnRawQueue {
+    <# Pure: is this an agent queue made by the pre-0.7.7 fallback, the IPP Class Driver on a Standard TCP/IP port? #>
+    param([AllowNull()][AllowEmptyString()][string]$Method, [AllowNull()][AllowEmptyString()][string]$DriverName)
+    return ($Method -eq 'TcpIpPort' -and $DriverName -eq $script:IppDriver)
+}
+
+function Test-SpoolfreeMigrateDue {
+    <# Pure: retry re-creating an old-fallback queue? Not within $Hours of the last failed try (-IppURL can take 90 s). #>
+    param([AllowNull()][AllowEmptyString()][string]$LastTried, [datetime]$Now = (Get-Date).ToUniversalTime(), [int]$Hours = 24)
+    if (-not $LastTried) { return $true }
+    $t = [datetime]::MinValue
+    if (-not [datetime]::TryParse($LastTried, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$t)) { return $true }
+    return (($Now - $t).TotalHours -ge $Hours)
+}
+
+function Get-SpoolfreeAutoDuplexTicket {
+    <#
+    .SYNOPSIS
+        Pure (0.7.7): a print ticket that selects the driver's automatic two-sided printing, or $null when the driver
+        has no automatic two-sided option. Some vendor drivers (Brother v3, e.g. HL-5350DN) offer two-sided printing
+        both with the duplex unit ("Automatic") and by hand ("Manual") and start in manual mode: users are then asked
+        to turn the pages over. Selecting the automatic option once stores it in the driver's settings; the caller
+        then sets the wanted default (one- or two-sided) again.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$CapabilitiesXml, [AllowNull()][AllowEmptyString()][string]$TicketXml)
+    if (-not $CapabilitiesXml -or -not $TicketXml) { return $null }
+    $feature = [regex]::Match($CapabilitiesXml, '<psf:Feature name="psk:JobDuplexAllDocumentsContiguously">.*?</psf:Feature>', 'Singleline').Value
+    if (-not $feature) { return $null }
+    $opt = [regex]::Match($feature, '<psf:Option name="psk:TwoSidedLongEdge"[^>]*>(?:(?!</psf:Option>).)*?<psf:ScoredProperty name="psk:DuplexMode">\s*<psf:Value xsi:type="xsd:string">Automatic</psf:Value>', 'Singleline,IgnoreCase')
+    if (-not $opt.Success) { return $null }
+    $new = '<psf:Feature name="psk:JobDuplexAllDocumentsContiguously"><psf:Option name="psk:TwoSidedLongEdge"><psf:ScoredProperty name="psk:DuplexMode"><psf:Value xsi:type="xsd:string">Automatic</psf:Value></psf:ScoredProperty></psf:Option></psf:Feature>'
+    $rx = '<psf:Feature name="psk:JobDuplexAllDocumentsContiguously">.*?</psf:Feature>'
+    if ([regex]::IsMatch($TicketXml, $rx, 'Singleline')) { return [regex]::Replace($TicketXml, $rx, $new, 'Singleline') }
+    if ($TicketXml -match '</psf:PrintTicket>') { return $TicketXml -replace '</psf:PrintTicket>', ($new + '</psf:PrintTicket>') }
+    return $null
+}
+
+function Enable-SpoolfreeAutoDuplex {
+    <#
+    .SYNOPSIS
+        0.7.7: stores the driver's automatic two-sided mode on a vendor queue, keeping its current default duplex.
+        Returns 'automatic' or 'none' (the driver has no such option). Throws on failure.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    Add-Type -AssemblyName ReachFramework, System.Printing
+    $server = New-Object System.Printing.LocalPrintServer
+    try {
+        $q = $server.GetPrintQueue($Name)
+        $reader = New-Object IO.StreamReader($q.GetPrintCapabilitiesAsXml())
+        try { $caps = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $server.Dispose() }
+    $config = Get-PrintConfiguration -PrinterName $Name -ErrorAction Stop
+    $ticket = Get-SpoolfreeAutoDuplexTicket -CapabilitiesXml $caps -TicketXml ([string]$config.PrintTicketXML)
+    if (-not $ticket) { return 'none' }
+    $mode = [string]$config.DuplexingMode
+    Set-PrintConfiguration -PrinterName $Name -PrintTicketXml $ticket -ErrorAction Stop
+    if ($mode) { Set-PrintConfiguration -PrinterName $Name -DuplexingMode $mode -ErrorAction Stop }
+    return 'automatic'
 }
 
 function Install-SpoolfreePrinter {
@@ -1355,7 +1432,10 @@ function Install-SpoolfreePrinter {
     .SYNOPSIS
         Creates a machine-wide driverless queue.
         Primary:  Add-Printer -IppURL (IPP class driver chosen by Windows; WPP-compatible).
-        Fallback: Standard TCP/IP port + "Microsoft IPP Class Driver" (older Windows 10 only; not WPP-compatible).
+        TcpIpPort: Standard TCP/IP port with -DriverName, a real driver (the replaced legacy queue's). Never with the
+                  IPP Class Driver (0.7.7): its raster on a RAW port prints as text on printers without PWG raster.
+                  (An IPP Internet Port with the IPP Class Driver was tried for 0.7.7 and dropped: the class driver
+                  cannot read the device's capabilities there, and Set-Printer / Set-PrintConfiguration hang or fail.)
         Vendor:   the manifest's vendor driver (already installed: Install-SpoolfreeVendorDriver) on a RAW 9100, LPR or
                   IPP port (0.7).
         -QueueName creates the queue under another name (make-before-break); the marker is then left to the caller.
@@ -1396,16 +1476,13 @@ function Install-SpoolfreePrinter {
             if ($final) { Set-SpoolfreeMarker -Printer $Printer -Method 'Vendor' -PortName $port -ServerId ([string]$ServerId) -Target (Get-SpoolfreeQueueTarget $Printer) }
         }
         'TcpIpPort' {
+            if (-not $DriverName -or $DriverName -eq $script:IppDriver) { throw "No driver for a Standard TCP/IP queue for $($Printer.name): the IPP Class Driver is never used on a RAW port." }
+            if (-not (Get-PrinterDriver -Name $DriverName -ErrorAction SilentlyContinue)) { throw "Driver '$DriverName' is not installed." }
             $port = 'SPOOLFREE_' + ([string]$Printer.host -replace '[^A-Za-z0-9\.\-]', '_')
             if (-not (Get-PrinterPort -Name $port -ErrorAction SilentlyContinue)) {
                 Add-PrinterPort -Name $port -PrinterHostAddress $Printer.host -ErrorAction Stop
             }
-            $driver = $script:IppDriver
-            if ($DriverName -and (Get-PrinterDriver -Name $DriverName -ErrorAction SilentlyContinue)) { $driver = $DriverName }
-            if ($driver -eq $script:IppDriver -and -not (Get-PrinterDriver -Name $script:IppDriver -ErrorAction SilentlyContinue)) {
-                Add-PrinterDriver -Name $script:IppDriver -ErrorAction Stop
-            }
-            Add-Printer -Name $queue -DriverName $driver -PortName $port -Comment $comment -Location $location -ErrorAction Stop
+            Add-Printer -Name $queue -DriverName $DriverName -PortName $port -Comment $comment -Location $location -ErrorAction Stop
             if ($final) { Set-SpoolfreeMarker -Printer $Printer -Method 'TcpIpPort' -PortName $port -ServerId ([string]$ServerId) }
         }
         default { throw "No supported install method on this PC (method '$Method')." }
@@ -1609,8 +1686,9 @@ function Install-SpoolfreePrinterResilient {
         Install-SpoolfreePrinter with recovery for Add-Printer -IppURL failures (any error but "already exists"):
         1. remove leftovers of the device's removed WSD/IPP queue (unused port, non-present PnP nodes) and retry -IppURL
            once when something was removed;
-        2. fall back to a Standard TCP/IP port + Microsoft IPP Class Driver queue (not when Windows Protected Print
-           Mode is enforced: that queue type is not allowed then).
+        2. fall back (not when Windows Protected Print Mode is enforced) to a Standard TCP/IP queue with the replaced
+           legacy queue's driver when there is one. 0.7.7: never to the IPP Class Driver on a RAW port; without a
+           real driver the error says the printer needs a vendor driver.
         Returns Method (the method that worked), Fallback (bool) and Notes. Throws with every error when all fail.
     #>
     [CmdletBinding()]
@@ -1682,14 +1760,18 @@ function Install-SpoolfreePrinterResilient {
         throw "Add-Printer -IppURL failed ($first) and no fallback is possible: Windows Protected Print Mode is enforced."
     }
     $driver = if ($FallbackDriver -and $FallbackDriver -ne $script:IppDriver -and (Get-PrinterDriver -Name $FallbackDriver -ErrorAction SilentlyContinue)) { $FallbackDriver } else { '' }
-    try {
-        Install-SpoolfreePrinter -Printer $Printer -Method 'TcpIpPort' -ServerId $ServerId -DriverName $driver
-    } catch {
-        throw "Add-Printer -IppURL failed ($first); TCP/IP port fallback failed too: $($_.Exception.Message)"
+    $fails = New-Object System.Collections.Generic.List[string]
+    if ($driver) {
+        try {
+            Install-SpoolfreePrinter -Printer $Printer -Method 'TcpIpPort' -ServerId $ServerId -DriverName $driver
+            $notes.Add("created with a Standard TCP/IP port and the driver of the replaced queue ($driver) instead")
+            return (& $result 'TcpIpPort' $true)
+        } catch {
+            $fails.Add("TCP/IP port with '$driver' failed: $($_.Exception.Message)")
+        }
     }
-    if ($driver) { $notes.Add("created with a Standard TCP/IP port and the driver of the replaced queue ($driver) instead") }
-    else { $notes.Add('created with a Standard TCP/IP port and the Microsoft IPP Class Driver instead') }
-    return (& $result 'TcpIpPort' $true)
+    $more = if ($fails.Count) { "; $($fails -join '; ')" } else { '' }
+    throw "Add-Printer -IppURL failed ($first)$more. This printer needs a vendor driver (set one in its Driver setting)."
 }
 
 function Get-SpoolfreeOrphanedPrinters {

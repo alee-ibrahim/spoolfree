@@ -11,8 +11,8 @@ import { infForDriver } from "./package";
  *   - driverless otherwise.
  * Once auto mode wants a vendor driver the decision is stored (printers.auto_vendor_reason) and sticks until an admin
  * changes the driver mode or replaces the device. The vendor driver comes from a matching package: the exact model
- * (IEEE 1284 device ID or make and model) first, then the brand's universal package. Without one the printer stays
- * driverless and the UI says which driver to upload.
+ * (IEEE 1284 device ID or make and model) first, then a universal package whose INF lists the device (never by brand
+ * alone). Without one the printer stays driverless and the UI says which driver to upload.
  */
 
 export interface AutoSettings {
@@ -122,34 +122,34 @@ export interface PackageMatch {
   match: "exact" | "universal";
 }
 
-/** Best package for a device: exact model (hardware ID, then name), newest upload first; then the brand's universal package. */
+/**
+ * Best package for a device, newest upload first: an exact-model package (hardware ID, then model name), then a
+ * universal package whose INF lists this device itself (hardware ID or model name, 0.7.7). A universal package is never
+ * chosen by brand alone: a brand's universal driver does not fit all its models (a GDI or PCL-emulation printer prints a
+ * PCL XL stream as text), so a device it does not list stays without a match ("vendor driver needed").
+ */
 export function matchPackage(p: Pick<PrinterForDecision, "model" | "deviceId" | "lastTest">, packages: PackageForMatch[]): PackageMatch | null {
   const { mfg, mdl } = parseDeviceId(p.deviceId ?? p.lastTest?.deviceId ?? null);
   const names = modelNames(p).map((n) => stripSeries(norm(n))).filter((n) => n.length >= 4);
   const newest = [...packages].sort((a, b) => new Date(b.uploadedAt ?? 0).getTime() - new Date(a.uploadedAt ?? 0).getTime());
-  for (const pass of ["hwid", "name"] as const) {
-    for (const pkg of newest.filter((x) => !x.universal)) {
-      for (const inf of pkg.infs) {
-        for (const m of inf.models) {
-          const ok =
-            pass === "hwid"
-              ? m.hardwareIds.some((h) => hardwareIdMatches(h, mfg, mdl))
-              : names.includes(stripSeries(norm(m.name)));
-          if (ok) return { package: pkg, driverName: m.name, inf, match: "exact" };
+  const colour = p.lastTest?.color === true;
+  for (const universal of [false, true]) {
+    for (const pass of ["hwid", "name"] as const) {
+      for (const pkg of newest.filter((x) => x.universal === universal)) {
+        for (const inf of pkg.infs) {
+          for (const m of inf.models) {
+            const ok =
+              pass === "hwid"
+                ? m.hardwareIds.some((h) => hardwareIdMatches(h, mfg, mdl))
+                : names.includes(stripSeries(norm(m.name)));
+            if (!ok) continue;
+            // A monochrome universal driver would print a colour printer's jobs in grey.
+            if (universal && colour && /mono(chrome)?/i.test(m.name)) continue;
+            return { package: pkg, driverName: m.name, inf, match: universal ? "universal" : "exact" };
+          }
         }
       }
     }
-  }
-  const brand = brandKey(mfg) ?? brandKey(p.lastTest?.model ?? p.model);
-  if (!brand) return null;
-  const colour = p.lastTest?.color === true;
-  for (const pkg of newest.filter((x) => x.universal)) {
-    if (brandKey(pkg.manufacturer) !== brand) continue;
-    const name = pkg.universalDriver ?? pkg.infs[0]?.models[0]?.name;
-    // A monochrome universal driver would print a colour printer's jobs in grey.
-    if (colour && name && /\bmono(chrome)?\b/i.test(name)) continue;
-    const inf = name ? infForDriver(pkg.infs, name) : null;
-    if (name && inf) return { package: pkg, driverName: inf.models.find((m) => m.name.toLowerCase() === name.toLowerCase())!.name, inf, match: "universal" };
   }
   return null;
 }

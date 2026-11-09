@@ -126,12 +126,11 @@ Describe 'Install-SpoolfreePrinterResilient: "already exists" after takeover' {
         Should -Invoke -ModuleName Spoolfree.Agent Install-SpoolfreePrinter -Times 1 -Exactly -ParameterFilter { $Method -eq 'TcpIpPort' -and $DriverName -eq 'HP ColorLaserJet MFP M282-M285 PCL-6 (V4)' }
         @($r.Notes)[-1] | Should -Match 'driver of the replaced queue'
     }
-    It '(c) uses the IPP class driver when the old driver is gone' {
+    It '(c) never uses the IPP class driver on a RAW port when the old driver is gone: needs a vendor driver (0.7.7)' {
         Mock -ModuleName Spoolfree.Agent Get-PrinterDriver { $null }
         Mock -ModuleName Spoolfree.Agent Install-SpoolfreePrinter { if ($Method -eq 'IppURL') { throw $script:Exists } }
-        $r = Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's' -TakeoverRecovery $true -FallbackDriver 'Removed Driver'
-        $r.Method | Should -Be 'TcpIpPort'
-        Should -Invoke -ModuleName Spoolfree.Agent Install-SpoolfreePrinter -Times 1 -Exactly -ParameterFilter { $Method -eq 'TcpIpPort' -and -not $DriverName }
+        { Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's' -TakeoverRecovery $true -FallbackDriver 'Removed Driver' } | Should -Throw '*needs a vendor driver*'
+        Should -Invoke -ModuleName Spoolfree.Agent Install-SpoolfreePrinter -Times 0 -Exactly -ParameterFilter { $Method -eq 'TcpIpPort' }
     }
     It 'still respects Windows Protected Print Mode' {
         Mock -ModuleName Spoolfree.Agent Install-SpoolfreePrinter { throw $script:Exists }
@@ -139,7 +138,7 @@ Describe 'Install-SpoolfreePrinterResilient: "already exists" after takeover' {
     }
     It 'reports a failing re-scan but goes on' {
         Mock -ModuleName Spoolfree.Agent Install-SpoolfreePrinter { if ($Method -eq 'IppURL') { throw $script:Exists } }
-        $r = Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's' -TakeoverRecovery $true -FindBlocking { throw 'inventory broke' }
+        $r = Install-SpoolfreePrinterResilient -Printer $script:Printer -Method 'IppURL' -ServerId 's' -TakeoverRecovery $true -FindBlocking { throw 'inventory broke' } -FallbackDriver 'HP ColorLaserJet MFP M282-M285 PCL-6 (V4)'
         $r.Method | Should -Be 'TcpIpPort'
         @($r.Notes) -join ' ' | Should -Match 're-scan for blocking queues failed: inventory broke'
     }

@@ -120,7 +120,14 @@ foreach ($p in @($manifest.printers)) {
 foreach ($e in (Get-SpoolfreeUserTakeoverResults)) { if ($legacy.Count -lt 200) { $legacy.Add($e) } }
 
 $existing = @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-$plan = Get-SpoolfreePlan -Desired @($manifest.printers) -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter -VendorAllowed (-not $wpp)
+# 0.7.7: queues the old fallback made (IPP Class Driver on a RAW 9100 port) are re-created, new queue first.
+# A failed try (for example a Brother printer whose -IppURL times out) keeps the old queue and is retried after 24 h.
+$migrate = @(Get-SpoolfreeInstalled | Where-Object {
+        $q0 = Get-SpoolfreeQueueByName -Name ([string]$_.Name)
+        $q0 -and (Test-SpoolfreeClassOnRawQueue -Method ([string]$_.Method) -DriverName ([string]$q0.DriverName)) -and (Test-SpoolfreeMigrateDue $_.MigrateTried)
+    } | ForEach-Object { [string]$_.Name })
+if ($migrate.Count) { Write-Log "Old-fallback queues (IPP Class Driver on a RAW port) to re-create: $($migrate -join '; ')" }
+$plan = Get-SpoolfreePlan -Desired @($manifest.printers) -Installed @(Get-SpoolfreeInstalled) -Existing $existing -DefaultPrinter $manifest.defaultPrinter -VendorAllowed (-not $wpp) -Migrate $migrate
 
 # Vendor drivers (0.7): not allowed under Windows Protected Print Mode; those printers stay driverless.
 $driverResults = New-Object System.Collections.Generic.List[object]
@@ -221,6 +228,7 @@ function Switch-SyncQueue($step) {
     if ($left -and ([string]$left.Comment).StartsWith('Managed by Spoolfree')) { Remove-SpoolfreeQueue -Name $tmp }
     $v = Get-SpoolfreeVendorDriver $step.Printer
     $useVendor = [bool]($v -and -not $wpp)
+    $isMigration = $migrate -contains $name
     try {
         if ($useVendor) { Install-VendorQueue $step.Printer $tmp }
         else { Install-SpoolfreePrinter -Printer $step.Printer -Method $method -ServerId $serverId -QueueName $tmp }
@@ -231,6 +239,13 @@ function Switch-SyncQueue($step) {
             $errors.Add("${name}: vendor driver failed, kept the current queue: $why")
             $driverResults.Add([ordered]@{ printer = $name; status = 'fallback'; driverName = $v.DriverName; message = "vendor driver failed ($why); current queue kept" })
             Write-Log "${name}: vendor driver failed ($why); the current queue stays."
+            return
+        }
+        if ($isMigration -and -not $useVendor) {
+            # 0.7.7: an old-fallback queue (IPP Class Driver on a RAW port) is only replaced by a working queue.
+            Set-SpoolfreeMarkerValue -Name $name -Property 'MigrateTried' -Value ((Get-Date).ToUniversalTime().ToString('o'))
+            $errors.Add("${name}: needs a vendor driver: the queue uses the IPP Class Driver on a RAW port (prints raster as text on many printers) and Add-Printer -IppURL failed ($why); kept, retried in 24 h")
+            Write-Log "${name}: Add-Printer -IppURL failed ($why); the old queue (IPP Class Driver on a RAW port) stays; retried in 24 h. Set a vendor driver for this printer."
             return
         }
         Write-Log "${name}: the driverless queue could not be created next to the old one ($why); removing the old queue first."
@@ -313,6 +328,16 @@ try {
 
 # Default duplex: applied after the queue exists, re-applied only when the manifest value changes
 # (recorded in the marker) or the queue was re-created. A failure is retried at the next sync.
+# 0.7.7: vendor queues get the driver's automatic two-sided mode (some start in manual duplex), once per queue.
+foreach ($m in @(Get-SpoolfreeInstalled | Where-Object { $_.Method -eq 'Vendor' -and -not $_.AutoDuplex })) {
+    if (-not $PSCmdlet.ShouldProcess([string]$m.Name, 'Enable automatic duplex')) { continue }
+    try {
+        $r = Enable-SpoolfreeAutoDuplex -Name ([string]$m.Name)
+        Set-SpoolfreeMarkerValue -Name ([string]$m.Name) -Property 'AutoDuplex' -Value $r
+        if ($r -eq 'automatic') { Write-Log "$($m.Name): automatic two-sided printing (duplex unit) selected in the vendor driver." }
+    } catch { Write-Log "$($m.Name): could not select automatic duplex: $($_.Exception.Message)" }
+}
+
 $sides = [ordered]@{}
 $markers = @{}
 foreach ($m in @(Get-SpoolfreeInstalled)) { $markers[([string]$m.Name).ToLowerInvariant()] = $m }

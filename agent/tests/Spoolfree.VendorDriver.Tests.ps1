@@ -94,6 +94,12 @@ Describe 'Get-SpoolfreePlan with vendor drivers' {
         $d = DriverlessPrinter; $d.ippUrl = 'http://192.0.2.99:631/ipp/print'
         (Get-SpoolfreePlan -Desired @($d) -Installed @((Marker 'http://192.0.2.12:631/ipp/print')) -Existing @('Bureau'))[0].MakeBeforeBreak | Should -BeFalse
     }
+    It 're-creates an old-fallback queue (IPP Class Driver on a RAW port) with make-before-break (0.7.7)' {
+        $p = (Get-SpoolfreePlan -Desired @((DriverlessPrinter)) -Installed @((Marker 'http://192.0.2.12:631/ipp/print')) -Existing @('Bureau') -Migrate @('bureau'))[0]
+        $p.Action | Should -Be 'Replace'
+        $p.MakeBeforeBreak | Should -BeTrue
+        (Get-SpoolfreePlan -Desired @((DriverlessPrinter)) -Installed @((Marker 'http://192.0.2.12:631/ipp/print')) -Existing @('Bureau') -Migrate @('Other'))[0].Action | Should -Be 'Keep'
+    }
 }
 
 Describe 'Get-SpoolfreeInfCatalog' {

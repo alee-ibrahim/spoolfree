@@ -131,8 +131,8 @@ Describe 'Install method selection' {
         Get-SpoolfreeInstallMethod -IppUrlSupported $true -ProtectedPrintMode $true | Should -Be 'IppURL'
         Get-SpoolfreeInstallMethod -IppUrlSupported $true -ProtectedPrintMode $false | Should -Be 'IppURL'
     }
-    It 'falls back to TCP/IP port + IPP class driver only without WPP' {
-        Get-SpoolfreeInstallMethod -IppUrlSupported $false -ProtectedPrintMode $false | Should -Be 'TcpIpPort'
+    It 'has no driverless method without -IppURL (never the class driver on a RAW port, 0.7.7)' {
+        Get-SpoolfreeInstallMethod -IppUrlSupported $false -ProtectedPrintMode $false | Should -Be 'Unsupported'
         Get-SpoolfreeInstallMethod -IppUrlSupported $false -ProtectedPrintMode $true | Should -Be 'Unsupported'
     }
 }
@@ -160,17 +160,68 @@ Describe 'Install-SpoolfreePrinter (mocked print cmdlets)' {
         Should -Invoke -ModuleName Spoolfree.Agent Set-Printer -Times 1 -ParameterFilter { $Comment -like 'Managed by Spoolfree*p1 rev 3*' }
         Should -Invoke -ModuleName Spoolfree.Agent Set-SpoolfreeMarker -Times 1 -ParameterFilter { $Method -eq 'IppURL' }
     }
-    It 'uses a Standard TCP/IP port and the IPP Class Driver for the fallback' {
+    It 'uses a Standard TCP/IP port only with a real driver (the replaced queue''s)' {
         Mock -ModuleName Spoolfree.Agent Get-PrinterPort {}
         Mock -ModuleName Spoolfree.Agent Add-PrinterPort {}
-        Mock -ModuleName Spoolfree.Agent Get-PrinterDriver { [pscustomobject]@{ Name = 'Microsoft IPP Class Driver' } }
+        Mock -ModuleName Spoolfree.Agent Get-PrinterDriver { [pscustomobject]@{ Name = 'Brother HL-2250DN series' } }
         Mock -ModuleName Spoolfree.Agent Add-Printer {}
         Mock -ModuleName Spoolfree.Agent Set-SpoolfreeMarker {}
 
-        Install-SpoolfreePrinter -Printer $printer -Method TcpIpPort
+        Install-SpoolfreePrinter -Printer $printer -Method TcpIpPort -DriverName 'Brother HL-2250DN series'
 
         Should -Invoke -ModuleName Spoolfree.Agent Add-PrinterPort -Times 1 -ParameterFilter { $Name -eq 'SPOOLFREE_192.0.2.10' -and $PrinterHostAddress -eq '192.0.2.10' }
-        Should -Invoke -ModuleName Spoolfree.Agent Add-Printer -Times 1 -ParameterFilter { $DriverName -eq 'Microsoft IPP Class Driver' -and $PortName -eq 'SPOOLFREE_192.0.2.10' }
+        Should -Invoke -ModuleName Spoolfree.Agent Add-Printer -Times 1 -ParameterFilter { $DriverName -eq 'Brother HL-2250DN series' -and $PortName -eq 'SPOOLFREE_192.0.2.10' }
+    }
+    It 'never puts the IPP Class Driver on a RAW port (it printed raster as text on PCL printers)' {
+        Mock -ModuleName Spoolfree.Agent Add-PrinterPort {}
+        Mock -ModuleName Spoolfree.Agent Add-Printer {}
+        { Install-SpoolfreePrinter -Printer $printer -Method TcpIpPort } | Should -Throw '*never used on a RAW port*'
+        { Install-SpoolfreePrinter -Printer $printer -Method TcpIpPort -DriverName 'Microsoft IPP Class Driver' } | Should -Throw '*never used on a RAW port*'
+        Should -Invoke -ModuleName Spoolfree.Agent Add-Printer -Times 0
+        Should -Invoke -ModuleName Spoolfree.Agent Add-PrinterPort -Times 0
+    }
+    It 'finds the old fallback queues (IPP Class Driver on a TCP/IP port) to re-create' {
+        Test-SpoolfreeClassOnRawQueue -Method 'TcpIpPort' -DriverName 'Microsoft IPP Class Driver' | Should -BeTrue
+        Test-SpoolfreeClassOnRawQueue -Method 'TcpIpPort' -DriverName 'Brother HL-2250DN series' | Should -BeFalse
+        Test-SpoolfreeClassOnRawQueue -Method 'IppURL' -DriverName 'Microsoft IPP Class Driver' | Should -BeFalse
+    }
+    It 'retries a failed re-creation only after 24 hours' {
+        $now = [datetime]'2026-11-09T12:00:00Z'
+        Test-SpoolfreeMigrateDue -LastTried '' -Now $now | Should -BeTrue
+        Test-SpoolfreeMigrateDue -LastTried '2026-11-09T01:00:00.0000000Z' -Now $now.ToUniversalTime() | Should -BeFalse
+        Test-SpoolfreeMigrateDue -LastTried '2026-11-08T11:00:00.0000000Z' -Now $now.ToUniversalTime() | Should -BeTrue
+        Test-SpoolfreeMigrateDue -LastTried 'garbage' -Now $now | Should -BeTrue
+    }
+}
+
+Describe 'Automatic duplex on vendor queues (0.7.7)' {
+    BeforeAll {
+        $script:Caps = '<psf:PrintCapabilities xmlns:psf="http://schemas.microsoft.com/windows/2003/08/printing/printschemaframework" xmlns:psk="http://schemas.microsoft.com/windows/2003/08/printing/printschemakeywords" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema"><psf:Feature name="psk:JobDuplexAllDocumentsContiguously"><psf:Property name="psf:SelectionType"><psf:Value xsi:type="xsd:QName">psk:PickOne</psf:Value></psf:Property><psf:Option name="psk:OneSided" constrained="psk:None"/><psf:Option name="psk:TwoSidedLongEdge" constrained="psk:None"><psf:ScoredProperty name="psk:DuplexMode"><psf:Value xsi:type="xsd:string">Automatic</psf:Value></psf:ScoredProperty></psf:Option><psf:Option name="psk:TwoSidedLongEdge" constrained="psk:None"><psf:ScoredProperty name="psk:DuplexMode"><psf:Value xsi:type="xsd:string">Manual</psf:Value></psf:ScoredProperty></psf:Option></psf:Feature></psf:PrintCapabilities>'
+        $script:Ticket = '<psf:PrintTicket xmlns:psf="x" xmlns:psk="y"><psf:Feature name="psk:PageMediaSize"><psf:Option name="psk:ISOA4"/></psf:Feature><psf:Feature name="psk:JobDuplexAllDocumentsContiguously"><psf:Option name="psk:OneSided"/></psf:Feature></psf:PrintTicket>'
+    }
+    It 'selects the automatic two-sided option when the driver also offers manual duplex (Brother HL-5350DN)' {
+        $t = Get-SpoolfreeAutoDuplexTicket -CapabilitiesXml $script:Caps -TicketXml $script:Ticket
+        $t | Should -Match '<psf:Option name="psk:TwoSidedLongEdge"><psf:ScoredProperty name="psk:DuplexMode"><psf:Value xsi:type="xsd:string">Automatic</psf:Value>'
+        $t | Should -Match 'psk:ISOA4'
+        $t | Should -Not -Match 'psk:OneSided'
+    }
+    It 'adds the feature when the ticket has none' {
+        $t = Get-SpoolfreeAutoDuplexTicket -CapabilitiesXml $script:Caps -TicketXml '<psf:PrintTicket xmlns:psf="x"></psf:PrintTicket>'
+        $t | Should -Match 'JobDuplexAllDocumentsContiguously.*Automatic.*</psf:PrintTicket>$'
+    }
+    It 'does nothing for drivers without an automatic two-sided option' {
+        Get-SpoolfreeAutoDuplexTicket -CapabilitiesXml ($script:Caps -replace 'Automatic', 'Manual') -TicketXml $script:Ticket | Should -BeNullOrEmpty
+        Get-SpoolfreeAutoDuplexTicket -CapabilitiesXml '<psf:PrintCapabilities/>' -TicketXml $script:Ticket | Should -BeNullOrEmpty
+        Get-SpoolfreeAutoDuplexTicket -CapabilitiesXml '' -TicketXml $script:Ticket | Should -BeNullOrEmpty
+    }
+    It 'keeps the queue''s default duplex after storing automatic mode' {
+        Mock -ModuleName Spoolfree.Agent Add-Type {}
+        Mock -ModuleName Spoolfree.Agent New-Object { param($TypeName) if ($TypeName -eq 'System.Printing.LocalPrintServer') { $s = [pscustomobject]@{}; $s | Add-Member ScriptMethod GetPrintQueue { $q = [pscustomobject]@{}; $q | Add-Member ScriptMethod GetPrintCapabilitiesAsXml { New-Object IO.MemoryStream (,[Text.Encoding]::UTF8.GetBytes($script:Caps)) }; $q }; $s | Add-Member ScriptMethod Dispose {}; $s } else { Microsoft.PowerShell.Utility\New-Object @args -TypeName $TypeName } }
+        Mock -ModuleName Spoolfree.Agent Get-PrintConfiguration { [pscustomobject]@{ PrintTicketXML = $script:Ticket; DuplexingMode = 'OneSided' } }
+        Mock -ModuleName Spoolfree.Agent Set-PrintConfiguration {}
+        Enable-SpoolfreeAutoDuplex -Name 'Brother' | Should -Be 'automatic'
+        Should -Invoke -ModuleName Spoolfree.Agent Set-PrintConfiguration -Times 1 -Exactly -ParameterFilter { $PrintTicketXml -match 'Automatic' }
+        Should -Invoke -ModuleName Spoolfree.Agent Set-PrintConfiguration -Times 1 -Exactly -ParameterFilter { $DuplexingMode -eq 'OneSided' }
     }
     It 'refuses to delete a queue whose comment was changed' {
         Mock -ModuleName Spoolfree.Agent Get-SpoolfreeInstalled { @([pscustomobject]@{ Name = 'Staff Copier'; PortName = 'IPP_1' }) }

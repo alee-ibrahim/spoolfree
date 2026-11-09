@@ -66,12 +66,17 @@ When a printer resolves to vendor, the server picks a package:
    `USBPRINT\BROTHERHL-3150CDN_SEED27` and `WSDPRINT\...`: MFG+MDL with the spaces removed, truncated, plus a 4-digit
    checksum. If no hardware ID matches, it compares the driver name with the printer's make and model. When several
    packages match, the newest upload wins.
-2. **The brand's universal driver.** A package uploaded as **universal**, for example Brother Universal Printer or
-   HP Universal Printing PCL 6, serves every printer of its manufacturer that no exact package covers. Spoolfree
-   uses its *universal driver* name, which defaults to the INF's first model. A universal driver whose name says "Mono"
-   is never chosen for a colour printer, because it would print in grey.
+2. **A universal driver that lists the printer.** A package uploaded as **universal**, for example Brother Universal
+   Printer or HP Universal Printing PCL 6, is used only when its INF **lists the printer itself**: a hardware ID that
+   matches the device ID, or a model name that matches its make and model (0.7.7). It is never chosen by brand alone:
+   a brand's universal driver does not fit all its models. A Brother HL-2250DN, for example, takes PCL XL only through
+   an emulation that the universal driver's output does not suit. A universal driver whose name says "Mono" is never
+   chosen for a colour printer, because it would print in grey.
 
-If no package matches, the printer **stays driverless**. The UI shows *"vendor driver needed: upload one for
+   Up to 0.7.6, a universal package served every printer of its brand that no exact package covered.
+
+If no package matches, the printer **stays driverless**. For a printer with no driverless format, upload its
+exact-model driver (the Microsoft Update Catalog has most older models) and set it in the printer's Driver setting. The UI shows *"vendor driver needed: upload one for
 &lt;model&gt;"* in the Printers list and at the top of the Drivers page. To see the decision for every printer:
 
 ```sh
@@ -162,6 +167,14 @@ For each printer whose manifest entry has `driverMode: "vendor"`, the agent:
    records the package under `HKLM\SOFTWARE\Spoolfree\Drivers\<sha256>`, so later syncs skip the download.
 6. **Creates the queue** on a Standard TCP/IP port (`SPOOLFREE_<host>` for RAW 9100, `SPOOLFREE_LPR_<host>_<queue>`
    for LPR) or an IPP Internet Port.
+
+**Automatic duplex (0.7.7).** Some vendor drivers offer two-sided printing both with the duplex unit and by hand,
+and start in manual mode: users are asked to turn the pages over. The Brother HL-5350DN driver does this. After a
+vendor queue is created, the agent selects the driver's automatic two-sided option once (when the driver's print
+capabilities have a two-sided option with `DuplexMode` *Automatic*) and then sets the queue's default duplex back,
+so the default stays one-sided unless the printer's `defaultSides` says otherwise. Users' own saved preferences are not
+changed. Installable options that a driver keeps privately (for example Brother's lower-tray setting) are not copied
+from the replaced legacy queue.
 
 Everything else works as for driverless queues: the "Managed by Spoolfree" comment and marker, legacy takeover
 (matching by IP, host name, aliases, MAC and printer-uuid), renames, default printer carry-over, the default duplex

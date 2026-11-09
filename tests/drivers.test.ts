@@ -148,20 +148,30 @@ describe("1284 device IDs and package matching", () => {
     expect(hardwareIdMatches("USBPRINT\\BROTHERHL-3150CDN_SEED27", "Brother", null)).toBe(false);
   });
 
-  it("prefers the exact model, then the brand's universal driver", () => {
+  it("prefers the exact model, then a universal driver whose INF lists the device", () => {
     const hl3150 = printer({ deviceId: DEVICE_ID });
     expect(matchPackage(hl3150, [universalPkg, exactPkg])).toMatchObject({ match: "exact", driverName: "Brother HL-3150CDN series" });
-    const hl2250 = printer({ deviceId: "MFG:Brother;MDL:HL-2250DN series;", lastTest: { color: false } });
-    expect(matchPackage(hl2250, [universalPkg, exactPkg, hpUpd])).toMatchObject({ match: "universal", driverName: "Brother Mono Universal Printer (PCL)" });
-    expect(matchPackage(printer({ lastTest: { model: "HP LaserJet P2055dn" } }), [universalPkg, hpUpd])).toMatchObject({ package: { name: "HP UPD" } });
-    expect(matchPackage(printer({ model: "Hewlett-Packard LaserJet 4250" }), [hpUpd])).toMatchObject({ match: "universal" });
+    const l6415 = printer({ deviceId: "MFG:Brother;MDL:HL-L6415DW series;", lastTest: { color: false } });
+    expect(matchPackage(l6415, [universalPkg, exactPkg, hpUpd])).toMatchObject({ match: "universal", driverName: "Brother Mono Universal Printer (PCL)" });
+    const listedByName: PackageForMatch = { ...hpUpd, infs: [{ ...hpUpd.infs[0], models: [...hpUpd.infs[0].models, { name: "HP LaserJet P2055dn", hardwareIds: [] }] }] };
+    expect(matchPackage(printer({ lastTest: { model: "HP LaserJet P2055dn" } }), [universalPkg, listedByName])).toMatchObject({ match: "universal", driverName: "HP LaserJet P2055dn" });
+  });
+
+  it("never picks a universal driver by brand alone (HL-2250DN printed a PCL XL stream as text)", () => {
+    const hl2250 = printer({ deviceId: "MFG:Brother;CMD:PJL,PCL,PCLXL;MDL:HL-2250DN series;", lastTest: { color: false } });
+    expect(matchPackage(hl2250, [universalPkg, exactPkg, hpUpd])).toBeNull();
+    expect(matchPackage(printer({ lastTest: { model: "HP LaserJet P2055dn" } }), [universalPkg, hpUpd])).toBeNull();
+    expect(matchPackage(printer({ model: "Hewlett-Packard LaserJet 4250" }), [hpUpd])).toBeNull();
     expect(matchPackage(printer({ model: "Canon iR-ADV C5535" }), [universalPkg, exactPkg, hpUpd])).toBeNull();
+    const d = decideDriver(printer({ deviceId: "MFG:Brother;MDL:HL-2250DN series;", lastTest: { ok: true, formats: ["application/octet-stream"], ippVersions: ["1.1"], color: false, model: "Brother HL-2250DN series" } }), [universalPkg, hpUpd]);
+    expect(d).toMatchObject({ mode: "driverless", wantVendor: true, needed: "vendor driver needed: upload one for Brother HL-2250DN series" });
   });
 
   it("never gives a colour printer a monochrome universal driver", () => {
+    const colourL6415: PackageForMatch = { ...universalPkg, infs: [{ ...universalPkg.infs[0], models: [{ name: "Brother Mono Universal Printer (PCL)", hardwareIds: ["USBPRINT\BROTHERHL-3170CDW_SER1234"] }] }] };
     const colourBrother = printer({ deviceId: "MFG:Brother;MDL:HL-3170CDW series;" });
-    expect(matchPackage(colourBrother, [universalPkg])).toBeNull();
-    const monoBrother = printer({ deviceId: "MFG:Brother;MDL:HL-2250DN series;", lastTest: { color: false } });
+    expect(matchPackage(colourBrother, [colourL6415])).toBeNull();
+    const monoBrother = printer({ deviceId: "MFG:Brother;MDL:HL-L6415DW series;", lastTest: { color: false } });
     expect(matchPackage(monoBrother, [universalPkg])).toMatchObject({ match: "universal" });
   });
 
