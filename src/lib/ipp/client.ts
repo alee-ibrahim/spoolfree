@@ -1,6 +1,18 @@
 import http from "node:http";
 import https from "node:https";
-import { decodeResponse, getJobsRequest, getPrinterAttributesRequest, isSuccess, printerAttributes, Tag, type IppResponse, type IppValue } from "./encoding";
+import {
+  decodeResponse,
+  getJobAttributesRequest,
+  getJobsRequest,
+  getPrinterAttributesRequest,
+  isSuccess,
+  printerAttributes,
+  printJobRequest,
+  Tag,
+  type IppRequestAttribute,
+  type IppResponse,
+  type IppValue,
+} from "./encoding";
 
 /**
  * Sends a Get-Printer-Attributes request over HTTP(S).
@@ -22,6 +34,26 @@ export async function getCompletedJobs(uri: string, requested: string[], timeout
   const body = getJobsRequest(uri, requested, "completed", limit, Math.floor(Math.random() * 0x7fffffff) || 1);
   const res = await ippPost(uri, body, timeoutMs);
   return res.groups.filter((g) => g.tag === Tag.jobAttributes).map((g) => g.attributes);
+}
+
+function reqId(): number {
+  return Math.floor(Math.random() * 0x7fffffff) || 1;
+}
+
+/** Print-Job: sends one document; returns the job attributes the printer answered (job-id, job-uri, job-state). */
+export async function printJob(
+  uri: string,
+  args: { documentFormat: string; jobName: string; userName: string; jobAttributes: IppRequestAttribute[]; document: Buffer; version?: [number, number] },
+  timeoutMs: number,
+): Promise<Record<string, IppValue[]>> {
+  const res = await ippPost(uri, printJobRequest({ printerUri: uri, requestId: reqId(), ...args }), timeoutMs);
+  return Object.assign({}, ...res.groups.filter((g) => g.tag === Tag.jobAttributes).map((g) => g.attributes));
+}
+
+/** Get-Job-Attributes for job-id on the printer. Throws IppStatusError 0x0406 (not found) for jobs the printer forgot. */
+export async function getJobAttributes(uri: string, jobId: number, requested: string[], timeoutMs: number): Promise<Record<string, IppValue[]>> {
+  const res = await ippPost(uri, getJobAttributesRequest(uri, jobId, requested, reqId()), timeoutMs);
+  return Object.assign({}, ...res.groups.filter((g) => g.tag === Tag.jobAttributes).map((g) => g.attributes));
 }
 
 /** POSTs an IPP request and returns the decoded response; throws on HTTP or IPP errors. */

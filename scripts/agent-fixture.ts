@@ -1,11 +1,12 @@
 /**
- * Regenerates agent/tests/fixtures/signed-manifest.json for the Pester tests.
+ * Regenerates agent/tests/fixtures/signed-manifest.json, signed-bundle.json and signed-commands.json for the Pester tests.
  * Uses the RFC 8032 test-vector-1 key: public, documented, never use it for real.
  */
 import { writeFileSync } from "node:fs";
 import { privateKeyFromSeed, publicKeyRaw } from "../src/lib/crypto/signing";
 import { signManifest, type ManifestPayload } from "../src/lib/manifest";
 import { encodeAgentBundle, sha256, signAgentBundle } from "../src/lib/agent-bundle";
+import { signCommand, type CommandPayload } from "../src/lib/test-print/command";
 
 const seed = Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex").toString("base64");
 const key = privateKeyFromSeed(seed);
@@ -67,3 +68,35 @@ writeFileSync(
   ) + "\n",
 );
 console.log("wrote agent/tests/fixtures/signed-bundle.json");
+
+// Signed commands (agents 0.8+): test prints, same test key. Each envelope is signed over the domain prefix.
+const command = (over: Partial<CommandPayload> = {}): CommandPayload => ({
+  kind: "spoolfree-command",
+  v: 1,
+  id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+  type: "test-print",
+  computer: { objectGuid: payload.computer.objectGuid, name: "PC1" },
+  printer: { id: "p1", name: "Staff Copier" },
+  issuedAt: "2026-01-01T00:00:00.000Z",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  ...over,
+});
+writeFileSync(
+  "agent/tests/fixtures/signed-commands.json",
+  JSON.stringify(
+    {
+      publicKey: publicKeyRaw(key).toString("base64"),
+      valid: signCommand(command(), key),
+      second: signCommand(command({ id: "3f2504e0-4f89-41d3-9a0c-0305e82c3302", printer: { id: "p2", name: "Lab Colour" } }), key),
+      expired: signCommand(command({ id: "3f2504e0-4f89-41d3-9a0c-0305e82c3303", expiresAt: "2020-01-01T00:00:00.000Z" }), key),
+      otherComputer: signCommand(command({ computer: { objectGuid: "11111111-2222-3333-4444-555555555555", name: "PC2" } }), key),
+      otherKey: signCommand(command(), otherKey),
+      unknownType: signCommand({ ...command(), type: "run-script" } as unknown as CommandPayload, key),
+      // A manifest envelope is never accepted as a command (no prefix in its signature), and the reverse.
+      manifest: signManifest(payload, key),
+    },
+    null,
+    2,
+  ) + "\n",
+);
+console.log("wrote agent/tests/fixtures/signed-commands.json");

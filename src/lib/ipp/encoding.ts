@@ -38,6 +38,7 @@ export const Tag = {
 export const Operation = {
   printJob: 0x0002,
   validateJob: 0x0004,
+  getJobAttributes: 0x0009,
   getJobs: 0x000a,
   getPrinterAttributes: 0x000b,
 } as const;
@@ -207,6 +208,59 @@ export function getJobsRequest(printerUri: string, requested: string[], whichJob
       { tag: Tag.keyword, name: "which-jobs", values: [whichJobs] },
       { tag: Tag.integer, name: "limit", values: [limit] },
       { tag: Tag.boolean, name: "my-jobs", values: [false] },
+      { tag: Tag.keyword, name: "requested-attributes", values: requested },
+    ],
+  });
+}
+
+/**
+ * Print-Job: operation attributes, optional job template attributes (only send what the printer lists as supported),
+ * then the document bytes after end-of-attributes.
+ */
+export function printJobRequest(args: {
+  printerUri: string;
+  documentFormat: string;
+  jobName: string;
+  userName: string;
+  jobAttributes: IppRequestAttribute[];
+  document: Buffer;
+  requestId?: number;
+  version?: [number, number];
+}): Buffer {
+  const head = encodeMessage({
+    version: args.version ?? [2, 0],
+    code: Operation.printJob,
+    requestId: args.requestId ?? 1,
+    groups: [
+      {
+        tag: Tag.operationAttributes,
+        attributes: [
+          { tag: Tag.charset, name: "attributes-charset", values: ["utf-8"] },
+          { tag: Tag.naturalLanguage, name: "attributes-natural-language", values: ["en"] },
+          { tag: Tag.uri, name: "printer-uri", values: [args.printerUri] },
+          { tag: Tag.nameWithoutLanguage, name: "requesting-user-name", values: [args.userName] },
+          { tag: Tag.nameWithoutLanguage, name: "job-name", values: [args.jobName] },
+          { tag: Tag.mimeMediaType, name: "document-format", values: [args.documentFormat] },
+        ],
+      },
+      ...(args.jobAttributes.length ? [{ tag: Tag.jobAttributes, attributes: args.jobAttributes }] : []),
+    ],
+  });
+  return Buffer.concat([head, args.document]);
+}
+
+/** Get-Job-Attributes for one job of a printer (by printer-uri + job-id, which every IPP printer supports). */
+export function getJobAttributesRequest(printerUri: string, jobId: number, requested: string[], requestId = 1, version: [number, number] = [2, 0]): Buffer {
+  return encodeRequest({
+    version,
+    operation: Operation.getJobAttributes,
+    requestId,
+    operationAttributes: [
+      { tag: Tag.charset, name: "attributes-charset", values: ["utf-8"] },
+      { tag: Tag.naturalLanguage, name: "attributes-natural-language", values: ["en"] },
+      { tag: Tag.uri, name: "printer-uri", values: [printerUri] },
+      { tag: Tag.integer, name: "job-id", values: [jobId] },
+      { tag: Tag.nameWithoutLanguage, name: "requesting-user-name", values: ["spoolfree"] },
       { tag: Tag.keyword, name: "requested-attributes", values: requested },
     ],
   });

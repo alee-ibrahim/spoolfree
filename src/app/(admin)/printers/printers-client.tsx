@@ -46,6 +46,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { OuPicker, type OuOption, type PickedOu } from "@/components/app/ou-picker";
 import { PcPicker, type PcOption, type PcOverride } from "@/components/app/pc-picker";
 import { StatusBadges } from "@/components/app/printer-status";
+import { TestPrintDialog, type TestPrintTarget } from "@/components/app/test-print-dialog";
+import { OuBadges, PcBadges } from "@/components/app/assignment-badges";
 import { cn } from "@/lib/utils";
 import type { Marker } from "@/lib/ipp/interpret";
 import { deletePrinter, previewPrinterReach, replacePrinter, resetDriverDecision, savePrinter, testPrinter, type ActionResult, type TestResult } from "../actions";
@@ -100,6 +102,8 @@ export interface PrinterView {
   ous: PickedOu[];
   /** Per-computer overrides of this printer (add and block). */
   pcOverrides: PcOverride[];
+  /** Full directory path of each assigned OU (badge tooltips); the DN's short form when AD is unavailable. */
+  ouPaths: Record<string, string>;
   driverMode: "auto" | "driverless" | "vendor";
   driverPackageId: string | null;
   driverName: string | null;
@@ -735,6 +739,7 @@ function PrinterActions({
   packages,
   pending,
   onTest,
+  onTestPrint,
   onReplace,
   onDelete,
 }: {
@@ -744,6 +749,7 @@ function PrinterActions({
   packages: DriverPackageOption[];
   pending: boolean;
   onTest: () => void;
+  onTestPrint: () => void;
   onReplace: () => void;
   onDelete: () => void;
 }) {
@@ -758,6 +764,7 @@ function PrinterActions({
         <DropdownMenuItem disabled={pending} onSelect={onTest}>
           Test (IPP)
         </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onTestPrint}>Test print…</DropdownMenuItem>
         <PrinterFormDialog
           printer={p}
           ouOptions={ouOptions}
@@ -824,6 +831,8 @@ export function PrintersTable({
   const [replacing, setReplacing] = useState<PrinterView | null>(null);
   const [deleting, setDeleting] = useState<PrinterView | null>(null);
   const [testResult, setTestResult] = useState<(TestResult & { name: string; decision?: DriverDecisionView }) | null>(null);
+  const [testPrint, setTestPrint] = useState<TestPrintTarget | null>(null);
+  const openTestPrint = (p: PrinterView) => setTestPrint({ kind: "printer", printerId: p.id, printerName: p.name });
   const [pending, startTransition] = useTransition();
   const runTest = (p: PrinterView) =>
     startTransition(async () => {
@@ -859,8 +868,18 @@ export function PrintersTable({
               <ItemDescription className="font-mono text-xs break-all">{p.ippUri}</ItemDescription>
               <ItemDescription>
                 {p.location ?? "No location"}
-                {p.model ? ` · ${p.model}` : ""} · {p.assignedOus} OU{p.assignedOus === 1 ? "" : "s"}
+                {p.model ? ` · ${p.model}` : ""}
               </ItemDescription>
+              <div className="flex items-start gap-2 pt-1 text-xs">
+                <span className="w-8 shrink-0 pt-0.5 text-muted-foreground">OUs</span>
+                <OuBadges ous={p.ous} paths={p.ouPaths} empty="Not assigned" />
+              </div>
+              {p.pcOverrides.length > 0 && (
+                <div className="flex items-start gap-2 text-xs">
+                  <span className="w-8 shrink-0 pt-0.5 text-muted-foreground">PCs</span>
+                  <PcBadges pcs={p.pcOverrides} />
+                </div>
+              )}
               <div className="pt-1">
                 <StatusBadges status={p.status} />
               </div>
@@ -869,8 +888,12 @@ export function PrintersTable({
                 <DriverBadge p={p} />
               </div>
             </ItemContent>
-            <ItemActions>
-              <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+            <ItemActions className="flex-col items-end">
+              <Button variant="outline" size="sm" onClick={() => openTestPrint(p)} aria-label={`Test print ${p.name}`}>
+                <PrinterIcon data-icon="inline-start" />
+                Test print
+              </Button>
+              <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onTestPrint={() => openTestPrint(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
             </ItemActions>
           </Item>
         ))}
@@ -883,41 +906,55 @@ export function PrintersTable({
               <TableHead>IPP address</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Location</TableHead>
-              <TableHead>Model</TableHead>
               <TableHead>Driverless</TableHead>
-              <TableHead className="text-right">OUs</TableHead>
-              <TableHead className="w-10 pr-4" />
+              <TableHead>OUs</TableHead>
+              <TableHead>PCs</TableHead>
+              <TableHead className="w-20 pr-4">
+                <span className="sr-only">Actions</span>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {printers.map((p) => (
               <TableRow key={p.id}>
-                <TableCell className="pl-4 font-medium">
-                  {p.name}
-                  {p.revision > 1 && (
-                    <Badge variant="outline" className="ml-2">
-                      rev {p.revision}
-                    </Badge>
-                  )}
+                <TableCell className="max-w-56 pl-4 whitespace-normal">
+                  <div className="font-medium">
+                    {p.name}
+                    {p.revision > 1 && (
+                      <Badge variant="outline" className="ml-2">
+                        rev {p.revision}
+                      </Badge>
+                    )}
+                  </div>
+                  {p.model && <div className="text-xs text-muted-foreground">{p.model}</div>}
                 </TableCell>
-                <TableCell className="font-mono text-xs">
+                <TableCell className="max-w-52 font-mono text-xs break-all whitespace-normal">
                   {p.ippUri}
                   {!p.ippPathAuto && <span className="ml-1 font-sans text-muted-foreground">(manual)</span>}
                 </TableCell>
                 <TableCell className="max-w-48 whitespace-normal">
                   <StatusBadges status={p.status} />
                 </TableCell>
-                <TableCell>{p.location ?? "—"}</TableCell>
-                <TableCell>{p.model ?? "—"}</TableCell>
+                <TableCell className="max-w-40 whitespace-normal">{p.location ?? "—"}</TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
                     <DriverlessBadge p={p} />
                     <DriverBadge p={p} />
                   </div>
                 </TableCell>
-                <TableCell className="text-right tabular-nums">{p.assignedOus}</TableCell>
+                <TableCell className="max-w-56 whitespace-normal">
+                  <OuBadges ous={p.ous} paths={p.ouPaths} />
+                </TableCell>
+                <TableCell className="max-w-48 whitespace-normal">
+                  <PcBadges pcs={p.pcOverrides} />
+                </TableCell>
                 <TableCell className="pr-4">
-                  <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+                  <div className="flex items-center justify-end gap-1">
+                    <Button variant="ghost" size="icon-sm" onClick={() => openTestPrint(p)} aria-label={`Test print ${p.name}`} title="Test print">
+                      <PrinterIcon />
+                    </Button>
+                    <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onTestPrint={() => openTestPrint(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -927,6 +964,7 @@ export function PrintersTable({
 
       {replacing && <ReplaceDialog printer={replacing} open onOpenChange={(o) => !o && setReplacing(null)} />}
       <TestDialog result={testResult} onOpenChange={(o) => !o && setTestResult(null)} />
+      <TestPrintDialog target={testPrint} onOpenChange={(o) => !o && setTestPrint(null)} />
       <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>

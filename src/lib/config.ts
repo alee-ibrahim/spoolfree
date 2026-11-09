@@ -141,6 +141,17 @@ const schema = z.object({
   /** How often the poller reads completed jobs (IPP Get-Jobs) of auto-mode printers; 0 turns speed measuring off. */
   DRIVER_AUTO_SPEED_INTERVAL_MINUTES: z.coerce.number().int().min(0).default(30),
 
+  // Test print (0.8)
+  /** At most one test print per printer in this many seconds (both modes), so a double click cannot flood paper. */
+  TEST_PRINT_MIN_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
+  /** A "from a PC" test print command is valid this long; agents refuse it after that. */
+  TEST_PRINT_COMMAND_TTL_MINUTES: z.coerce.number().int().min(2).max(1440).default(30),
+  /**
+   * Agents 0.8+ poll /api/agent/commands this often (minutes, 1-60) for pending commands; 0 turns the fast path off
+   * (commands then wait for the next sync). Sent in the manifest; agents update their own task.
+   */
+  AGENT_COMMAND_POLL_MINUTES: z.coerce.number().int().min(0).max(60).default(1),
+
   // Development only
   DEV_FAKE_AD: bool,
   /** Optional JSON file that replaces the sample directory (see directory/fake.ts). */

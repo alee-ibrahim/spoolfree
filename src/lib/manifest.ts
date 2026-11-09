@@ -6,6 +6,7 @@ import type { Resolution } from "./resolve";
 import type { AgentUpdateOffer } from "./agent-bundle";
 import type { DriverDecision } from "./drivers/auto";
 import { keyId, publicKeyRaw, randomToken, signBytes } from "./crypto/signing";
+import type { SignedCommand } from "./test-print/command";
 
 export const MANIFEST_SCHEMA = 1;
 
@@ -111,6 +112,13 @@ export interface ManifestPayload {
   agentAllowDowngrade?: boolean;
   /** Print analytics (agents 0.5+): read PrintService event 307 and POST it to /api/agent/jobs. */
   analytics?: ManifestAnalytics;
+  /**
+   * Agents 0.8+: pending commands (test prints) for this PC, each signed on its own (src/lib/test-print/command.ts).
+   * Older agents ignore them.
+   */
+  commands?: SignedCommand[];
+  /** Agents 0.8+: how often to poll /api/agent/commands (minutes; 0 = only at sync). */
+  commandPollMinutes?: number;
 }
 
 export interface SignedManifest {
@@ -136,6 +144,8 @@ export function buildManifest(args: {
   legacyPrintServers?: string[];
   agentUpdate?: AgentUpdateOffer;
   analytics?: ManifestAnalytics;
+  commands?: SignedCommand[];
+  commandPollMinutes?: number;
 }): ManifestPayload {
   const list: ManifestPrinter[] = [];
   for (const r of args.resolution.printers) {
@@ -172,6 +182,8 @@ export function buildManifest(args: {
     legacyPrintServers: args.legacyPrintServers ?? [],
     serverPrinterIds: [...args.printers.keys()].sort(),
     analytics: args.analytics ?? { enabled: false, collectDocumentNames: false },
+    commands: args.commands ?? [],
+    commandPollMinutes: args.commandPollMinutes ?? 0,
     ...(args.agentUpdate
       ? {
           agentVersion: args.agentUpdate.version,

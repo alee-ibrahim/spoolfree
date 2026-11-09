@@ -31,7 +31,7 @@ Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** th
 | | |
 |---|---|
 | **Entra ID login** | OIDC sign-in (automatic by default), limited to admins; optional break-glass local accounts. |
-| **Printers** | Add, edit, delete, [bulk import/export](docs/deployment.md#bulk-import-and-export), delete/rename from the [CLI](docs/deployment.md#deleting-and-renaming-printers). **Test** checks driverless support over IPP and detects the IPP path (`/ipp/print`, `/ipp`, `/ipp/printer`, `/printers/lp1`, `/`; manual override possible); **Replace** swaps the device and keeps the name; default duplex; takeover of old queues for the same device (on for new printers, `DEFAULT_LEGACY_TAKEOVER`), including old host names that are no longer in DNS, in the form's collapsed **Advanced (migration)** section. |
+| **Printers** | Add, edit, delete, [bulk import/export](docs/deployment.md#bulk-import-and-export), delete/rename from the [CLI](docs/deployment.md#deleting-and-renaming-printers). The list shows each printer's assigned OUs and per-PC overrides as badges (an OU badge filters the list by that OU). **Test** checks driverless support over IPP and detects the IPP path (`/ipp/print`, `/ipp`, `/ipp/printer`, `/printers/lp1`, `/`; manual override possible); **Replace** swaps the device and keeps the name; default duplex; takeover of old queues for the same device (on for new printers, `DEFAULT_LEGACY_TAKEOVER`), including old host names that are no longer in DNS, in the form's collapsed **Advanced (migration)** section. |
 | **OU assignments** | Read-only LDAP(S) view of AD with inheritance, block rules, per-OU defaults and per-computer overrides. Assign OUs (and the per-OU default) and specific PCs (per-computer overrides) straight from the Add/Edit printer form, with a live "will reach N computers" count that counts each PC once. |
 | **Vendor drivers** | For printers the IPP Class Driver cannot drive, or drives too slowly (IPP 1.x only, no driverless format, slow old colour lasers): **auto driver mode** (default) switches just those printers to a signed vendor driver. It picks the exact-model package by IEEE 1284 device ID, or a universal driver whose INF lists the printer. Agents check the SHA-256 and the catalog's Authenticode signature, and switch without leaving the PC printerless. [docs/drivers.md](docs/drivers.md). |
 | **Preview** | "What will computer X get?", with a step-by-step trace and the exact manifest. |
@@ -40,6 +40,7 @@ Spoolfree gives each Windows PC local, machine-wide **driverless IPP queues** th
 | **Agents view** | Last check-in, applied printers and errors per PC; a red alert when a takeover left a PC without a printer; revoke a PC's token. |
 | **Print analytics** | Opt-in. Jobs from each PC's print log and printer page counters: pages over time; top users, PCs, printers and OUs; pages not sent from PCs; unmanaged queues; a job log with CSV export. [Privacy notes](docs/analytics.md#privacy). |
 | **Phone-friendly** | Bottom navigation, cards instead of tables, 44 px touch targets, light and dark themes. |
+| **Test print** | One page from the Printers or Agents page: **direct** from the server over IPP (PWG raster, URF or PDF, mono, one-sided) with the job followed to "printed", or **from a PC** through its Spoolfree queue and driver (a signed, single-use, expiring command), shown as queued → sent → printed / failed. One per printer per minute; audit-logged. [docs/agent.md](docs/agent.md#test-print-commands). |
 | **Ops** | Audit log of every admin change, Prometheus `/metrics`, `/healthz`. |
 
 ## Screenshots
@@ -161,6 +162,9 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 | `MANIFEST_SIGNING_KEY` | | **Required.** Base64 Ed25519 seed from `pnpm keygen`. |
 | `AGENT_ENROLLMENT_TOKEN` | | **Required.** Shared enrollment token from `pnpm keygen`. |
 | `AGENT_SYNC_INTERVAL_MINUTES` | `15` | How often agents sync (5-240); agents update their own task, no GPO change. |
+| `AGENT_COMMAND_POLL_MINUTES` | `1` | Agents 0.8+ check `/api/agent/commands` this often for test prints (1-60); `0` = only at sync. |
+| `TEST_PRINT_MIN_INTERVAL_SECONDS` | `60` | At most one test print per printer in this time (both modes). |
+| `TEST_PRINT_COMMAND_TTL_MINUTES` | `30` | A "from a PC" test print command expires after this. |
 | `MANIFEST_TTL_HOURS` | `24` | Manifest validity (replay protection). |
 | `AGENT_STALE_HOURS` | `26` | Agents without a report for this long show as stale. |
 | `AGENT_SELF_UPDATE` | `1` | Offer the agent scripts in the image to agents (0.4.3+), which install them themselves. See [docs/agent.md](docs/agent.md#self-update). |
@@ -194,6 +198,7 @@ Everything is an environment variable, documented in [`.env.example`](.env.examp
 - Manifests carry an **Ed25519 signature** over the exact bytes. Agents pin the public key and reject bad signatures, the wrong computer, or expired manifests, so a network attacker cannot inject printers.
 - PCs enroll with a shared token read from a Domain Computers-only share, then get a per-machine token (stored DPAPI-encrypted; only its hash is kept server-side).
 - Every agent request is checked live against AD by `objectGUID`; disabled or deleted computers are refused.
+- Test prints are admin-only and rate limited; PC test prints are signed, single-use, expiring commands that agents run only through a queue they manage.
 - Vendor drivers (opt-in per printer, or auto mode) are installed only from admin-uploaded packages whose SHA-256 is in the signed manifest and whose catalog has a valid Authenticode signature; never under Windows Protected Print Mode.
 - Spoolfree never writes to AD.
 

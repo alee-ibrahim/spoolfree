@@ -27,6 +27,22 @@ export function checkEnrollmentToken(presented: string, expected: string | undef
 }
 
 /**
+ * Token-only check (no directory lookup) for the cheap command poll: the agent row for a valid, unrevoked token.
+ * Anything that hands out data must still call authenticateAgent.
+ */
+export async function agentFromToken(req: Request): Promise<typeof schema.agents.$inferSelect> {
+  const token = bearer(req);
+  if (!token) throw new AgentAuthError("missing bearer token");
+  const [agent] = await db()
+    .select()
+    .from(schema.agents)
+    .where(eq(schema.agents.tokenHash, sha256Hex(token)))
+    .limit(1);
+  if (!agent || agent.revokedAt) throw new AgentAuthError("unknown or revoked agent token");
+  return agent;
+}
+
+/**
  * Authenticates an agent request: per-machine bearer token -> agent row ->
  * directory lookup by objectGUID (live LDAP, or the synced snapshot). Disabled or deleted
  * computer accounts fail; an unavailable directory gives 503 (fail closed).

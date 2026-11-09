@@ -301,6 +301,57 @@ From 0.5.0, when the server turns on analytics (`analytics.enabled` in the manif
 Failures are logged and never fail the sync. What is collected, retention and privacy:
 [analytics.md](analytics.md).
 
+## Test print commands
+
+From 0.8.0 an admin can send a **test print** from the Printers page (the printer icon, or **Test print…** in a
+printer's menu) or from the Agents page (**Test print** on a PC). It has two modes:
+
+| Mode | What happens | What it tests |
+|---|---|---|
+| **Direct to printer (from server)** | The server renders one page and sends it with IPP `Print-Job`. It uses PWG raster (grey, 300 dpi when offered), else URF (`W8`), else PDF, with `sides=one-sided` and `print-color-mode=monochrome` when the printer lists them. It then follows the job with `Get-Job-Attributes`. | The printer and its network path. Off for IPP 1.x-only and non-driverless printers (the dialog says why); test those from a PC. |
+| **From a PC (tests the PC's driver and queue)** | The server queues a signed command for one PC that reported the printer's queue. The PC's agent prints a test page **through its Spoolfree queue** with that queue's driver, then follows the spooler job. | The PC's queue, driver and port: pages of random characters show up on paper. |
+
+The page shows "Spoolfree test page", the printer, host and IP (direct mode) or PC, driver and port (PC mode), the
+time, the model and driver mode, a reference id, an alignment box 10 mm from the paper edge and a 100 mm ruler.
+
+**States** (shown with times in the dialog): *queued* → *picked up* (PC mode: the agent fetched the command) → *sent*
+(the printer accepted the job, or it is in the PC's queue) → *printing* → **printed** or **failed**. A command no
+agent ran in time ends as *expired*, and one the agent refused ends as *rejected*. In direct mode, a printer that drops
+a finished job from its list counts as printed. In PC mode, a spooler job that leaves the queue counts as printed. A
+job with a spooler error (Error, Offline, PaperOut, Blocked, ...), or one still in the queue after 120 s, fails, and
+the job status is reported.
+
+**How the command reaches the PC.**
+
+- It travels in the signed manifest (`commands`), so a PC gets it at its next sync at the latest.
+- **Fast path:** the sync installs a *Spoolfree Commands* task (SYSTEM) that runs `Invoke-SpoolfreeSync.ps1
+  -CommandsOnly` every `AGENT_COMMAND_POLL_MINUTES` (default 1; sent in the manifest as `commandPollMinutes`; `0`
+  removes the task). Each run makes one small authenticated `GET /api/agent/commands` and stops there when nothing is
+  pending. It does no AD lookup and no signature work, and writes nothing to the log.
+- Laptops in Modern Standby run it when they wake up.
+
+**What the agent checks** (details in [SECURITY.md](../SECURITY.md#test-prints-080)):
+
+- the Ed25519 signature over `spoolfree-command-v1\n` + the payload;
+- the command type `test-print`;
+- this computer's `objectGUID`;
+- the expiry (`TEST_PRINT_COMMAND_TTL_MINUTES`, default 30);
+- single use: ids are kept in `HKLM:\SOFTWARE\Spoolfree\Commands` for 2 days;
+- the queue is one this agent manages for that printer id.
+
+Results go to `POST /api/agent/commands/<id>`: `sent` (with the spooler job id), then `printed`, `failed` or
+`rejected`. The sync report carries `commands: { pollMinutes, ran, error }`.
+
+**How the PC prints the page.** `System.Drawing.Printing.PrintDocument` on the queue, mono and simplex, with the
+queue's own driver. When that fails (for example a missing GDI component), it falls back to the Windows test page:
+`rundll32 printui.dll,PrintUIEntry /k /q /n "<queue>"`. Both go through the real queue, so a driver that sends a
+format the printer does not understand prints garbage, just as it would for users.
+
+**Limits.** One test print per printer per `TEST_PRINT_MIN_INTERVAL_SECONDS` (default 60), across both modes. Only
+admins can start one, and every request and result is in the audit log (`printer.test_print`,
+`printer.test_print_result`). PCs need agent 0.8.0 or later; older agents update themselves at their next sync, and
+the dialog marks them as not ready.
+
 ## Default printer after a rename or replace
 
 Renaming a printer or using **Replace** removes the queue and creates it again, and Windows then drops it as the default

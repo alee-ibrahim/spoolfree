@@ -277,6 +277,8 @@ export interface AgentReport {
    * Print Mode: driverless used instead), failed, fallback (driverless queue kept or created instead).
    */
   drivers?: { printer: string; status: "installed" | "present" | "wpp-blocked" | "failed" | "fallback"; driverName?: string | null; message?: string | null }[];
+  /** Agents 0.8+: the command poll task (minutes; 0 = off), commands run in this sync, and a task error. */
+  commands?: { pollMinutes: number; ran?: number; error?: string | null };
   /** Print analytics collection state (agents 0.5+). */
   analytics?: { enabled: boolean; logEnabled?: boolean | null; sent?: number; error?: string | null };
 }
@@ -442,3 +444,60 @@ export const printerCounterDaily = pgTable(
 );
 
 export type PrintJob = typeof printJobs.$inferSelect;
+
+// --- Test print (0.8) ---------------------------------------------------------------------------------------
+
+/**
+ * "direct": the server sent the page to the printer over IPP Print-Job. "pc": a signed command asked one PC's agent to
+ * print through its Spoolfree queue (tests the PC's driver and queue).
+ */
+export type TestPrintMode = "direct" | "pc";
+/**
+ * queued (pc: waiting for the agent) -> delivered (the agent fetched the command) -> sent (job accepted by the
+ * queue or the printer) -> printing -> printed | failed. A command that no agent ran in time ends as expired; one the
+ * agent refused (bad signature, not its queue, ...) ends as rejected.
+ */
+export const TEST_PRINT_STATES = ["queued", "delivered", "sent", "printing", "printed", "failed", "expired", "rejected"] as const;
+export type TestPrintState = (typeof TEST_PRINT_STATES)[number];
+export const TEST_PRINT_FINAL: TestPrintState[] = ["printed", "failed", "expired", "rejected"];
+
+export interface TestPrintEvent {
+  state: TestPrintState;
+  at: string;
+  message?: string | null;
+}
+
+export const testPrints = pgTable(
+  "test_prints",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    printerId: uuid("printer_id")
+      .notNull()
+      .references(() => printers.id, { onDelete: "cascade" }),
+    /** Printer name at the time (the PC queue name for mode "pc"). */
+    printerName: text("printer_name").notNull(),
+    mode: text("mode").$type<TestPrintMode>().notNull(),
+    /** Mode "pc": the agent that runs it. */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    computerName: text("computer_name"),
+    computerGuid: text("computer_guid"),
+    requestedBy: text("requested_by").notNull(),
+    state: text("state").$type<TestPrintState>().notNull(),
+    /** Every state change with its time (the UI's timeline). */
+    events: jsonb("events").$type<TestPrintEvent[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    /** Mode "direct": the document format sent and the printer's job URI / id. Mode "pc": the spooler job id. */
+    format: text("format"),
+    jobId: integer("job_id"),
+    jobUri: text("job_uri"),
+    /** Last job state text (IPP job-state + reasons, or the Windows spooler JobStatus). */
+    jobStatus: text("job_status"),
+    error: text("error"),
+  },
+  (t) => [index("test_prints_printer_idx").on(t.printerId, t.createdAt), index("test_prints_agent_idx").on(t.agentId, t.state)],
+);
+
+export type TestPrint = typeof testPrints.$inferSelect;

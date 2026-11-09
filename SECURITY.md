@@ -149,3 +149,38 @@ default, and only when a matching package has been uploaded.
   allowed under WPP"* and keeps the driverless queue.
 - **Storage.** Packages are stored in Postgres (`driver_package_chunks`) and are included in database backups. Treat
   database write access as equivalent to choosing which signed drivers PCs install.
+
+### Test prints (0.8.0+)
+
+**Test print** sends one page to a printer, so an admin can check it without walking to a PC. There are two modes:
+**direct** (the server sends the page to the printer over IPP) and **from a PC** (a command asks one PC's agent to
+print through its Spoolfree queue).
+
+- **Who can trigger it.** Only admins, through server actions that call `requireAdmin()`. There is no agent- or
+  user-facing way to start one. Each request writes a `printer.test_print` audit row with the admin, printer, mode,
+  PC and queue. The outcome writes a `printer.test_print_result` row (actor `agent:<PC>` or `system`).
+- **Paper floods.** One test print per printer per `TEST_PRINT_MIN_INTERVAL_SECONDS` (default 60), across both modes.
+  The check holds a row lock on the printer, so two admins clicking at once cannot both get through.
+- **Direct mode.** The server sends exactly one page that it rendered itself, in a format the printer lists (PWG
+  raster, URF or PDF, in that order), mono and one-sided where the printer supports it. Nothing from the request
+  reaches the document except the printer's own name, host and model. The mode is off for printers whose last Test
+  found IPP 1.x only or no driverless format.
+- **Commands to PCs.** A command is signed on its own with the manifest key, over `spoolfree-command-v1\n` + the JSON
+  payload. Because of that domain prefix, a command signature never verifies as a manifest or an agent bundle (those
+  are signed over their raw JSON), and the reverse. The agent runs a command only when all of these hold:
+  - the signature verifies with the pinned key;
+  - `kind` is `spoolfree-command` and `type` is `test-print` (the only type; anything else is refused);
+  - it is for this computer's `objectGUID`;
+  - it has not expired (`TEST_PRINT_COMMAND_TTL_MINUTES`, default 30);
+  - its id has not run on this PC before. Ids are kept in `HKLM:\SOFTWARE\Spoolfree\Commands` for 2 days, and runs are
+    serialized with a machine-wide mutex;
+  - the printer is one this agent manages. That means a marker under `HKLM:\SOFTWARE\Spoolfree\Printers` with the
+    command's printer id and queue name, and a queue whose `Managed by Spoolfree` comment carries the same printer id
+    and this server's id. Hand-made or other servers' queues are refused and reported as `rejected`.
+
+  A command can only print the agent's fixed test page. It carries no script, file or path. The server hands a PC
+  only its own commands, and an agent can report results only for its own commands.
+- **Command poll.** `GET /api/agent/commands` (every `AGENT_COMMAND_POLL_MINUTES`, default 1; `0` turns it off) checks
+  the machine token, which must be valid and not revoked. When nothing is pending, that is all it does. When commands
+  are pending it also checks the computer in the directory, as the manifest does, before it signs and hands them out.
+  Commands also travel in the signed manifest, so the poll is only a faster path.

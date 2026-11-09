@@ -12,6 +12,7 @@ import { buildOuTree, flattenTree } from "@/lib/ou-tree";
 import { printerUri } from "@/lib/ipp/interpret";
 import { requireAdmin } from "@/lib/session";
 import { driverNames } from "@/lib/drivers/package";
+import { loadPrinterAssignments } from "@/lib/printer-assignments";
 import { driverDecision, loadPackagesForMatch } from "@/lib/service";
 import { shortDn } from "@/lib/format";
 import { activePrinterFilters, brandOptions, filterPrinters, parsePrinterFilters } from "@/lib/list-filters/printers";
@@ -23,22 +24,21 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
   await requireAdmin();
   const d = db();
   const f = parsePrinterFilters(await searchParams);
-  const [allPrinters, statuses, assignments, settings, dir, packages, overrides] = await Promise.all([
+  const [allPrinters, statuses, assigned, settings, dir, packages] = await Promise.all([
     d.select().from(schema.printers).orderBy(schema.printers.name),
     d.select().from(schema.printerStatus),
-    d.select().from(schema.ouAssignments),
+    // OUs and per-PC overrides of every printer in one aggregated query.
+    loadPrinterAssignments(),
     d.select().from(schema.ouSettings),
     loadDirectoryOptions(),
     loadPackagesForMatch(),
-    d.select().from(schema.computerOverrides).orderBy(schema.computerOverrides.computerName),
   ]);
   const ouOptions = dir?.ous ?? null;
+  const ouPathOf = new Map((dir?.ous ?? []).map((o) => [o.key, o.path]));
   const pcOptions = dir?.pcs ?? null;
-  const overridesOf = new Map<string, typeof overrides>();
-  for (const o of overrides) overridesOf.set(o.printerId, [...(overridesOf.get(o.printerId) ?? []), o]);
+
   const packageOptions: DriverPackageOption[] = packages.map((p) => ({ id: p.id, name: p.name, universal: p.universal, drivers: driverNames(p.infs) }));
-  const byPrinter = new Map<string, string[]>();
-  for (const a of assignments) byPrinter.set(a.printerId, [...(byPrinter.get(a.printerId) ?? []), a.ouDn]);
+  const byPrinter = new Map<string, string[]>([...assigned].map(([id, a]) => [id, a.ous.map((o) => o.ouDn)]));
   const defaultOf = new Map(settings.filter((s) => s.defaultPrinterId).map((s) => [normalizeDn(s.ouDn), s.defaultPrinterId!]));
   const nameOf = new Map(allPrinters.map((p) => [p.id, p.name]));
   const statusOf = new Map(statuses.map((s) => [s.printerId, s]));
@@ -50,7 +50,7 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
     }),
     f,
   );
-  const assignedOus = [...new Map(assignments.map((a) => [normalizeDn(a.ouDn), a.ouDn])).values()].sort((a, b) => shortDn(a).localeCompare(shortDn(b)));
+  const assignedOus = [...new Map([...byPrinter.values()].flat().map((dn) => [normalizeDn(dn), dn])).values()].sort((a, b) => shortDn(a).localeCompare(shortDn(b)));
   const fields: FilterField[] = [
     { kind: "toggle", key: "status", label: "Status", options: [{ value: "online", label: "Online" }, { value: "offline", label: "Offline" }, { value: "error", label: "Error" }] },
     { kind: "switch", key: "low", label: "Toner low" },
@@ -133,7 +133,8 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
             lastTestFormats: p.lastTest?.driverlessFormats ?? [],
             assignedOus: byPrinter.get(p.id)?.length ?? 0,
             ous: (byPrinter.get(p.id) ?? []).map((ouDn) => ({ ouDn, isDefault: defaultOf.get(normalizeDn(ouDn)) === p.id })),
-            pcOverrides: (overridesOf.get(p.id) ?? []).map((o) => ({ computerGuid: o.computerGuid, computerName: o.computerName, action: o.action, makeDefault: o.makeDefault })),
+            pcOverrides: assigned.get(p.id)?.pcs ?? [],
+            ouPaths: Object.fromEntries((byPrinter.get(p.id) ?? []).map((dn) => [dn, ouPathOf.get(normalizeDn(dn)) ?? shortDn(dn)])),
             driverMode: p.driverMode,
             driverPackageId: p.driverPackageId,
             driverName: p.driverName,
