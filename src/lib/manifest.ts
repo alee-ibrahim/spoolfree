@@ -89,6 +89,14 @@ export interface ManifestPrinter {
   fallbackDriver?: ManifestDriver;
 }
 
+/**
+ * Whether this manifest names the driver package, as a printer's vendor driver or as its per-PC vendor fallback
+ * (0.8.1). The agent driver download route serves only such packages.
+ */
+export function manifestNamesPackage(printers: Pick<ManifestPrinter, "driver" | "fallbackDriver">[], packageId: string): boolean {
+  return printers.some((p) => p.driver?.packageId === packageId || p.fallbackDriver?.packageId === packageId);
+}
+
 /** Print analytics settings for agents (0.5+). */
 export interface ManifestAnalytics {
   enabled: boolean;

@@ -3,7 +3,7 @@ import { decideDriver, hardwareIdMatches, matchPackage, medianSecondsPerPage, me
 import { decodeInf, parseInf } from "@/lib/drivers/inf";
 import { DriverPackageError, driverNames, inspectDriverPackage } from "@/lib/drivers/package";
 import { bufferSource, listEntries, readEntry, unsafeEntryName } from "@/lib/drivers/zip";
-import { buildManifest } from "@/lib/manifest";
+import { buildManifest, manifestNamesPackage } from "@/lib/manifest";
 import { brotherInf, makeZip } from "./helpers/zip";
 
 const DEVICE_ID = "MFG:Brother;CMD:PJL,PCL,PCLXL,URF;MDL:HL-3150CDN series;CLS:PRINTER;CID:Brother Laser Type1;";
@@ -322,5 +322,18 @@ describe("per-PC vendor fallback (0.8.1)", () => {
     expect(manual.fallback).toBeUndefined();
     expect(build(manual).fallbackDriver).toBeUndefined();
     expect(decideDriver(printer({ deviceId: DEVICE_ID }), []).fallback).toBeNull();
+  });
+});
+
+describe("agent driver download allow-list", () => {
+  const pkg = (packageId: string) => ({ packageId }) as never;
+  it("serves vendor drivers and per-PC vendor fallback drivers named in the manifest", () => {
+    const printers = [{ driver: pkg("a") }, { fallbackDriver: pkg("b") }, {}];
+    expect(manifestNamesPackage(printers, "a")).toBe(true);
+    expect(manifestNamesPackage(printers, "b")).toBe(true);
+  });
+  it("refuses packages the manifest does not name", () => {
+    expect(manifestNamesPackage([{ driver: pkg("a") }, { fallbackDriver: pkg("b") }], "c")).toBe(false);
+    expect(manifestNamesPackage([], "a")).toBe(false);
   });
 });
