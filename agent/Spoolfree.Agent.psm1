@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.9.1'
+$script:AgentVersion = '0.9.2'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -526,13 +526,24 @@ function Find-SpoolfreeNameToken {
         Pure (0.9.0): the first of $Tokens (serial numbers, aliases) that appears in $Text as a whole word
         (case-insensitive; the characters around it are not letters or digits); $null otherwise. Tokens shorter than
         5 characters are ignored, so short names cannot match by accident.
+
+        0.9.2: a token also matches without a common device-name prefix (MFP, PRN, NPI, SEC, BRN, BRW, optionally
+        followed by - or _), and by any run of at least 6 digits in it that appears in $Text as a whole digit run (no
+        digit before or after it). A Toshiba WSD queue "TOSHIBA e-STUDIO2518A-<serial> (Copy 1)" then matches the alias
+        "MFP<serial>". Runs shorter than 6 digits (model numbers such as 2518) never match.
     #>
     param([AllowNull()][AllowEmptyString()][string]$Text, [AllowEmptyCollection()][string[]]$Tokens = @())
     if (-not $Text) { return $null }
+    $word = { param([string]$k) $k.Length -ge 5 -and [regex]::IsMatch($Text, '(?i)(?<![a-z0-9])' + [regex]::Escape($k) + '(?![a-z0-9])') }
     foreach ($t in @($Tokens)) {
         $k = ([string]$t).Trim()
         if ($k.Length -lt 5) { continue }
-        if ([regex]::IsMatch($Text, '(?i)(?<![a-z0-9])' + [regex]::Escape($k) + '(?![a-z0-9])')) { return $k }
+        if (& $word $k) { return $k }
+        $bare = $k -replace '(?i)^(MFP|PRN|NPI|SEC|BRN|BRW)[-_]?', ''
+        if ($bare -ne $k -and ($bare -notmatch '^\d+$' -or $bare.Length -ge 6) -and (& $word $bare)) { return $k }
+        foreach ($m in [regex]::Matches($k, '\d{6,}')) {
+            if ([regex]::IsMatch($Text, '(?<!\d)' + $m.Value + '(?!\d)')) { return $k }
+        }
     }
     return $null
 }
@@ -679,11 +690,31 @@ function Get-SpoolfreeLegacyMatches {
                 continue
             }
             # The port names another device. The address Plug and Play recorded for it can be stale (an IP that
-            # DHCP later gave to this printer), so a known, different UUID is never matched by address.
-            if ($deviceUuids.Count -and $portUuids.Count) { continue }
+            # DHCP later gave to this printer), so a known, different UUID is never matched by a recorded address
+            # (0.4.5). 0.9.2: it is matched by a *current* address: one that a device node present now reports
+            # (CurrentAddresses), that is an IP of this printer, when no MAC of the device contradicts it and no other
+            # device (another UUID that is not this printer's) reports the same address now.
+            if ($deviceUuids.Count -and $portUuids.Count) {
+                $current = $null
+                foreach ($a in @(Get-SpoolfreeProperty $port 'CurrentAddresses')) {
+                    $c = ([string]$a).Trim().ToLowerInvariant(); $ip = $null
+                    if ($c -and $addr.ContainsKey($c) -and [Net.IPAddress]::TryParse($c, [ref]$ip)) { $current = $c; break }
+                }
+                if (-not $current) { continue }
+                if ($portMacs.Count -and $macs.Count) { continue }
+                $claimed = $false
+                foreach ($other in @($Ports.Values)) {
+                    $ou = @(@(Get-SpoolfreeProperty $other 'Uuids') | ForEach-Object { ConvertTo-SpoolfreeUuid ([string]$_) } | Where-Object { $_ })
+                    if ($ou.Count -eq 0 -or @($ou | Where-Object { $portUuids -contains $_ -or $deviceUuids -contains $_ }).Count) { continue }
+                    if (@(@(Get-SpoolfreeProperty $other 'CurrentAddresses') | Where-Object { ([string]$_).Trim().ToLowerInvariant() -eq $current }).Count) { $claimed = $true; break }
+                }
+                if ($claimed) { continue }
+                & $hit "$prefix$kind current address $current (device present)" $kind 'address' $portUuid
+                continue
+            }
         } elseif ($urlHost) {
             $kind = 'IPP port'; $label = $urlHost; $hostName = $urlHost; $displayHost = $urlHost; $candidates.Add($urlHost)
-        } elseif ($hostAddress -or $monitor -eq 'Standard TCP/IP Port') {
+        } elseif ($hostAddress -or $monitor -eq 'Standard TCP/IP Port' -or (ConvertTo-SpoolfreeMac ([string](Get-SpoolfreeProperty $port 'Mac')))) {
             $kind = 'TCP/IP port'; $label = $hostAddress; $hostName = $hostAddress; $displayHost = $rawHostAddress
             if ($hostAddress) { $candidates.Add($hostAddress) }
         } else { continue }
@@ -803,10 +834,14 @@ function ConvertTo-SpoolfreeDeviceInfo {
         Pure (0.9.0): device UUID -> [pscustomobject] Hosts, Macs (from EUI-64 IPv6 addresses) and Names (FriendlyName
         values) of WSD/IPP printers known to Plug and Play.
     .PARAMETER Devices
-        Objects with InstanceId, ContainerId, Values (strings) and, optionally, Names (friendly names).
+        Objects with InstanceId, ContainerId, Values (strings) and, optionally, Names (friendly names) and Present
+        (0.9.2: $true only for a device node Plug and Play reports as present now; registry-only data is not).
+    .NOTES
+        0.9.2: CurrentHosts are the hosts of present device nodes only (see Get-SpoolfreeLegacyMatches).
     #>
     param([AllowEmptyCollection()][object[]]$Devices = @())
     $hosts = ConvertTo-SpoolfreeDeviceIndex -Devices $Devices
+    $currentHosts = ConvertTo-SpoolfreeDeviceIndex -Devices @(@($Devices) | Where-Object { $null -ne $_ -and (Get-SpoolfreeProperty $_ 'Present') -eq $true })
     $info = @{}
     $uuidRe = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
     foreach ($d in @($Devices)) {
@@ -823,9 +858,10 @@ function ConvertTo-SpoolfreeDeviceInfo {
         }
         $names = @(@(Get-SpoolfreeProperty $d 'Names') | Where-Object { $_ } | ForEach-Object { [string]$_ })
         foreach ($u in ($uuids | Select-Object -Unique)) {
-            if (-not $info.ContainsKey($u)) { $info[$u] = [pscustomobject]@{ Hosts = @(); Macs = @(); Names = @() } }
+            if (-not $info.ContainsKey($u)) { $info[$u] = [pscustomobject]@{ Hosts = @(); Macs = @(); Names = @(); CurrentHosts = @() } }
             $e = $info[$u]
             $e.Hosts = @(@($e.Hosts) + @($hosts[$u]) | Where-Object { $_ } | Select-Object -Unique)
+            $e.CurrentHosts = @(@($e.CurrentHosts) + @($currentHosts[$u]) | Where-Object { $_ } | Select-Object -Unique)
             $e.Macs = @(@($e.Macs) + @($macs) | Where-Object { $_ } | Select-Object -Unique)
             $e.Names = @(@($e.Names) + $names | Where-Object { $_ } | Select-Object -Unique)
         }
@@ -844,6 +880,7 @@ function Get-SpoolfreeWsdPortData {
     $hosts = New-Object System.Collections.Generic.List[string]
     $macs = New-Object System.Collections.Generic.List[string]
     $names = New-Object System.Collections.Generic.List[string]
+    $current = New-Object System.Collections.Generic.List[string]
     if ($null -eq $Values) { $Values = @{} }
     if ($null -eq $DeviceIndex) { $DeviceIndex = @{} }
     if ($null -eq $DeviceInfo) { $DeviceInfo = @{} }
@@ -860,9 +897,10 @@ function Get-SpoolfreeWsdPortData {
         foreach ($h in @($DeviceInfo[$u].Hosts)) { if ($h) { $hosts.Add([string]$h) } }
         foreach ($m in @($DeviceInfo[$u].Macs)) { if ($m) { $macs.Add([string]$m) } }
         foreach ($n in @($DeviceInfo[$u].Names)) { if ($n) { $names.Add([string]$n) } }
+        if ($DeviceInfo[$u].PSObject.Properties['CurrentHosts']) { foreach ($h in @($DeviceInfo[$u].CurrentHosts)) { if ($h) { $current.Add([string]$h) } } }
     }
     foreach ($h in @($hosts)) { $m = ConvertFrom-SpoolfreeEui64 $h; if ($m) { $macs.Add($m) } }
-    return [pscustomobject]@{ Uuids = @($uuids | Select-Object -Unique); Hosts = @($hosts | Select-Object -Unique); Macs = @($macs | Select-Object -Unique); Names = @($names | Select-Object -Unique) }
+    return [pscustomobject]@{ Uuids = @($uuids | Select-Object -Unique); Hosts = @($hosts | Select-Object -Unique); Macs = @($macs | Select-Object -Unique); Names = @($names | Select-Object -Unique); CurrentHosts = @($current | Select-Object -Unique) }
 }
 
 function Get-SpoolfreeTakeoverPrinters {
@@ -2184,7 +2222,7 @@ function Get-SpoolfreeDeviceInfo {
                 if ($n -eq 'FriendlyName' -and $v -is [string]) { $names.Add($v) }
                 foreach ($x in @($v)) { if ($x -is [string]) { $values.Add($x) } }
             }
-            $devices.Add([pscustomobject]@{ InstanceId = [string]$k.PSChildName; ContainerId = $container; Values = $values.ToArray(); Names = $names.ToArray() })
+            $devices.Add([pscustomobject]@{ InstanceId = [string]$k.PSChildName; ContainerId = $container; Values = $values.ToArray(); Names = $names.ToArray(); Present = $false })
         }
     }
     if (Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue) {
@@ -2199,25 +2237,68 @@ function Get-SpoolfreeDeviceInfo {
                     if ($prop.KeyName -eq 'DEVPKEY_Device_FriendlyName' -and $prop.Data -is [string]) { $names.Add([string]$prop.Data) }
                     foreach ($x in @($prop.Data)) { if ($x -is [string]) { $values.Add($x) } }
                 }
-                $devices.Add([pscustomobject]@{ InstanceId = [string]$d.InstanceId; ContainerId = $container; Values = $values.ToArray(); Names = $names.ToArray() })
+                # 0.9.2: only a node that is present now (and not in an error state) gives current addresses.
+                $present = ($d.PSObject.Properties['Present'] -and $d.Present -eq $true -and [string]$d.Status -eq 'OK')
+                $devices.Add([pscustomobject]@{ InstanceId = [string]$d.InstanceId; ContainerId = $container; Values = $values.ToArray(); Names = $names.ToArray(); Present = [bool]$present })
             }
         } catch { Write-Verbose "PnP device properties unavailable: $($_.Exception.Message)" }
     }
     return (ConvertTo-SpoolfreeDeviceInfo -Devices $devices.ToArray())
 }
 
-function Get-SpoolfreeMonitorPortValues {
-    <# (0.9.0) String values of a port under its port monitor's registry key (any monitor when $Monitor is empty). #>
-    param([Parameter(Mandatory)][string]$PortName, [AllowEmptyString()][string]$Monitor)
-    $root = 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors'
-    $monitors = if ($Monitor) { @($Monitor) } else { @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName }) }
-    foreach ($m in $monitors) {
-        $props = Get-ItemProperty -LiteralPath "$root\$m\Ports\$PortName" -ErrorAction SilentlyContinue
-        if (-not $props) { continue }
-        $values = @{}
-        foreach ($pp in $props.PSObject.Properties) { if ($pp.Name -notlike 'PS*' -and $pp.Value -is [string]) { $values[$pp.Name] = $pp.Value } }
-        return $values
+function Get-SpoolfreeMonitorKeyOrder {
+    <#
+    .SYNOPSIS
+        Pure (0.9.2): the port monitor registry keys (names under ...\Control\Print\Monitors) to look in for a port, in
+        order: the monitor name Get-PrinterPort reports, that name without a trailing " Monitor", the port's
+        description, "HP Standard TCP/IP Port", "Standard TCP/IP Port", then every other key except the local, USB,
+        WSD and Remote Desktop monitors. Only names in $Keys are returned (case-insensitive, as stored).
+    .NOTES
+        Get-PrinterPort's PortMonitor is the name the monitor reports, not always its registry key ("WSD Port Monitor"
+        is the key "WSD Port"); 0.9.0 looked only under PortMonitor, so HP Standard TCP/IP (HPTCPMON) ports kept no host.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Monitor, [AllowNull()][AllowEmptyString()][string]$Description, [AllowEmptyCollection()][string[]]$Keys = @())
+    $skip = @($script:LocalMonitors) + @('WSD Port', 'Dynamic Print Monitor', 'Inactive TS Port')
+    $wanted = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @($Monitor, ($Monitor -replace '\s+Monitor$', ''), $Description, 'HP Standard TCP/IP Port', 'Standard TCP/IP Port')) { if ($n) { $wanted.Add($n.Trim()) } }
+    foreach ($k in @($Keys)) { if ($k -and $skip -notcontains $k) { $wanted.Add([string]$k) } }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($w in $wanted) {
+        $k = @($Keys | Where-Object { $_ -and ([string]$_) -ieq $w }) | Select-Object -First 1
+        if ($k -and -not ($out | Where-Object { $_ -ieq $k })) { $out.Add([string]$k) }
     }
+    return $out.ToArray()
+}
+
+function Get-SpoolfreeMonitorPortValues {
+    <#
+    .SYNOPSIS
+        String values of a port under its port monitor's registry key: the first key in Get-SpoolfreeMonitorKeyOrder
+        that has Ports\<port> with a host or a MAC (0.9.2), else the first that has the port at all; empty otherwise.
+        HKLM\SYSTEM is not redirected for 32-bit processes, so the registry view does not matter.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$PortName,
+        [AllowNull()][AllowEmptyString()][string]$Monitor,
+        [AllowNull()][AllowEmptyString()][string]$Description,
+        [string]$Root = 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors'
+    )
+    $keys = @(Get-ChildItem -LiteralPath $Root -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName })
+    $first = $null
+    foreach ($m in @(Get-SpoolfreeMonitorKeyOrder -Monitor $Monitor -Description $Description -Keys $keys)) {
+        $key = Get-Item -LiteralPath "$Root\$m\Ports\$PortName" -ErrorAction SilentlyContinue
+        if (-not $key) { continue }
+        $values = @{}
+        foreach ($n in @($key.GetValueNames())) {
+            $v = $key.GetValue($n)
+            if ($v -is [string[]]) { $v = @($v | Where-Object { $_ }) | Select-Object -First 1 }
+            if ($n -and $v -is [string]) { $values[$n] = $v }
+        }
+        $mv = ConvertFrom-SpoolfreeMonitorPortValues -Values $values
+        if ($mv.Host -or $mv.Mac) { return $values }
+        if ($null -eq $first) { $first = $values }
+    }
+    if ($null -ne $first) { return $first }
     return @{}
 }
 
@@ -2239,13 +2320,16 @@ function Get-SpoolfreePortInventory {
         $uuids = @()
         $macs = @()
         $names = @()
+        $current = @()
         $mac = $null
         $urlHost = Get-SpoolfreeUrlHost $name
         # 0.9.0: vendor TCP/IP monitors (HP Standard TCP/IP Port and the like) keep the host and MAC in the registry,
         # and the Standard TCP/IP monitor keeps the MAC there.
         $tcpMonitor = $monitor -and $monitor -notlike 'WSD Port*' -and $script:LocalMonitors -notcontains $monitor -and $monitor -match 'TCP|IP'
-        if (-not $urlHost -and $name -notmatch '^WSD-' -and $name -notmatch $script:LocalPortPattern -and ($tcpMonitor -or (-not $hostAddress -and -not $monitor))) {
-            $mv = ConvertFrom-SpoolfreeMonitorPortValues -Values (Get-SpoolfreeMonitorPortValues -PortName $name -Monitor $monitor)
+        # 0.9.2: also any other non-local monitor without a host (HPTCPMON may report a name without "TCP"/"IP").
+        $otherMonitor = $monitor -notlike 'WSD Port*' -and $script:LocalMonitors -notcontains $monitor -and @('Dynamic Print Monitor', 'Inactive TS Port') -notcontains $monitor
+        if (-not $urlHost -and $name -notmatch '^WSD-' -and $name -notmatch $script:LocalPortPattern -and ($tcpMonitor -or (-not $hostAddress -and $otherMonitor))) {
+            $mv = ConvertFrom-SpoolfreeMonitorPortValues -Values (Get-SpoolfreeMonitorPortValues -PortName $name -Monitor $monitor -Description ([string]$p.Description))
             if (-not $hostAddress -and $mv.Host) { $hostAddress = [string]$mv.Host }
             $mac = $mv.Mac
         }
@@ -2263,8 +2347,9 @@ function Get-SpoolfreePortInventory {
             $addresses = @($data.Hosts)
             $macs = @($data.Macs)
             $names = @($data.Names)
+            $current = @($data.CurrentHosts)
         }
-        $ports[$name] = [pscustomobject]@{ Monitor = $monitor; Description = [string]$p.Description; HostAddress = $hostAddress; Addresses = @($addresses); Uuids = @($uuids); Mac = $mac; Macs = @($macs); Names = @($names) }
+        $ports[$name] = [pscustomobject]@{ Monitor = $monitor; Description = [string]$p.Description; HostAddress = $hostAddress; Addresses = @($addresses); Uuids = @($uuids); Mac = $mac; Macs = @($macs); Names = @($names); CurrentAddresses = @($current) }
     }
     return $ports
 }

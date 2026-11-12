@@ -178,6 +178,24 @@ describe("POST /api/agent/report (0.8.1 fields)", () => {
   });
 });
 
+describe("POST /api/agent/report (0.9.2 leniency)", () => {
+  it("accepts the {} that Windows PowerShell 5.1 writes for a missing MAC (0.9.0 agents) and stores null", async () => {
+    await addAgent("PC-01", GUID, TOKEN);
+    const { POST } = await import("@/app/api/agent/report/route");
+    const entry = { queue: "Old Laser", scope: "machine", portKind: "tcpip", port: "IP_192.0.2.30", host: "192.0.2.30", class: "other-network", action: "report" };
+    const report = { agentVersion: "0.9.0", unmanaged: [{ ...entry, mac: {}, wsdUuid: {}, ippUuid: null }] };
+    const res = await POST(req("/api/agent/report", TOKEN, { method: "POST", body: JSON.stringify(report) }));
+    expect(res.status).toBe(200);
+    const [row] = await d.select().from(schema.agents);
+    expect(row.lastReport?.unmanaged?.[0]).toMatchObject({ queue: "Old Laser", mac: null, wsdUuid: null });
+    // Other objects and wrong types are still rejected.
+    for (const mac of [{ a: 1 }, ["001122334455"], 12]) {
+      const bad = await POST(req("/api/agent/report", TOKEN, { method: "POST", body: JSON.stringify({ unmanaged: [{ ...entry, mac }] }) }));
+      expect(bad.status).toBe(400);
+    }
+  });
+});
+
 describe("test print server actions refuse non-admins", () => {
   it("every action calls requireAdmin first and changes nothing", async () => {
     const p = await addPrinter();
