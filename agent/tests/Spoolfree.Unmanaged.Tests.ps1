@@ -183,6 +183,13 @@ Describe 'Get-SpoolfreeUnmanagedQueues' {
         $on[0]['matchBy'] | Should -Be 'share'
         $on[0]['scope'] | Should -Be 'user'
     }
+    It 'serializes a missing MAC as JSON null, not {} (Windows PowerShell 5.1 AutomationNull; the server rejects {})' {
+        foreach ($e in $script:u) {
+            $json = $e | ConvertTo-Json -Depth 3 -Compress
+            $json | Should -Not -Match '":\{\}'
+        }
+        ($script:byName['Desk USB'] | ConvertTo-Json -Compress) | Should -Match '"mac":null'
+    }
     It 'reports a queue of another Spoolfree server' {
         $r = @(Get-SpoolfreeUnmanagedQueues -Queues @((Q 'Far Printer' 'IP_198.51.100.7' 'd' 'Local' 'Managed by Spoolfree [x1 rev 2 server fedcba9876543210]')) -Ports $script:ports -ServerId '0123456789abcdef')
         $r.Count | Should -Be 1
