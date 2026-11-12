@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.9.0'
+$script:AgentVersion = '0.9.1'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -2504,7 +2504,7 @@ function Get-SpoolfreeUnmanagedQueues {
                 host           = & $cap $hostName
                 wsdUuid        = $wsdUuid
                 ippUuid        = $ippUuid
-                mac            = $mac
+                mac            = $(if ($mac) { [string]$mac } else { $null })
                 driver         = $(if ($driver) { & $cap $driver } else { $null })
                 class          = $class
                 matchedPrinter = $(if ($hitInfo) { & $cap $hitInfo.Printer } else { $null })
