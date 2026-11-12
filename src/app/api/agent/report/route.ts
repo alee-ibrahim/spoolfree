@@ -8,6 +8,14 @@ import { learnedUuids, unmanagedAuditEntries } from "@/lib/unmanaged";
 
 const opt = (max: number) => z.string().max(max).nullable().optional();
 
+/**
+ * 0.9.2: Windows PowerShell 5.1 writes a missing value (AutomationNull) as `{}`. 0.9.0 agents sent `"mac": {}` for
+ * unmanaged queues without a MAC and every such report was rejected; an empty object is read as null.
+ */
+const emptyObjectAsNull = (v: unknown) =>
+  v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0 ? null : v;
+const lenient = (max: number) => z.preprocess(emptyObjectAsNull, z.string().max(max).nullable().optional());
+
 const list = z.array(z.string().max(512)).max(200).optional();
 
 const Report = z.object({
@@ -84,18 +92,18 @@ const Report = z.object({
         queue: z.string().max(512),
         scope: z.string().max(300),
         portKind: z.string().max(32),
-        port: opt(512),
-        host: opt(256),
-        wsdUuid: opt(64),
-        ippUuid: opt(64),
-        mac: opt(17),
-        driver: opt(256),
+        port: lenient(512),
+        host: lenient(256),
+        wsdUuid: lenient(64),
+        ippUuid: lenient(64),
+        mac: lenient(17),
+        driver: lenient(256),
         class: z.enum(UNMANAGED_CLASSES),
-        matchedPrinter: opt(256),
-        matchBy: opt(16),
+        matchedPrinter: lenient(256),
+        matchBy: lenient(16),
         action: z.enum(UNMANAGED_ACTIONS),
-        reason: opt(512),
-        error: opt(1000),
+        reason: lenient(512),
+        error: lenient(1000),
       }),
     )
     .max(300)

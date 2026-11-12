@@ -326,6 +326,26 @@ These apply to legacy takeover and to the `legacy-of-managed` class:
   `printer-uuid` changes.
 - A WSD port whose UUID is not one of the printer's is still never matched by IP address alone (0.4.5).
 
+### Matcher gaps (0.9.2)
+
+- **Vendor monitor registry key.** `Get-PrinterPort` reports the name a monitor gives itself, which is not always its
+  registry key (`WSD Port Monitor` is the key `WSD Port`). 0.9.0 looked only under that name, so HP Standard TCP/IP
+  ports named after the model (e.g. `HPColorLaserJet...`) had no host and were reported `dead`. The agent now tries
+  the reported name, the name without " Monitor", the port description, `HP Standard TCP/IP Port`,
+  `Standard TCP/IP Port`, then any other non-local monitor key that has `Ports\<port>`, and takes the first with a host
+  or MAC. A port with only a registry MAC also matches by MAC.
+- **Serial / alias variants.** A serial or alias also matches without a common prefix (`MFP`, `PRN`, `NPI`, `SEC`,
+  `BRN`, `BRW`), and by any run of at least 6 digits in it that appears as a whole digit run in the name: the alias
+  `MFP<serial>` matches a WSD queue `<VENDOR> <model>-<serial> (Copy 1)`.
+- **WSD ports by current address.** A WSD port with a UUID that is not the printer's now matches when its device's
+  **current** address is one of the printer's IPs. Current means reported by a Plug and Play device node that is
+  present now (`Get-PnpDevice`: present, status OK); addresses from the registry or from non-present nodes never count,
+  so the 0.4.5 stale-address case still does not match. It also does not match when the device's EUI-64 MAC differs
+  from the printer's MACs, or when another device (a UUID that is not the printer's) reports the same address now.
+  Such matches are `matchBy: address`, so the server does not learn the port's UUID from them.
+- **Server.** Report entries in `unmanaged[]` accept `{}` (what Windows PowerShell 5.1 writes for a missing value,
+  sent by 0.9.0 agents) as null.
+
 **Manifest fields** (0.9.0): `unmanaged` (`{ mode, keep, keepLocal }`), `printers[].deviceUuids`,
 `printers[].serialNumbers`. Older agents ignore them. No new agent files: the self-update bundle still carries the
 same four files, so 0.8.x agents update to 0.9.0 normally.
