@@ -226,7 +226,8 @@ Describe 'Get-SpoolfreeUnmanagedPlan' {
         $r.Blocked | Should -BeNullOrEmpty
     }
     It 'removes everything but the keep list and USB/local printers when on' {
-        $a = Actions (Get-SpoolfreeUnmanagedPlan -Entries (Entries) -Mode 'on' -Keep @('Microsoft Print to PDF') -KeepLocal $true -SpoolfreeCount 1)
+        $entries = Entries; $entries[3]['matchedPrinter'] = 'Office Copier'
+        $a = Actions (Get-SpoolfreeUnmanagedPlan -Entries $entries -Mode 'on' -Keep @('Microsoft Print to PDF') -KeepLocal $true -SpoolfreeCount 1 -TakeoverModes @{ 'office copier' = 'on' })
         $a['Microsoft Print to PDF'] | Should -Be 'kept'
         $a['Desk USB'] | Should -Be 'kept'
         $a['Microsoft XPS Document Writer'] | Should -Be 'remove'

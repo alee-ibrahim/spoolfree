@@ -86,7 +86,7 @@ if ($unmanaged) {
         })
     $connections = @(Get-SpoolfreeQueueInventory -ConnectionsOnly)
     $found = @(Get-SpoolfreeUnmanagedQueues -Queues $connections -Printers $printerSets -LegacyServers $servers -Scope 'user')
-    $decision = Get-SpoolfreeUnmanagedPlan -Entries $found -Mode $u.Mode -Keep $u.Keep -KeepLocal $u.KeepLocal -SpoolfreeCount $spoolfree.Count
+    $decision = Get-SpoolfreeUnmanagedPlan -Entries $found -Mode $u.Mode -Keep $u.Keep -KeepLocal $u.KeepLocal -SpoolfreeCount $spoolfree.Count -TakeoverModes (Get-SpoolfreeTakeoverModes -Printers $printerSets)
     foreach ($e in @($decision.Entries)) {
         if ($e['action'] -eq 'remove') {
             $queue = [string]$e['queue']
