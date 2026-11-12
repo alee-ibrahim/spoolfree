@@ -44,8 +44,12 @@ Describe 'WSD and IPP ports' {
         $r[0].Reason | Should -Be "IPP port device uuid $script:uuid"
     }
     It 'matches a WSD port by the device address found for its UUID' {
-        $r = M (Q 'W' $script:wsdPort) @{ $script:wsdPort = (Wsd @('e3248000-80ce-11db-8000-0011223344bb') @('192.0.2.10')) } (P -uuid '')
+        # 0.9.3: only when the device there reports the printer's MAC (here the node of its version-1 UUID) and model.
+        $p = P -uuid ''; $p | Add-Member -NotePropertyName model -NotePropertyValue 'Vendor Laser L2040dn'
+        $r = M (Q 'W' $script:wsdPort 'Vendor Laser L2040 series') @{ $script:wsdPort = (Wsd @('e3248000-80ce-11db-8001-0011223344aa') @('192.0.2.10')) } $p
         $r[0].Reason | Should -Be 'WSD port 192.0.2.10'
+        # A device whose UUID carries another MAC is another device, whatever its address.
+        (M (Q 'W' $script:wsdPort 'Vendor Laser L2040 series') @{ $script:wsdPort = (Wsd @('e3248000-80ce-11db-8000-0011223344bb') @('192.0.2.10')) } $p).Count | Should -Be 0
     }
     It 'ignores WSD ports of other devices and WSD ports it cannot identify' {
         $ports = @{
@@ -60,8 +64,8 @@ Describe 'WSD and IPP ports' {
         $ports = @{ $script:wsdPort = (Wsd @('e3248000-80ce-11db-8000-0011223344bb') @('192.0.2.10')) }
         (M (Q 'Brother HL-L5100DN series Printer' $script:wsdPort) $ports).Count | Should -Be 0
         (M (Q 'Brother HL-L5100DN series Printer' $script:wsdPort) $ports -AnyMode).Count | Should -Be 0
-        # Without a UUID on the port, the address still counts.
-        (M (Q 'W' $script:wsdPort) @{ $script:wsdPort = (Wsd @() @('192.0.2.10')) }).Count | Should -Be 1
+        # 0.9.3: without a UUID on the port, the address alone no longer counts either (no MAC or model reported).
+        (M (Q 'W' $script:wsdPort) @{ $script:wsdPort = (Wsd @() @('192.0.2.10')) }).Count | Should -Be 0
     }
     It 'needs the printer-uuid from the server to match by UUID' {
         (M (Q 'W' $script:wsdPort) @{ $script:wsdPort = (Wsd @($script:uuid)) } (P -uuid '')).Count | Should -Be 0

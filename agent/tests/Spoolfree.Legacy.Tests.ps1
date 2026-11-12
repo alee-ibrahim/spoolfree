@@ -5,7 +5,7 @@ BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..\Spoolfree.Agent.psm1') -Force
     function P([string]$mode = 'on', [string[]]$shares = @('Finance-Laser')) {
         [pscustomobject]@{ id = 'p1'; name = 'Finance Laser'; host = 'prn-fin.example.org'; ippUrl = 'http://prn-fin.example.org:631/ipp/print'; revision = 1
-            legacy = [pscustomobject]@{ mode = $mode; shares = $shares } }
+            legacy = [pscustomobject]@{ mode = $mode; shares = $shares }; macAddresses = @('00aa11bb22cc') }
     }
     function Q([string]$name, [string]$port = '', [string]$driver = 'HP Universal Printing PCL 6', [string]$type = 'Local', [string]$comment = '') {
         [pscustomobject]@{ Name = $name; Type = $type; PortName = $port; DriverName = $driver; Comment = $comment }
@@ -41,7 +41,11 @@ Describe 'Get-SpoolfreeLegacyMatches' {
     }
     It 'matches a WSD port only when its address is known' {
         $q = Q 'WSD printer' 'WSD-1b4e28ba-2fa1-11d2-883f-0016d3cca427'
-        (M $q @{ 'WSD-1b4e28ba-2fa1-11d2-883f-0016d3cca427' = (Port 'WSD Port' '' @('192.0.2.10')) })[0].Reason | Should -Be 'WSD port 192.0.2.10'
+        # 0.9.3: an address alone needs the device there to report the printer's MAC and model.
+        $p = P; $p | Add-Member -NotePropertyName model -NotePropertyValue 'Vendor Laser L2040dn'
+        $port = Port 'WSD Port' '' @('192.0.2.10'); $port | Add-Member -NotePropertyName Uuids -NotePropertyValue @('e3248000-80ce-11db-8000-00aa11bb22cc'); $port | Add-Member -NotePropertyName Names -NotePropertyValue @('Vendor Laser L2040 series')
+        (M $q @{ 'WSD-1b4e28ba-2fa1-11d2-883f-0016d3cca427' = $port } $p)[0].Reason | Should -Be 'WSD port 192.0.2.10'
+        (M $q @{ 'WSD-1b4e28ba-2fa1-11d2-883f-0016d3cca427' = (Port 'WSD Port' '' @('192.0.2.10')) }).Count | Should -Be 0
         (M $q @{ 'WSD-1b4e28ba-2fa1-11d2-883f-0016d3cca427' = (Port 'WSD Port' '' @()) }).Count | Should -Be 0
         (M $q @{}).Count | Should -Be 0
     }

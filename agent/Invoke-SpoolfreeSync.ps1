@@ -575,7 +575,7 @@ try {
     $spoolfreeQueues = @($installedAfter | Where-Object { $wanted.ContainsKey($_.ToLowerInvariant()) -and $existingNames.ContainsKey($_.ToLowerInvariant()) })
     $printerSets = @(foreach ($p in @($manifest.printers)) { [pscustomobject]@{ Printer = $p; Addresses = @(Get-SpoolfreePrinterAddressSet -Printer $p) } })
     $found = @(Get-SpoolfreeUnmanagedQueues -Queues $queuesAfter -Ports $portsAfter -Printers $printerSets -LegacyServers $legacyServers -Installed $installedAfter -ServerId $serverId -ServerPrinterIds $serverPrinterIds)
-    $decision = Get-SpoolfreeUnmanagedPlan -Entries $found -Mode $unmanagedSettings.Mode -Keep $unmanagedSettings.Keep -KeepLocal $unmanagedSettings.KeepLocal -SpoolfreeCount $spoolfreeQueues.Count
+    $decision = Get-SpoolfreeUnmanagedPlan -Entries $found -Mode $unmanagedSettings.Mode -Keep $unmanagedSettings.Keep -KeepLocal $unmanagedSettings.KeepLocal -SpoolfreeCount $spoolfreeQueues.Count -TakeoverModes (Get-SpoolfreeTakeoverModes -Printers $printerSets)
     $unmanagedPolicy.blocked = $decision.Blocked
     if ($decision.Blocked) { Write-Log "Unmanaged printers: $($decision.Blocked)." }
     $unmanagedRemoved = @{}
@@ -595,7 +595,7 @@ try {
                 }
             } else { $e['action'] = 'would-remove' }
         } elseif ($e['action'] -eq 'would-remove') {
-            Write-Log "Unmanaged printer '$($e['queue'])' would be removed ($($e['class'])); Remove unmanaged printers is in dry-run."
+            Write-Log "Unmanaged printer '$($e['queue'])' would be removed ($($e['class'])); $(if ($unmanagedSettings.Mode -eq 'on') { $e['reason'] } else { 'Remove unmanaged printers is in dry-run' })"
         }
         $unmanagedEntries.Add($e)
     }

@@ -346,6 +346,30 @@ These apply to legacy takeover and to the `legacy-of-managed` class:
 - **Server.** Report entries in `unmanaged[]` accept `{}` (what Windows PowerShell 5.1 writes for a missing value,
   sent by 0.9.0 agents) as null.
 
+### False legacy matches (0.9.3)
+
+0.9.2 matched a WSD/IPP queue of one device (its MAC in the queue name `BRN<mac>` and in the node of its IPP/WSD UUID)
+to a different Spoolfree printer (another MAC and model) at an address the old device's stale Plug and Play record or
+current-address lookup reported. Legacy takeover removed it, and "Remove unmanaged printers" reported it as
+`legacy-of-managed`.
+
+- **A conflicting identity wins.** Unless the port stores one of the printer's device UUIDs, a queue whose own device
+  carries a MAC or a serial number that is not the printer's never matches, by any rule. The queue's MACs come from
+  `BRN<mac>` / `BRW<mac>` in the queue name, port name or host (or a bare-MAC host name), the node of a version-1
+  device UUID (Brother `e3248000-80ce-11db-8000-<mac>`), the port monitor's `HWAddress` and the WSD device's EUI-64
+  IPv6 addresses; serials from the WSD device's PnP-X serial number. The queue is then classified like any other
+  queue (`other-network`, or `dead` when its port has no host or its device is unknown).
+- **Address-only matches are verified.** A match by address alone (no UUID, MAC or serial agreement) counts only if the
+  device at that address reports the printer's model and MAC. For a WSD/IPP port that is the port's device as Plug and
+  Play knows it (its MACs and its PnP-X model or friendly name, else the queue's driver): both must agree. A TCP/IP or
+  URL port has no device data on the PC; the device at the printer's own address is the one the server's identity
+  check read, so the printer needs a known MAC, and the queue's driver must not name another model (model numbers are
+  compared, e.g. `DCP-L3551CDW` = `l3551`, driver ranges like `M282-M285` included; class and universal drivers name
+  no model).
+- **Unmanaged removal respects takeover.** With "Remove unmanaged printers" on, a `legacy-of-managed` queue is removed
+  only when its matched printer's legacy takeover is `on`. In `dry-run` or `off` it is kept and reported as
+  `would-remove`, with the reason `takeover dry-run for <printer>: ...`.
+
 **Manifest fields** (0.9.0): `unmanaged` (`{ mode, keep, keepLocal }`), `printers[].deviceUuids`,
 `printers[].serialNumbers`. Older agents ignore them. No new agent files: the self-update bundle still carries the
 same four files, so 0.8.x agents update to 0.9.0 normally.

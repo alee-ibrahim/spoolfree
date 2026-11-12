@@ -95,13 +95,16 @@ Describe 'Serial and alias variants (fix 2)' {
 
 Describe 'WSD ports matched by a current address (fix 2)' {
     It 'matches a WSD port with another UUID whose present device reports the printer''s IP' {
-        $r = M (Q 'VENDOR MFP (Copy 1)' 'WSD-t') @{ 'WSD-t' = (Wsd @($script:wsd) @('192.0.2.20') @('192.0.2.20')) }
+        # 0.9.3: and the printer's MAC (the node of the device's version-1 UUID) and model.
+        $v1 = 'e3248000-80ce-11db-8000-001122334455'
+        $p = P; $p | Add-Member -NotePropertyName model -NotePropertyValue 'VENDOR MFP 4520'
+        $r = M (Q 'VENDOR MFP (Copy 1)' 'WSD-t') @{ 'WSD-t' = (Wsd @($v1) @('192.0.2.20') @('192.0.2.20') @() @('VENDOR MFP 4520 series')) } $p
         $r.Count | Should -Be 1
         $r[0].MatchBy | Should -Be 'address'
         $r[0].Reason | Should -Match 'current address 192\.0\.2\.20'
         # The PC's own Spoolfree IPP port of the printer at the same address does not make it ambiguous.
-        $ports = @{ 'WSD-t' = (Wsd @($script:wsd) @('192.0.2.20') @('192.0.2.20')); 'SF' = (Wsd @($script:ipp) @('192.0.2.20') @('192.0.2.20')) }
-        (M (Q 'VENDOR MFP (Copy 1)' 'WSD-t') $ports).Count | Should -Be 1
+        $ports = @{ 'WSD-t' = (Wsd @($v1) @('192.0.2.20') @('192.0.2.20') @() @('VENDOR MFP 4520 series')); 'SF' = (Wsd @($script:ipp) @('192.0.2.20') @('192.0.2.20')) }
+        (M (Q 'VENDOR MFP (Copy 1)' 'WSD-t') $ports $p).Count | Should -Be 1
     }
     It 'keeps the 0.4.5 protection: a recorded (possibly stale) address alone never matches' {
         (M (Q 'Other MFP' 'WSD-t') @{ 'WSD-t' = (Wsd @($script:wsd) @('192.0.2.20')) }).Count | Should -Be 0

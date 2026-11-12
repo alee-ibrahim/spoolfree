@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.9.2'
+$script:AgentVersion = '0.9.3'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -405,6 +405,120 @@ function Get-SpoolfreeMacHostMatch {
     return $null
 }
 
+function Get-SpoolfreeUuidMac {
+    <#
+    .SYNOPSIS
+        Pure (0.9.3): the MAC a time-based (version 1) UUID embeds as its node (last 12 hex digits), e.g. Brother's
+        e3248000-80ce-11db-8000-<mac>; $null for other UUID versions and for random nodes (multicast bit set).
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Uuid)
+    $u = ConvertTo-SpoolfreeUuid $Uuid
+    if (-not $u -or $u[14] -ne '1') { return $null }
+    return (ConvertTo-SpoolfreeMac $u.Substring(24))
+}
+
+function Get-SpoolfreeNameMacs {
+    <#
+    .SYNOPSIS
+        Pure (0.9.3): MACs (12 lower-case hex digits) that names embed: BRN<mac> / BRW<mac> anywhere as a whole word
+        (Brother default queue, port and host names), or a whole host name that is a bare MAC (".local" optional).
+    #>
+    param([AllowEmptyCollection()][AllowNull()][string[]]$Names = @())
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @($Names)) {
+        if (-not $n) { continue }
+        foreach ($m in [regex]::Matches([string]$n, '(?i)(?<![0-9a-z])BR[NW]([0-9a-f]{12})(?![0-9a-z])')) {
+            $mac = ConvertTo-SpoolfreeMac $m.Groups[1].Value
+            if ($mac -and -not $out.Contains($mac)) { $out.Add($mac) }
+        }
+        $k = ConvertTo-SpoolfreeAliasKey ([string]$n)
+        if ($k -and $k -match '^[0-9a-f]{12}$') { $mac = ConvertTo-SpoolfreeMac $k; if ($mac -and -not $out.Contains($mac)) { $out.Add($mac) } }
+    }
+    return $out.ToArray()
+}
+
+function Get-SpoolfreeModelKeys {
+    <#
+    .SYNOPSIS
+        Pure (0.9.3): model keys of a model, device or driver name: each word with 3-5 digits (letters before them
+        kept, letters after them dropped: "DCP-L3551CDW" -> l3551, "e-STUDIO2518A" -> studio2518, "M252n" -> m252), and
+        ranges such as "M282-M285". Words like PCL6, Type1 or V4 and long serial-like digit runs give no key.
+    .OUTPUTS
+        Objects with Prefix, Low and High.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not $Text) { return @() }
+    $t = $Text.ToLowerInvariant()
+    foreach ($m in [regex]::Matches($t, '(?<![a-z0-9])([a-z]*)(\d{3,5})[a-z]*-([a-z]*)(\d{3,5})[a-z]*(?![a-z0-9])')) {
+        if ($m.Groups[1].Value -eq $m.Groups[3].Value -and [int]$m.Groups[2].Value -lt [int]$m.Groups[4].Value) {
+            $out.Add([pscustomobject]@{ Prefix = $m.Groups[1].Value; Low = [int]$m.Groups[2].Value; High = [int]$m.Groups[4].Value })
+        }
+    }
+    foreach ($w in ($t -split '[^a-z0-9]+')) {
+        $m = [regex]::Match($w, '^([a-z]*)(\d{3,5})[a-z]*$')
+        if ($m.Success) { $out.Add([pscustomobject]@{ Prefix = $m.Groups[1].Value; Low = [int]$m.Groups[2].Value; High = [int]$m.Groups[2].Value }) }
+    }
+    return $out.ToArray()
+}
+
+function Test-SpoolfreeModelMatch {
+    <#
+    .SYNOPSIS
+        Pure (0.9.3): $true when a candidate name (device or driver name) has a model key of $Model, $false when the
+        candidates have model keys but none of $Model's, $null when either side has none (unknown).
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Model, [AllowEmptyCollection()][AllowNull()][string[]]$Candidates = @())
+    $mine = @(Get-SpoolfreeModelKeys $Model)
+    $theirs = @(foreach ($c in @($Candidates)) { Get-SpoolfreeModelKeys ([string]$c) })
+    if ($mine.Count -eq 0 -or $theirs.Count -eq 0) { return $null }
+    foreach ($a in $mine) {
+        foreach ($b in $theirs) {
+            if ($a.Prefix -eq $b.Prefix -and $a.Low -le $b.High -and $b.Low -le $a.High) { return $true }
+        }
+    }
+    return $false
+}
+
+function Get-SpoolfreeQueueIdentity {
+    <#
+    .SYNOPSIS
+        Pure (0.9.3): the device identity a queue and its port carry. Macs: BRN/BRW<mac> in the queue name, port name or
+        host, a bare-MAC host name, the node of a version-1 device UUID, the port monitor's MAC (HWAddress) and the
+        MACs of the WSD device's EUI-64 IPv6 addresses. Serials: serial numbers the WSD device reports (port Serials).
+        Models: model names the device reports (port Models, then Names).
+    #>
+    param($Queue, $Port)
+    $macs = New-Object System.Collections.Generic.List[string]
+    $add = { param($m) if ($m -and -not $macs.Contains([string]$m)) { $macs.Add([string]$m) } }
+    foreach ($m in @(Get-SpoolfreeNameMacs @([string](Get-SpoolfreeProperty $Queue 'Name'), [string](Get-SpoolfreeProperty $Queue 'PortName'), [string](Get-SpoolfreeProperty $Port 'HostAddress')))) { & $add $m }
+    foreach ($m in @(Get-SpoolfreeNameMacs @(@(Get-SpoolfreeProperty $Port 'Names') | ForEach-Object { [string]$_ }))) { & $add $m }
+    foreach ($u in @(Get-SpoolfreeProperty $Port 'Uuids')) { & $add (Get-SpoolfreeUuidMac ([string]$u)) }
+    & $add (ConvertTo-SpoolfreeMac ([string](Get-SpoolfreeProperty $Port 'Mac')))
+    foreach ($m in @(Get-SpoolfreeProperty $Port 'Macs')) { & $add (ConvertTo-SpoolfreeMac ([string]$m)) }
+    $serials = @(@(Get-SpoolfreeProperty $Port 'Serials') | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_.Length -ge 5 } | Select-Object -Unique)
+    $models = @(@(Get-SpoolfreeProperty $Port 'Models') + @(Get-SpoolfreeProperty $Port 'Names') | Where-Object { $_ } | ForEach-Object { [string]$_ } | Select-Object -Unique)
+    return [pscustomobject]@{ Macs = $macs.ToArray(); Serials = $serials; Models = $models }
+}
+
+function Get-SpoolfreeIdentityConflict {
+    <#
+    .SYNOPSIS
+        Pure (0.9.3): why a queue's own identity (Get-SpoolfreeQueueIdentity) contradicts a printer's known MACs or
+        serial numbers: the queue carries MACs and none is one of the printer's, or serials and none is one of the
+        printer's. $null when nothing contradicts (either side unknown counts as no contradiction).
+    #>
+    param($Identity, [AllowEmptyCollection()][string[]]$Macs = @(), [AllowEmptyCollection()][string[]]$Serials = @())
+    $qm = @(@(Get-SpoolfreeProperty $Identity 'Macs') | Where-Object { $_ })
+    if ($qm.Count -and @($Macs).Count -and -not @($qm | Where-Object { $Macs -contains $_ }).Count) { return "the queue's device MAC $($qm[0]) is not the printer's" }
+    $qs = @(@(Get-SpoolfreeProperty $Identity 'Serials') | Where-Object { $_ })
+    if ($qs.Count -and @($Serials).Count) {
+        $agree = @($qs | Where-Object { $s = [string]$_; @($Serials | Where-Object { $s -ieq $_ -or (Find-SpoolfreeNameToken -Text $s -Tokens @($_)) }).Count })
+        if (-not $agree.Count) { return "the queue's device serial number $($qs[0]) is not the printer's" }
+    }
+    return $null
+}
+
 function ConvertTo-SpoolfreeAliasKey {
     <# Pure: a host name for legacy-alias comparison: trimmed, lower-case, without a trailing dot or ".local". #>
     param([AllowNull()][AllowEmptyString()][string]$HostName)
@@ -617,6 +731,23 @@ function Get-SpoolfreeLegacyMatches {
     $aliases = @(Get-SpoolfreeLegacyAliases $Printer)
     $serials = @(@(Get-SpoolfreeProperty $Printer 'serialNumbers') | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_.Length -ge 5 })
     $hit = { param($Reason, $Kind, $By, $Uuid) $out.Add([pscustomobject]@{ Queue = $name; Reason = $Reason; Kind = $Kind; MatchBy = $By; Uuid = $Uuid }) }
+    $model = [string](Get-SpoolfreeProperty $Printer 'model')
+    # 0.9.3: whether an address-only match (no UUID, MAC or serial agreement) counts: the device at that address must
+    # currently report the printer's model and MAC. For a WSD/IPP port that is the port's device as Plug and Play
+    # knows it now (its MACs and its reported name/model, else the queue's driver): both must agree. A TCP/IP or URL
+    # port has no device data on the PC; the device at the printer's own address is the one the server's identity
+    # check read, so the printer must have a known MAC, and the queue's driver must not name another model.
+    $addressVerified = {
+        param([bool]$Wsd)
+        if ($macs.Count -eq 0) { return $false }
+        if ($Wsd) {
+            if (-not @(@($ident.Macs) | Where-Object { $macs -contains $_ }).Count) { return $false }
+            $names = @($ident.Models)
+            if ($names.Count -eq 0) { $names = @([string](Get-SpoolfreeProperty $q 'DriverName')) }
+            return ((Test-SpoolfreeModelMatch -Model $model -Candidates $names) -eq $true)
+        }
+        return ((Test-SpoolfreeModelMatch -Model $model -Candidates @([string](Get-SpoolfreeProperty $q 'DriverName'))) -ne $false)
+    }
 
     foreach ($q in @($Queues)) {
         $name = [string](Get-SpoolfreeProperty $q 'Name')
@@ -656,17 +787,21 @@ function Get-SpoolfreeLegacyMatches {
         $urlHost = Get-SpoolfreeUrlHost $portName
         if (-not $urlHost) { $urlHost = Get-SpoolfreeUrlHost $hostAddress }
 
-        $kind = $null; $label = $null; $hostName = $null; $displayHost = $null
+        $kind = $null; $label = $null; $hostName = $null; $displayHost = $null; $isWsd = $false
+        $ident = Get-SpoolfreeQueueIdentity -Queue $q -Port $port
         $portUuids = @(@(Get-SpoolfreeProperty $port 'Uuids') | ForEach-Object { ConvertTo-SpoolfreeUuid ([string]$_) } | Where-Object { $_ })
         $portUuid = if ($portUuids.Count) { $portUuids[0] } else { $null }
         if ($portName -match '^WSD-' -or $monitor -eq 'WSD Port' -or $monitor -eq 'WSD Port Monitor') {
             # Identified by the device UUID the port stores, or by the device address found for that UUID.
             $kind = if ($description -eq 'IPP Port') { 'IPP port' } else { 'WSD port' }
+            $isWsd = $true
             $known = @($portUuids | Where-Object { $deviceUuids -contains $_ })
             if ($known.Count) {
                 & $hit "$prefix$kind device uuid $($known[0])" $kind 'uuid' $known[0]
                 continue
             }
+            # 0.9.3: a MAC or serial of the queue's own device that is not the printer's rules out every other match.
+            if (Get-SpoolfreeIdentityConflict -Identity $ident -Macs $macs -Serials $serials) { continue }
             # 0.9.0: the MAC the device's EUI-64 IPv6 (link-local) address embeds, then a serial number or a legacy
             # alias in the WSD device's name or the queue name. Both identify the device whatever UUID it uses for WSD.
             $portMacs = @(@(Get-SpoolfreeProperty $port 'Macs') | ForEach-Object { ConvertTo-SpoolfreeMac ([string]$_) } | Where-Object { $_ })
@@ -709,7 +844,9 @@ function Get-SpoolfreeLegacyMatches {
                     if (@(@(Get-SpoolfreeProperty $other 'CurrentAddresses') | Where-Object { ([string]$_).Trim().ToLowerInvariant() -eq $current }).Count) { $claimed = $true; break }
                 }
                 if ($claimed) { continue }
-                & $hit "$prefix$kind current address $current (device present)" $kind 'address' $portUuid
+                # 0.9.3: an address alone is not enough; the device at it must report the printer's MAC and model.
+                if (-not (& $addressVerified $true)) { continue }
+                & $hit "$prefix$kind current address $current (device present, MAC and model agree)" $kind 'address' $portUuid
                 continue
             }
         } elseif ($urlHost) {
@@ -718,10 +855,13 @@ function Get-SpoolfreeLegacyMatches {
             $kind = 'TCP/IP port'; $label = $hostAddress; $hostName = $hostAddress; $displayHost = $rawHostAddress
             if ($hostAddress) { $candidates.Add($hostAddress) }
         } else { continue }
+        # 0.9.3: a MAC or serial of the queue's own device that is not the printer's rules out every match below
+        # (WSD/IPP ports were checked above, after the device UUID).
+        if (-not $isWsd -and (Get-SpoolfreeIdentityConflict -Identity $ident -Macs $macs -Serials $serials)) { continue }
 
         $addrHit = $null
         foreach ($c in $candidates) { if ($addr.ContainsKey($c)) { $addrHit = $c; break } }
-        if ($addrHit) {
+        if ($addrHit -and (& $addressVerified $isWsd)) {
             if (-not $label) { $label = $addrHit }
             & $hit "$prefix$kind $label" $kind 'address' $portUuid
             continue
@@ -835,7 +975,8 @@ function ConvertTo-SpoolfreeDeviceInfo {
         values) of WSD/IPP printers known to Plug and Play.
     .PARAMETER Devices
         Objects with InstanceId, ContainerId, Values (strings) and, optionally, Names (friendly names) and Present
-        (0.9.2: $true only for a device node Plug and Play reports as present now; registry-only data is not).
+        (0.9.2: $true only for a device node Plug and Play reports as present now; registry-only data is not), and
+        (0.9.3) Serials and Models (the PnP-X serial number and model name the device reports).
     .NOTES
         0.9.2: CurrentHosts are the hosts of present device nodes only (see Get-SpoolfreeLegacyMatches).
     #>
@@ -857,9 +998,13 @@ function ConvertTo-SpoolfreeDeviceInfo {
             }
         }
         $names = @(@(Get-SpoolfreeProperty $d 'Names') | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        $serials = @(@(Get-SpoolfreeProperty $d 'Serials') | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        $models = @(@(Get-SpoolfreeProperty $d 'Models') | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
         foreach ($u in ($uuids | Select-Object -Unique)) {
-            if (-not $info.ContainsKey($u)) { $info[$u] = [pscustomobject]@{ Hosts = @(); Macs = @(); Names = @(); CurrentHosts = @() } }
+            if (-not $info.ContainsKey($u)) { $info[$u] = [pscustomobject]@{ Hosts = @(); Macs = @(); Names = @(); CurrentHosts = @(); Serials = @(); Models = @() } }
             $e = $info[$u]
+            $e.Serials = @(@($e.Serials) + $serials | Where-Object { $_ } | Select-Object -Unique)
+            $e.Models = @(@($e.Models) + $models | Where-Object { $_ } | Select-Object -Unique)
             $e.Hosts = @(@($e.Hosts) + @($hosts[$u]) | Where-Object { $_ } | Select-Object -Unique)
             $e.CurrentHosts = @(@($e.CurrentHosts) + @($currentHosts[$u]) | Where-Object { $_ } | Select-Object -Unique)
             $e.Macs = @(@($e.Macs) + @($macs) | Where-Object { $_ } | Select-Object -Unique)
@@ -881,6 +1026,8 @@ function Get-SpoolfreeWsdPortData {
     $macs = New-Object System.Collections.Generic.List[string]
     $names = New-Object System.Collections.Generic.List[string]
     $current = New-Object System.Collections.Generic.List[string]
+    $serials = New-Object System.Collections.Generic.List[string]
+    $models = New-Object System.Collections.Generic.List[string]
     if ($null -eq $Values) { $Values = @{} }
     if ($null -eq $DeviceIndex) { $DeviceIndex = @{} }
     if ($null -eq $DeviceInfo) { $DeviceInfo = @{} }
@@ -898,9 +1045,11 @@ function Get-SpoolfreeWsdPortData {
         foreach ($m in @($DeviceInfo[$u].Macs)) { if ($m) { $macs.Add([string]$m) } }
         foreach ($n in @($DeviceInfo[$u].Names)) { if ($n) { $names.Add([string]$n) } }
         if ($DeviceInfo[$u].PSObject.Properties['CurrentHosts']) { foreach ($h in @($DeviceInfo[$u].CurrentHosts)) { if ($h) { $current.Add([string]$h) } } }
+        if ($DeviceInfo[$u].PSObject.Properties['Serials']) { foreach ($x in @($DeviceInfo[$u].Serials)) { if ($x) { $serials.Add([string]$x) } } }
+        if ($DeviceInfo[$u].PSObject.Properties['Models']) { foreach ($x in @($DeviceInfo[$u].Models)) { if ($x) { $models.Add([string]$x) } } }
     }
     foreach ($h in @($hosts)) { $m = ConvertFrom-SpoolfreeEui64 $h; if ($m) { $macs.Add($m) } }
-    return [pscustomobject]@{ Uuids = @($uuids | Select-Object -Unique); Hosts = @($hosts | Select-Object -Unique); Macs = @($macs | Select-Object -Unique); Names = @($names | Select-Object -Unique); CurrentHosts = @($current | Select-Object -Unique) }
+    return [pscustomobject]@{ Uuids = @($uuids | Select-Object -Unique); Hosts = @($hosts | Select-Object -Unique); Macs = @($macs | Select-Object -Unique); Names = @($names | Select-Object -Unique); CurrentHosts = @($current | Select-Object -Unique); Serials = @($serials | Select-Object -Unique); Models = @($models | Select-Object -Unique) }
 }
 
 function Get-SpoolfreeTakeoverPrinters {
@@ -2203,6 +2352,20 @@ function Get-SpoolfreeDeviceIndex {
     return $index
 }
 
+function Get-SpoolfreePnpxKind {
+    <#
+    .SYNOPSIS
+        Pure (0.9.3): 'serial' or 'model' for the PnP-X device property keys of a WSD device's serial number and model
+        name (PKEY_PNPX_SerialNumber {656a3bb3-ecc0-43fd-8477-4ae0404a96cd} 12290, PKEY_PNPX_ModelName ... 8194), by
+        name or by GUID and id; $null otherwise.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$KeyName)
+    if (-not $KeyName) { return $null }
+    if ($KeyName -match '(?i)^(DEVPKEY|PKEY)_PNPX_SerialNumber$' -or $KeyName -match '(?i)656a3bb3-ecc0-43fd-8477-4ae0404a96cd\}?[\s,]*12290$') { return 'serial' }
+    if ($KeyName -match '(?i)^(DEVPKEY|PKEY)_PNPX_ModelName$' -or $KeyName -match '(?i)656a3bb3-ecc0-43fd-8477-4ae0404a96cd\}?[\s,]*8194$') { return 'model' }
+    return $null
+}
+
 function Get-SpoolfreeDeviceInfo {
     <#
     .SYNOPSIS
@@ -2231,15 +2394,21 @@ function Get-SpoolfreeDeviceInfo {
             foreach ($d in $pnp) {
                 $values = New-Object System.Collections.Generic.List[string]
                 $names = New-Object System.Collections.Generic.List[string]
+                $serials = New-Object System.Collections.Generic.List[string]
+                $models = New-Object System.Collections.Generic.List[string]
                 $container = ''
                 foreach ($prop in @(Get-PnpDeviceProperty -InstanceId $d.InstanceId -ErrorAction SilentlyContinue)) {
                     if ($prop.KeyName -eq 'DEVPKEY_Device_ContainerId') { $container = [string]$prop.Data; continue }
                     if ($prop.KeyName -eq 'DEVPKEY_Device_FriendlyName' -and $prop.Data -is [string]) { $names.Add([string]$prop.Data) }
+                    # 0.9.3: the PnP-X serial number and model name the device reports (PKEY_PNPX_SerialNumber, _ModelName).
+                    $pk = Get-SpoolfreePnpxKind ([string]$prop.KeyName)
+                    if ($pk -eq 'serial' -and $prop.Data -is [string]) { $serials.Add([string]$prop.Data) }
+                    if ($pk -eq 'model' -and $prop.Data -is [string]) { $models.Add([string]$prop.Data) }
                     foreach ($x in @($prop.Data)) { if ($x -is [string]) { $values.Add($x) } }
                 }
                 # 0.9.2: only a node that is present now (and not in an error state) gives current addresses.
                 $present = ($d.PSObject.Properties['Present'] -and $d.Present -eq $true -and [string]$d.Status -eq 'OK')
-                $devices.Add([pscustomobject]@{ InstanceId = [string]$d.InstanceId; ContainerId = $container; Values = $values.ToArray(); Names = $names.ToArray(); Present = [bool]$present })
+                $devices.Add([pscustomobject]@{ InstanceId = [string]$d.InstanceId; ContainerId = $container; Values = $values.ToArray(); Names = $names.ToArray(); Present = [bool]$present; Serials = $serials.ToArray(); Models = $models.ToArray() })
             }
         } catch { Write-Verbose "PnP device properties unavailable: $($_.Exception.Message)" }
     }
@@ -2321,6 +2490,8 @@ function Get-SpoolfreePortInventory {
         $macs = @()
         $names = @()
         $current = @()
+        $serials = @()
+        $models = @()
         $mac = $null
         $urlHost = Get-SpoolfreeUrlHost $name
         # 0.9.0: vendor TCP/IP monitors (HP Standard TCP/IP Port and the like) keep the host and MAC in the registry,
@@ -2348,8 +2519,10 @@ function Get-SpoolfreePortInventory {
             $macs = @($data.Macs)
             $names = @($data.Names)
             $current = @($data.CurrentHosts)
+            $serials = @($data.Serials)
+            $models = @($data.Models)
         }
-        $ports[$name] = [pscustomobject]@{ Monitor = $monitor; Description = [string]$p.Description; HostAddress = $hostAddress; Addresses = @($addresses); Uuids = @($uuids); Mac = $mac; Macs = @($macs); Names = @($names); CurrentAddresses = @($current) }
+        $ports[$name] = [pscustomobject]@{ Monitor = $monitor; Description = [string]$p.Description; HostAddress = $hostAddress; Addresses = @($addresses); Uuids = @($uuids); Mac = $mac; Macs = @($macs); Names = @($names); CurrentAddresses = @($current); Serials = @($serials); Models = @($models) }
     }
     return $ports
 }
@@ -2629,14 +2802,20 @@ function Get-SpoolfreeUnmanagedPlan {
         the caller removes the queue and sets removed / failed). Returns { Entries, Blocked }.
     .PARAMETER SpoolfreeCount
         Spoolfree queues of this server that exist on the PC. With none, nothing is removed (Blocked says why).
+    .PARAMETER TakeoverModes
+        0.9.3: lower-case printer name -> legacy takeover mode (Get-SpoolfreeTakeoverModes). In mode on, a
+        legacy-of-managed queue is removed only when its matched printer's takeover is on; otherwise (dry-run, off or
+        unknown) it is kept and reported as would-remove, with the takeover mode in the reason.
     #>
     param(
         [AllowEmptyCollection()][object[]]$Entries = @(),
         [string]$Mode = 'off',
         [AllowEmptyCollection()][string[]]$Keep = @(),
         [bool]$KeepLocal = $true,
-        [int]$SpoolfreeCount = 0
+        [int]$SpoolfreeCount = 0,
+        [AllowNull()][hashtable]$TakeoverModes = @{}
     )
+    if ($null -eq $TakeoverModes) { $TakeoverModes = @{} }
     $blocked = $null
     if ($Mode -ne 'off' -and $SpoolfreeCount -lt 1) { $blocked = 'no Spoolfree printer is installed on this PC yet, so nothing is removed' }
     foreach ($e in @($Entries)) {
@@ -2645,9 +2824,31 @@ function Get-SpoolfreeUnmanagedPlan {
         if ($k) { $e['action'] = 'kept'; $e['reason'] = "keep list: $k"; continue }
         if ($e['class'] -eq 'local-usb' -and $KeepLocal) { $e['action'] = 'kept'; $e['reason'] = 'USB/local printers are kept'; continue }
         if ($blocked) { $e['action'] = 'kept'; $e['reason'] = $blocked; continue }
+        if ($Mode -eq 'on' -and $e['class'] -eq 'legacy-of-managed') {
+            $printer = [string]$e['matchedPrinter']
+            $tm = if ($printer -and $TakeoverModes.ContainsKey($printer.ToLowerInvariant())) { [string]$TakeoverModes[$printer.ToLowerInvariant()] } else { 'off' }
+            if ($tm -ne 'on') {
+                $why = "takeover $tm for $(if ($printer) { $printer } else { 'its printer' }): removed only when that printer's legacy takeover is on"
+                $e['action'] = 'would-remove'
+                $e['reason'] = if ($e['reason']) { "$why ($($e['reason']))" } else { $why }
+                continue
+            }
+        }
         $e['action'] = if ($Mode -eq 'on') { 'remove' } else { 'would-remove' }
     }
     return [pscustomobject]@{ Entries = @($Entries); Blocked = $blocked }
+}
+
+function Get-SpoolfreeTakeoverModes {
+    <# Pure (0.9.3): lower-case printer name -> legacy takeover mode (off | dry-run | on) of objects with Printer (manifest printer). #>
+    param([AllowEmptyCollection()][object[]]$Printers = @())
+    $out = @{}
+    foreach ($pp in @($Printers)) {
+        $p = Get-SpoolfreeProperty $pp 'Printer'
+        $n = [string](Get-SpoolfreeProperty $p 'name')
+        if ($n -and -not $out.ContainsKey($n.ToLowerInvariant())) { $out[$n.ToLowerInvariant()] = Get-SpoolfreeLegacyMode $p }
+    }
+    return $out
 }
 
 function Get-SpoolfreeUnmanagedReplacement {
