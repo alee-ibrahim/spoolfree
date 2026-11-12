@@ -192,7 +192,7 @@ Queues of this server are never legacy: a queue with this server's id, with a pr
 unreadable comment is left alone, and so is everything when the agent has no pinned key. Another server's queue with
 the printer's own name is taken over too; a hand-made queue with that name is still reported as a conflict.
 
-**Never touched:**
+**Never touched** (by takeover; [Remove unmanaged printers](#unmanaged-printers-090) is a separate setting):
 
 - USB, LPT, COM, FILE and Terminal Services ports;
 - virtual queues: PDF, OneNote, XPS Document Writer, Fax, Evernote and "Microsoft Print to ...";
@@ -223,6 +223,112 @@ hex digits each), `serverPrinterIds` (every printer id on the server). Older age
 driver).
 
 Each match is recorded in the agent report's `legacy` field: `{ printer, queue, reason, action: removed | would-remove | failed, scope: machine | user:<DOMAIN\user>, error? }`, at most 200 entries. Matches are also written to `sync.log`. `Invoke-SpoolfreeSync.ps1 -WhatIf` removes nothing.
+
+## Unmanaged printers (0.9.0)
+
+Users should see only the Spoolfree printers in the print dialog, plus what an admin chooses to keep. From 0.9.0 the
+agent reports **every queue that is not a Spoolfree queue of this server**, and the **Remove unmanaged printers**
+setting decides what it removes.
+
+### What the agent reports
+
+Each sync sends `unmanaged[]` (at most 300 entries) and `unmanagedPolicy` (`{ mode, keepLocal, keep, blocked }`) in the
+report. Each entry has the queue name, `scope` (`machine`, or `user:<DOMAIN\user>` for per-user connections), the
+port kind (`tcpip`, `wsd`, `ipp`, `url`, `connection`, `usb`, `local`, `other`), the port, host or IP, the WSD or IPP
+device UUID, a MAC when one is known (vendor port registry, EUI-64 IPv6 address, Brother-style host name), the driver,
+a **class** and, for legacy copies, the Spoolfree printer it matches (`matchedPrinter`, `matchBy`):
+
+| Class | What |
+|---|---|
+| `legacy-of-managed` | A queue for the same device as one of the PC's Spoolfree printers (the takeover rules below, whatever the printer's takeover mode). |
+| `print-server-connection` | A `\\server\share` connection. |
+| `virtual` | Software printers (Print to PDF, XPS Document Writer, Fax, OneNote, PDF writers, Evernote...) and queues on local ports such as `PORTPROMPT:`, `FILE:` or `nul:`. |
+| `local-usb` | USB, LPT, COM and DOT4 ports. |
+| `dead` | The port is gone, has no host, or its WSD device is unknown to Plug and Play. |
+| `other-network` | Any other network queue (for example another department's auto-discovered printer). |
+
+Left out: Spoolfree queues of this server, and printers redirected into a Remote Desktop session (TS ports), which
+Windows creates per session. Spoolfree queues of **another** Spoolfree server are reported like any other queue.
+
+The **Agents** page shows the list per PC (the "N unmanaged" badge) and a fleet summary: PCs with unmanaged printers,
+by class, and PCs with dry-run "would remove", removed or failed entries. Each count is also a filter
+(`/agents?unmanaged=<class|any|would-remove|removed|failed>`).
+
+### The setting
+
+Per OU on **Assignments** (inherited down the OU tree; the nearest OU that sets a value wins, and *Block inheritance*
+does not reset it), with a per-PC override on **Preview**, and in the bulk CLI (`ous:` and `computers:`, see
+[deployment.md](deployment.md#bulk-import-and-export)):
+
+- **Remove unmanaged printers**: `off` (default: report only), `dry-run` (report what would be removed: "would remove"
+  on the Agents page) or `on`.
+- **Keep list**: queue-name patterns and/or driver names that are never removed. `*` and `?` are wildcards; `[` and `]`
+  are taken literally; matching ignores case. Each OU can set its own list or inherit; the root inherits
+  `UNMANAGED_KEEP_DEFAULT` (default `Microsoft Print to PDF`). Example: `Microsoft Print to PDF`, `\\plotsrv\*`,
+  `Generic Label Driver`.
+- **Keep USB/local printers**: on by default; USB, LPT and COM printers stay unless it is turned off (per OU or per PC).
+
+In `on` mode the agent removes every reported queue, of every class, except the keep list and (unless turned off)
+USB/local printers.
+
+### Safety rules
+
+- **Nothing is removed on a PC that has no working Spoolfree queue**: at least one Spoolfree queue of this server
+  (from this PC's manifest) must exist after the sync created them. Otherwise every entry is `kept` and
+  `unmanagedPolicy.blocked` says why; the Agents page shows it.
+- **Default printers.** A machine queue that was a user's default is replaced, at that user's next logon, by the
+  Spoolfree printer it was a copy of, else the OU default, else the first Spoolfree printer (the removed-queue map the
+  logon task already uses for takeover). The logon task never removes a user's own connection that is their current
+  default unless it can first make such a Spoolfree printer their default; otherwise the connection is `kept`.
+- **Dry-run** removes nothing and shows "would remove" per PC on the Agents page.
+- Every removal and failure is in the report (`removed`, `failed` with the error) and in `sync.log`, and the server
+  writes it to the audit log (`agent.unmanaged_removed`, `agent.unmanaged_remove_failed`, actor `agent:<PC>`).
+- `Invoke-SpoolfreeSync.ps1 -WhatIf` removes nothing.
+
+### Per-user connections
+
+`\\server\share` connections a user added are invisible to SYSTEM. The sync publishes the setting, keep list, the
+PC's Spoolfree queues and the OU default in `HKLM:\SOFTWARE\Spoolfree\Public` (`Takeover.unmanaged`). At logon the
+*Spoolfree User Default* task classifies the user's own connections (connections to the `LEGACY_PRINT_SERVERS` and
+any other print server) by the same rules, removes them in `on` mode (no share list needed), and writes the results
+to `%ProgramData%\Spoolfree\UserTakeover\<SID>.unmanaged.json`; the next sync report carries them with the scope taken
+from the file's owner. Connections in other users' profiles are handled at those users' next logon.
+
+### Virtual printers that come back
+
+XPS Document Writer, Fax and Print to PDF are Windows features. The agent removes the **queue**; it does not turn the
+Windows feature off. Windows feature updates, and reinstalling or updating applications that bring their own printer
+(OneNote, PDF writers such as Foxit PhantomPDF, Evernote), can create the queue again. The agent removes it again at
+the next sync. To stop a feature for good, turn it off by policy (for example *Turn Windows features on or off*,
+`Printing-XPSServices-Features`).
+
+### Legacy matching improvements (0.9.0)
+
+These apply to legacy takeover and to the `legacy-of-managed` class:
+
+- **Vendor TCP/IP monitors.** Ports of monitors such as *HP Standard TCP/IP Port* (HPTCPMON) show no host in
+  `Get-PrinterPort`. The agent reads `HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\<monitor>\Ports\<port>`
+  (`IPAddress`, `HostName`, `HWAddress`; the same values are read for other TCP/IP monitors), so such a port matches by
+  host as a Standard TCP/IP port does, and by its MAC (`HWAddress`) when that is one of the printer's MACs.
+- **EUI-64 IPv6 addresses.** A WSD device that announces only an IPv6 link-local address whose interface id is
+  EUI-64 (`fe80::XXYY:ZZff:feAA:BBCC`) carries its MAC. A WSD port of such a device matches when that MAC is one of
+  the printer's, whatever WSD UUID the device uses.
+- **Serial numbers and aliases in names.** A serial number from the printer's IEEE 1284 device ID (`SN:`, `SERN:`;
+  manifest `serialNumbers`, sent when takeover is on or dry-run) matches when it appears as a whole word in the WSD
+  device's FriendlyName or the queue name; a legacy alias matches the same way for WSD ports. Tokens shorter than 5
+  characters are ignored.
+- **WSD and IPP UUIDs.** Some printers (seen with a Toshiba MFP) use a WSD endpoint UUID that differs from their IPP
+  `printer-uuid`. The manifest's `deviceUuids` lists every UUID the server knows for a printer; a WSD/IPP port that
+  stores any of them matches. The server learns further UUIDs from agent reports: the port UUID of the PC's own
+  Spoolfree queue (`queues[].uuids`), and the WSD/IPP UUID of a legacy queue matched by UUID, MAC or serial (never by
+  address or alias). A UUID that another printer already has is not learned, at most 8 are kept per printer, each is
+  audit-logged (`printer.uuid_learned`), and they are cleared when the printer's endpoint changes or its IPP
+  `printer-uuid` changes.
+- A WSD port whose UUID is not one of the printer's is still never matched by IP address alone (0.4.5).
+
+**Manifest fields** (0.9.0): `unmanaged` (`{ mode, keep, keepLocal }`), `printers[].deviceUuids`,
+`printers[].serialNumbers`. Older agents ignore them. No new agent files: the self-update bundle still carries the
+same four files, so 0.8.x agents update to 0.9.0 normally.
 
 ## Sync interval
 

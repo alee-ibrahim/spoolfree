@@ -144,12 +144,23 @@ printers:
     assignments: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
     defaultFor: ["OU=Administration,OU=Workstations,DC=example,DC=org"]
 
+ous:                                  # 0.9.0: "Remove unmanaged printers" per OU (YAML only; docs/agent.md)
+  - dn: "OU=Administration,OU=Workstations,DC=example,DC=org"
+    removeUnmanaged: dry-run          # off | dry-run | on | inherit
+    unmanagedKeep: ["Microsoft Print to PDF", "Generic Label Driver"]   # globs / driver names, or inherit
+    keepLocalPrinters: true           # true | false | inherit
+
 computers:                            # per-computer overrides (YAML only)
   - name: LAB-PC7                     # computer name, or dn: "CN=LAB-PC7,OU=Lab,DC=example,DC=org"
     add: [Staff Room Copier]          # printers added to this computer on top of its OU's
     block: [Lab Printer]              # inherited printers removed from this computer
     default: Staff Room Copier        # optional: this computer's default (added if not in add)
+    removeUnmanaged: "off"            # 0.9.0 per-PC override: off | dry-run | on | inherit
+    keepLocalPrinters: false          # 0.9.0 per-PC override: true | false | inherit
 ```
+
+`ous:` and the unmanaged fields of `computers:` only change what they name: a field left out stays as it is, and
+`inherit` clears the OU's or PC's own value. `export` writes them back.
 
 `computers:` entries are looked up in the directory (in snapshot mode, the last AD snapshot): by `dn`, or by `name`
 (case-insensitive; a name that several computers share is refused, use `dn`). Giving both checks that they agree.
@@ -230,3 +241,26 @@ kubectl exec -n <ns> deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs
    connections after the user's next logon). Check that only the expected queues are listed.
 4. Switch the printers to `on` (UI: **Advanced (migration)** in the printer form, or re-import). Agents remove the old queues, create the Spoolfree queue and, for users
    whose default was a removed queue, make the Spoolfree queue their default at their next logon.
+
+## Cleaning up the print dialog (0.9.0)
+
+"Remove unmanaged printers" removes every queue that is not a Spoolfree queue (old print-server connections, legacy
+copies takeover did not match, other departments' auto-discovered printers, virtual printers), except a keep list.
+Details and safety rules: [agent.md](agent.md#unmanaged-printers-090).
+
+1. **Deploy 0.9.0 and wait one sync (report only).** The setting is `off` everywhere, so agents only report. On
+   **Agents**, the *Unmanaged printers* card shows which PCs have what, by class; check the classes and the legacy
+   matches (`matchedPrinter`) on a few PCs.
+2. **Set the keep list.** The default keeps `Microsoft Print to PDF` (`UNMANAGED_KEEP_DEFAULT`). Add what must stay,
+   per OU on **Assignments** (queue-name patterns such as `\\plotsrv\*`, or driver names). USB/local printers stay
+   unless *Keep USB/local printers* is turned off.
+3. **Dry-run on one OU** (for example a small department): **Assignments > OU > Unmanaged printers > Dry-run**, or
+   `ous: [{ dn: ..., removeUnmanaged: dry-run }]` with the CLI. After the next sync (and users' next logon for their
+   own connections), filter **Agents** by *Dry-run: would remove* and check every PC's list.
+4. **Switch that OU to On**, check the result on Agents (*Removed* / *Removal failed*) and in the audit log, then roll
+   out OU by OU. A PC that should be different gets a per-PC override on **Preview**.
+
+**Rollback:** set the OU back to `off` (or `dry-run`); nothing more is removed from the next sync. Removed queues are
+not re-created: print-server connections and WSD/auto-discovered queues come back when users or Windows add them again;
+for a needed queue, add it as a Spoolfree printer or put it on the keep list and re-add it by hand. Rolling the server
+back to 0.8.x stops the cleanup too: its manifests carry no setting, which a 0.9.0 agent reads as off.

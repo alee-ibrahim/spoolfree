@@ -5,9 +5,11 @@ import { db, schema } from "./db";
 import { aliasList } from "./aliases";
 import { normalizeDn } from "./dn";
 import { PRINTER_NAME_RE } from "./printer-name";
+import { keepListInput } from "./unmanaged";
 
 /**
- * Bulk import/export of printers, OU assignments, OU default printers and per-computer overrides
+ * Bulk import/export of printers, OU assignments, OU default printers, per-computer overrides and (0.9.0) the
+ * "Remove unmanaged printers" settings of OUs (`ous:`) and PCs (`computers:`)
  * (scripts/printers.ts). Idempotent: printers are matched by name (case-insensitive) and computers by name
  * or DN; running the same file twice changes nothing.
  */
@@ -85,6 +87,36 @@ export type PrinterSpec = z.output<typeof PrinterSpec>;
 
 const printerNames = list.pipe(z.array(z.string().min(1).max(100)));
 
+/** "inherit" (or null) clears an OU's or PC's own value; absent leaves it as it is. */
+const INHERIT = "inherit";
+const unmanagedMode = z
+  .enum(["off", "dry-run", "on", INHERIT])
+  .nullable()
+  .optional()
+  .transform((v) => (v === undefined ? undefined : v === INHERIT || v === null ? null : v));
+const keepLocal = z
+  .union([z.boolean(), z.literal(INHERIT), z.null()])
+  .optional()
+  .transform((v) => (v === undefined ? undefined : v === INHERIT || v === null ? null : v));
+
+/**
+ * 0.9.0, YAML only: the "Remove unmanaged printers" settings of an OU. `removeUnmanaged` off | dry-run | on | inherit,
+ * `unmanagedKeep` a list of queue-name globs / driver names (or inherit), `keepLocalPrinters` true | false | inherit.
+ * Fields left out are not changed.
+ */
+export const OuSpec = z
+  .object({
+    dn: z.string().trim().min(1).max(2048).regex(/^[A-Za-z]+=.+/, "not a distinguished name"),
+    removeUnmanaged: unmanagedMode,
+    unmanagedKeep: z
+      .union([z.literal(INHERIT), z.null(), keepListInput])
+      .optional()
+      .transform((v) => (v === undefined ? undefined : v === INHERIT || v === null ? null : v)),
+    keepLocalPrinters: keepLocal,
+  })
+  .strict();
+export type OuSpec = z.output<typeof OuSpec>;
+
 /**
  * Per-computer overrides (YAML only): `add` adds printers to this computer, `block` removes inherited ones,
  * `default` makes one of them the computer's default (it is added if not listed in `add`).
@@ -96,6 +128,9 @@ export const ComputerSpec = z
     add: printerNames,
     block: printerNames,
     default: optText(100),
+    /** 0.9.0: per-PC override of "Remove unmanaged printers" (off | dry-run | on | inherit) and "keep USB/local". */
+    removeUnmanaged: unmanagedMode,
+    keepLocalPrinters: keepLocal,
   })
   .strict()
   .refine((c) => c.name || c.dn, { message: "name or dn is required" })
@@ -115,6 +150,8 @@ export type ComputerSpec = z.output<typeof ComputerSpec>;
 export interface ImportDocument {
   printers: PrinterSpec[];
   computers: ComputerSpec[];
+  /** 0.9.0 (YAML only): OU unmanaged-printer settings. */
+  ous: OuSpec[];
 }
 
 // --- Parsing ------------------------------------------------------------------------------------------
@@ -190,9 +227,10 @@ export function parseInput(text: string, format: "yaml" | "csv"): PrinterSpec[] 
 export function parseDocument(text: string, format: "yaml" | "csv"): ImportDocument {
   let raw: unknown[];
   let rawComputers: unknown = [];
+  let rawOus: unknown = [];
   if (format === "csv") {
     const [header, ...rows] = parseCsv(text.replace(/^﻿/, ""));
-    if (!header) return { printers: [], computers: [] };
+    if (!header) return { printers: [], computers: [], ous: [] };
     const keys = header.map((h) => {
       const k = CSV_COLUMNS[h.trim().toLowerCase().replace(/[\s-]+/g, "_")];
       if (!k) throw new Error(`unknown CSV column "${h}"`);
@@ -204,8 +242,23 @@ export function parseDocument(text: string, format: "yaml" | "csv"): ImportDocum
     raw = Array.isArray(doc) ? doc : ((doc as { printers?: unknown[] } | null)?.printers ?? []);
     if (!Array.isArray(raw)) throw new Error("YAML must be a list of printers or { printers: [...], computers: [...] }");
     rawComputers = Array.isArray(doc) ? [] : ((doc as { computers?: unknown } | null)?.computers ?? []);
+    rawOus = Array.isArray(doc) ? [] : ((doc as { ous?: unknown } | null)?.ous ?? []);
   }
   if (!Array.isArray(rawComputers)) throw new Error("computers: must be a list");
+  if (!Array.isArray(rawOus)) throw new Error("ous: must be a list");
+  const ous: OuSpec[] = [];
+  const seenOus = new Set<string>();
+  rawOus.forEach((r: unknown, i: number) => {
+    const o = OuSpec.safeParse(r);
+    if (!o.success) {
+      const label = (r as { dn?: unknown } | null)?.dn;
+      throw new Error(`ous entry ${i + 1}${label ? ` (${String(label)})` : ""}: ${o.error.issues.map((x) => `${x.path.join(".") || "entry"}: ${x.message}`).join("; ")}`);
+    }
+    const key = normalizeDn(o.data.dn);
+    if (seenOus.has(key)) throw new Error(`duplicate OU: ${o.data.dn}`);
+    seenOus.add(key);
+    ous.push(o.data);
+  });
   const out: PrinterSpec[] = [];
   const seen = new Set<string>();
   raw.forEach((r, i) => {
@@ -232,7 +285,7 @@ export function parseDocument(text: string, format: "yaml" | "csv"): ImportDocum
     seenComputers.add(key);
     computers.push(c.data);
   });
-  return { printers: out, computers };
+  return { printers: out, computers, ous };
 }
 
 // --- Planning (pure) -----------------------------------------------------------------------------------
@@ -240,7 +293,9 @@ export function parseDocument(text: string, format: "yaml" | "csv"): ImportDocum
 export interface CurrentState {
   printers: (typeof schema.printers.$inferSelect)[];
   assignments: { ouDn: string; printerId: string }[];
-  ouSettings: { ouDn: string; defaultPrinterId: string | null }[];
+  ouSettings: { ouDn: string; defaultPrinterId: string | null; removeUnmanaged?: string | null; unmanagedKeep?: string[] | null; keepLocalPrinters?: boolean | null }[];
+  /** 0.9.0 per-PC unmanaged-printer overrides (absent: none). */
+  computerSettings?: ComputerSettingRow[];
   /** Per-computer overrides (absent: treated as none). */
   overrides?: OverrideRow[];
   /** Driver packages (absent: none), for driverPackage names. */
@@ -253,6 +308,20 @@ export interface OverrideRow {
   printerId: string;
   action: "add" | "block";
   makeDefault: boolean;
+}
+
+export interface ComputerSettingRow {
+  computerGuid: string;
+  computerName: string;
+  removeUnmanaged: string | null;
+  keepLocalPrinters: boolean | null;
+}
+
+/** The unmanaged-printer fields an OU or PC entry sets (undefined = unchanged, null = inherit). */
+export interface UnmanagedChanges {
+  removeUnmanaged?: "off" | "dry-run" | "on" | null;
+  unmanagedKeep?: string[] | null;
+  keepLocalPrinters?: boolean | null;
 }
 
 /** A computer as the directory knows it (name/DN lookup for `computers:` entries). */
@@ -273,7 +342,9 @@ export type Step =
   | { kind: "unassign"; name: string; id: string; ouDn: string }
   | { kind: "default"; name: string; ouDn: string; previous: string | null }
   | { kind: "override"; name: string; computer: string; computerGuid: string; action: "add" | "block"; makeDefault: boolean; previous: string | null }
-  | { kind: "unoverride"; name: string; computer: string; computerGuid: string; printerId: string };
+  | { kind: "unoverride"; name: string; computer: string; computerGuid: string; printerId: string }
+  | { kind: "ou-unmanaged"; name: string; ouDn: string; changes: UnmanagedChanges }
+  | { kind: "computer-unmanaged"; name: string; computer: string; computerGuid: string; changes: UnmanagedChanges };
 
 const FIELDS = [
   "host",
@@ -429,10 +500,45 @@ export function planComputers(
           steps.push({ kind: "unoverride", name: nameById.get(o.printerId) ?? o.printerId, computer: comp.name, computerGuid: guid, printerId: o.printerId });
       }
     }
+    const setting = (cur.computerSettings ?? []).find((x) => x.computerGuid.toLowerCase() === guid);
+    const changes = unmanagedChanges(
+      { removeUnmanaged: c.removeUnmanaged, keepLocalPrinters: c.keepLocalPrinters },
+      { removeUnmanaged: (setting?.removeUnmanaged as UnmanagedChanges["removeUnmanaged"]) ?? null, keepLocalPrinters: setting?.keepLocalPrinters ?? null },
+    );
+    if (changes) steps.push({ kind: "computer-unmanaged", name: `computer ${comp.name}`, computer: comp.name, computerGuid: guid, changes });
     if (steps.length === before) steps.push({ kind: "unchanged", name: `computer ${comp.name}` });
   }
   return steps;
 }
+
+/** The fields of `want` that differ from `have` (undefined fields are left out); null when nothing changes. */
+function unmanagedChanges(want: UnmanagedChanges, have: UnmanagedChanges): UnmanagedChanges | null {
+  const out: UnmanagedChanges = {};
+  for (const k of ["removeUnmanaged", "unmanagedKeep", "keepLocalPrinters"] as const) {
+    if (want[k] === undefined) continue;
+    if (JSON.stringify(want[k]) !== JSON.stringify(have[k] ?? null)) (out as Record<string, unknown>)[k] = want[k];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** 0.9.0: OU unmanaged-printer settings (`ous:`). */
+export function planOus(ous: OuSpec[], cur: CurrentState): Step[] {
+  const byOu = new Map(cur.ouSettings.map((s) => [normalizeDn(s.ouDn), s]));
+  return ous.map((o): Step => {
+    const have = byOu.get(normalizeDn(o.dn));
+    const changes = unmanagedChanges(o, {
+      removeUnmanaged: (have?.removeUnmanaged as UnmanagedChanges["removeUnmanaged"]) ?? null,
+      unmanagedKeep: have?.unmanagedKeep ?? null,
+      keepLocalPrinters: have?.keepLocalPrinters ?? null,
+    });
+    return changes ? { kind: "ou-unmanaged", name: `ou ${o.dn}`, ouDn: have?.ouDn ?? o.dn, changes } : { kind: "unchanged", name: `ou ${o.dn}` };
+  });
+}
+
+const describeChanges = (c: UnmanagedChanges) =>
+  Object.entries(c)
+    .map(([k, v]) => `${k}=${v === null ? "inherit" : Array.isArray(v) ? `[${v.join("; ")}]` : String(v)}`)
+    .join(", ");
 
 export function describe(s: Step): string {
   switch (s.kind) {
@@ -452,6 +558,10 @@ export function describe(s: Step): string {
       return `${s.action === "add" ? "add     " : "block   "} ${s.computer}: ${s.name}${s.makeDefault ? " (default)" : ""}${s.previous ? ` (was: ${s.previous})` : ""}`;
     case "unoverride":
       return `unset    ${s.computer}: ${s.name}`;
+    case "ou-unmanaged":
+      return `ou       ${s.ouDn}: ${describeChanges(s.changes)}`;
+    case "computer-unmanaged":
+      return `pc       ${s.computer}: ${describeChanges(s.changes)}`;
   }
 }
 
@@ -459,10 +569,18 @@ export function describe(s: Step): string {
 
 export async function loadState(): Promise<CurrentState> {
   const d = db();
-  const [printers, assignments, ouSettings, overrides, driverPackages] = await Promise.all([
+  const [printers, assignments, ouSettings, overrides, driverPackages, computerSettings] = await Promise.all([
     d.select().from(schema.printers),
     d.select({ ouDn: schema.ouAssignments.ouDn, printerId: schema.ouAssignments.printerId }).from(schema.ouAssignments),
-    d.select({ ouDn: schema.ouSettings.ouDn, defaultPrinterId: schema.ouSettings.defaultPrinterId }).from(schema.ouSettings),
+    d
+      .select({
+        ouDn: schema.ouSettings.ouDn,
+        defaultPrinterId: schema.ouSettings.defaultPrinterId,
+        removeUnmanaged: schema.ouSettings.removeUnmanaged,
+        unmanagedKeep: schema.ouSettings.unmanagedKeep,
+        keepLocalPrinters: schema.ouSettings.keepLocalPrinters,
+      })
+      .from(schema.ouSettings),
     d
       .select({
         computerGuid: schema.computerOverrides.computerGuid,
@@ -473,8 +591,16 @@ export async function loadState(): Promise<CurrentState> {
       })
       .from(schema.computerOverrides),
     d.select({ id: schema.driverPackages.id, name: schema.driverPackages.name, infs: schema.driverPackages.infs }).from(schema.driverPackages),
+    d
+      .select({
+        computerGuid: schema.computerSettings.computerGuid,
+        computerName: schema.computerSettings.computerName,
+        removeUnmanaged: schema.computerSettings.removeUnmanaged,
+        keepLocalPrinters: schema.computerSettings.keepLocalPrinters,
+      })
+      .from(schema.computerSettings),
   ]);
-  return { printers, assignments, ouSettings, overrides, driverPackages };
+  return { printers, assignments, ouSettings, overrides, driverPackages, computerSettings };
 }
 
 /** Applies a plan in one transaction; every change gets an audit entry with actor "cli". */
@@ -504,7 +630,7 @@ export async function apply(steps: Step[], actor = "cli"): Promise<void> {
             // A new driver mode starts auto mode's decision over (no sticky vendor decision).
             ...("driverMode" in s.changes ? { autoVendorReason: null, autoVendorAt: null } : {}),
             // A new endpoint may be another device: its printer-uuid/MACs are read again by Test or the poller.
-            ...(s.bumpRevision ? { revision: before.revision + 1, deviceUuid: null, macAddresses: [], identityCheckedAt: null } : {}),
+            ...(s.bumpRevision ? { revision: before.revision + 1, deviceUuid: null, macAddresses: [], extraUuids: [], identityCheckedAt: null } : {}),
           })
           .where(eqId(s.id));
         await audit("printer.update", "printer", s.id, { changes: s.changes, source: "bulk import" });
@@ -533,6 +659,25 @@ export async function apply(steps: Step[], actor = "cli"): Promise<void> {
             set: { action: s.action, makeDefault: s.makeDefault, computerName: s.computer },
           });
         await audit(`override.${s.action}`, "computer", s.computerGuid, { computer: s.computer, printerId: id, printer: s.name, makeDefault: s.makeDefault, source: "bulk import" });
+      } else if (s.kind === "ou-unmanaged") {
+        const existing = (await tx.select({ ouDn: schema.ouSettings.ouDn }).from(schema.ouSettings)).find((r) => normalizeDn(r.ouDn) === normalizeDn(s.ouDn));
+        if (existing) await tx.update(schema.ouSettings).set({ ...s.changes, updatedAt: new Date() }).where(eq(schema.ouSettings.ouDn, existing.ouDn));
+        else await tx.insert(schema.ouSettings).values({ ouDn: s.ouDn, ...s.changes });
+        await audit("ou.unmanaged", "ou", s.ouDn, { changes: s.changes, source: "bulk import" });
+      } else if (s.kind === "computer-unmanaged") {
+        const [have] = await tx.select().from(schema.computerSettings).where(eq(schema.computerSettings.computerGuid, s.computerGuid));
+        const next = {
+          removeUnmanaged: s.changes.removeUnmanaged === undefined ? (have?.removeUnmanaged ?? null) : s.changes.removeUnmanaged,
+          keepLocalPrinters: s.changes.keepLocalPrinters === undefined ? (have?.keepLocalPrinters ?? null) : s.changes.keepLocalPrinters,
+        };
+        if (next.removeUnmanaged === null && next.keepLocalPrinters === null)
+          await tx.delete(schema.computerSettings).where(eq(schema.computerSettings.computerGuid, s.computerGuid));
+        else
+          await tx
+            .insert(schema.computerSettings)
+            .values({ computerGuid: s.computerGuid, computerName: s.computer, ...next })
+            .onConflictDoUpdate({ target: schema.computerSettings.computerGuid, set: { ...next, computerName: s.computer, updatedAt: new Date() } });
+        await audit("computer.unmanaged", "computer", s.computerGuid, { computer: s.computer, after: next, source: "bulk import" });
       } else if (s.kind === "unoverride") {
         await tx
           .delete(schema.computerOverrides)
@@ -587,8 +732,21 @@ export function toComputerSpecs(cur: CurrentState): Record<string, unknown>[] {
     const k = o.computerGuid.toLowerCase();
     byGuid.set(k, [...(byGuid.get(k) ?? []), o]);
   }
+  const settings = new Map((cur.computerSettings ?? []).map((c) => [c.computerGuid.toLowerCase(), c]));
+  const unmanagedFields = (guid: string) => {
+    const c = settings.get(guid);
+    return {
+      ...(c?.removeUnmanaged ? { removeUnmanaged: c.removeUnmanaged } : {}),
+      ...(typeof c?.keepLocalPrinters === "boolean" ? { keepLocalPrinters: c.keepLocalPrinters } : {}),
+    };
+  };
   const out: Record<string, unknown>[] = [];
-  for (const rows of byGuid.values()) {
+  for (const [guid, c] of settings) {
+    if (byGuid.has(guid)) continue;
+    const fields = unmanagedFields(guid);
+    if (Object.keys(fields).length) out.push({ name: c.computerName, ...fields });
+  }
+  for (const [guid, rows] of byGuid) {
     const names = (pred: (o: OverrideRow) => boolean) =>
       rows
         .filter(pred)
@@ -598,14 +756,28 @@ export function toComputerSpecs(cur: CurrentState): Record<string, unknown>[] {
     const add = names((o) => o.action === "add" && !o.makeDefault);
     const block = names((o) => o.action === "block");
     const def = names((o) => o.action === "add" && o.makeDefault)[0];
-    out.push({ name: rows[0].computerName, ...(add.length ? { add } : {}), ...(block.length ? { block } : {}), ...(def ? { default: def } : {}) });
+    out.push({ name: rows[0].computerName, ...(add.length ? { add } : {}), ...(block.length ? { block } : {}), ...(def ? { default: def } : {}), ...unmanagedFields(guid) });
   }
   return out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
+/** 0.9.0: OUs that set any unmanaged-printer field, as `ous:` entries, sorted by DN. */
+export function toOuSpecs(cur: CurrentState): Record<string, unknown>[] {
+  return cur.ouSettings
+    .filter((s) => s.removeUnmanaged || Array.isArray(s.unmanagedKeep) || typeof s.keepLocalPrinters === "boolean")
+    .map((s) => ({
+      dn: s.ouDn,
+      ...(s.removeUnmanaged ? { removeUnmanaged: s.removeUnmanaged } : {}),
+      ...(Array.isArray(s.unmanagedKeep) ? { unmanagedKeep: s.unmanagedKeep } : {}),
+      ...(typeof s.keepLocalPrinters === "boolean" ? { keepLocalPrinters: s.keepLocalPrinters } : {}),
+    }))
+    .sort((a, b) => a.dn.localeCompare(b.dn));
+}
+
 export function exportYaml(cur: CurrentState): string {
   const computers = toComputerSpecs(cur);
-  return stringifyYaml({ printers: toSpecs(cur), ...(computers.length ? { computers } : {}) }, { lineWidth: 0 });
+  const ous = toOuSpecs(cur);
+  return stringifyYaml({ printers: toSpecs(cur), ...(ous.length ? { ous } : {}), ...(computers.length ? { computers } : {}) }, { lineWidth: 0 });
 }
 
 const csvField = (v: unknown) => {

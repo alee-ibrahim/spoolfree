@@ -22,6 +22,42 @@ export type LegacyTakeover = "off" | "dry-run" | "on";
 export type DefaultSides = "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
 export const DEFAULT_SIDES: DefaultSides[] = ["auto", "one-sided", "two-sided-long-edge", "two-sided-short-edge"];
 export const LEGACY_TAKEOVER_MODES: LegacyTakeover[] = ["off", "dry-run", "on"];
+/**
+ * "Remove unmanaged printers" (0.9.0): off (agents only report non-Spoolfree queues), dry-run (agents report what they
+ * would remove) or on (agents remove every queue that is not this server's, except the keep list).
+ */
+export type RemoveUnmanaged = "off" | "dry-run" | "on";
+export const REMOVE_UNMANAGED_MODES: RemoveUnmanaged[] = ["off", "dry-run", "on"];
+/** Classes of non-Spoolfree queues in agent reports (0.9.0). */
+export const UNMANAGED_CLASSES = ["legacy-of-managed", "other-network", "print-server-connection", "dead", "virtual", "local-usb"] as const;
+export type UnmanagedClass = (typeof UNMANAGED_CLASSES)[number];
+/** What the agent did with an unmanaged queue: report (mode off), kept (keep list, USB, safety), would-remove, removed, failed. */
+export const UNMANAGED_ACTIONS = ["report", "kept", "would-remove", "removed", "failed"] as const;
+export type UnmanagedAction = (typeof UNMANAGED_ACTIONS)[number];
+
+/** One non-Spoolfree queue on a PC (agent report `unmanaged`, agents 0.9.0+). */
+export interface UnmanagedQueue {
+  queue: string;
+  /** "machine" or "user:DOMAIN\name" (per-user connections, found by the logon task). */
+  scope: string;
+  /** tcpip | wsd | ipp | url | connection | local | usb | virtual | other */
+  portKind: string;
+  port?: string | null;
+  host?: string | null;
+  wsdUuid?: string | null;
+  ippUuid?: string | null;
+  mac?: string | null;
+  driver?: string | null;
+  class: UnmanagedClass;
+  /** The Spoolfree printer (of this PC's manifest) the queue is a legacy copy of. */
+  matchedPrinter?: string | null;
+  /** How the match was made: uuid | mac | serial | alias | address | share. */
+  matchBy?: string | null;
+  action: UnmanagedAction;
+  /** Why it was kept or matched. */
+  reason?: string | null;
+  error?: string | null;
+}
 
 /**
  * How PCs create the queue. "auto" (default): the server decides per printer (src/lib/drivers/auto.ts) and puts the
@@ -117,6 +153,12 @@ export const printers = pgTable(
     deviceUuid: text("device_uuid"),
     macAddresses: jsonb("mac_addresses").$type<string[]>().notNull().default([]),
     identityCheckedAt: timestamp("identity_checked_at", { withTimezone: true }),
+    /**
+     * 0.9.0: further device UUIDs of this printer that agents saw, mostly the WS-Discovery endpoint UUID, which some
+     * printers (Toshiba, Ricoh...) keep apart from the IPP printer-uuid. Learned from agent reports (the port of the
+     * printer's own Spoolfree queue, or a legacy queue matched by MAC or serial); reset on an endpoint change.
+     */
+    extraUuids: jsonb("extra_uuids").$type<string[]>().notNull().default([]),
     /**
      * "auto" (default, decided by the server), "driverless" (Add-Printer -IppURL with the IPP Class Driver) or
      * "vendor": agents install driverPackageId (signed catalog checked) and create a queue with driverName on a
@@ -231,6 +273,21 @@ export const ouSettings = pgTable("ou_settings", {
   blockInheritance: boolean("block_inheritance").notNull().default(false),
   blockedPrinterIds: jsonb("blocked_printer_ids").$type<string[]>().notNull().default([]),
   defaultPrinterId: uuid("default_printer_id").references(() => printers.id, { onDelete: "set null" }),
+  /** 0.9.0 "Remove unmanaged printers" for this OU and below; null = inherit. */
+  removeUnmanaged: text("remove_unmanaged").$type<RemoveUnmanaged>(),
+  /** 0.9.0 keep list (queue-name globs and driver names); null = inherit (the root inherits UNMANAGED_KEEP_DEFAULT). */
+  unmanagedKeep: jsonb("unmanaged_keep").$type<string[]>(),
+  /** 0.9.0 keep USB/local printers; null = inherit (default true). */
+  keepLocalPrinters: boolean("keep_local_printers"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** 0.9.0: per-PC override of the unmanaged-printer settings (null = as the OU says). */
+export const computerSettings = pgTable("computer_settings", {
+  computerGuid: text("computer_guid").primaryKey(),
+  computerName: text("computer_name").notNull(),
+  removeUnmanaged: text("remove_unmanaged").$type<RemoveUnmanaged>(),
+  keepLocalPrinters: boolean("keep_local_printers"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -271,7 +328,11 @@ export interface AgentReport {
   /** Queues created with the TCP/IP port fallback because Add-Printer -IppURL failed (agents 0.4.6+). */
   fallbacks?: { printer: string; method: string; reason?: string }[];
   /** The agent's queues with their driver and port (agents 0.7+). */
-  queues?: { name: string; driver?: string | null; port?: string | null; method?: string | null; vendorFallback?: string | null }[];
+  queues?: { name: string; driver?: string | null; port?: string | null; method?: string | null; vendorFallback?: string | null; uuids?: string[] }[];
+  /** Non-Spoolfree queues on the PC (agents 0.9.0+), with what "Remove unmanaged printers" did with each. */
+  unmanaged?: UnmanagedQueue[];
+  /** The unmanaged-printer settings the agent applied (0.9.0+), and why nothing was removed when that applies. */
+  unmanagedPolicy?: { mode: RemoveUnmanaged; keepLocal: boolean; keep: string[]; blocked?: string | null };
   /** Vendor driver results (agents 0.7+), see AGENT_DRIVER_STATES. */
   drivers?: { printer: string; status: (typeof AGENT_DRIVER_STATES)[number]; driverName?: string | null; message?: string | null }[];
   /** Agents 0.8+: the command poll task (minutes; 0 = off), commands run in this sync, and a task error. */

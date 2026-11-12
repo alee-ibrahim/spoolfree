@@ -2,6 +2,7 @@ import { isAgentOutdated } from "../agent-bundle";
 import type { AgentReport } from "../db/schema";
 import { isUnder, parentDn } from "../dn";
 import { containerOptions } from "./directory";
+import { matchesUnmanagedFilter, UNMANAGED_FILTERS, type UnmanagedFilter } from "../unmanaged";
 import { countActive, matchesWords, one, oneOf, words, type SearchParams } from "./params";
 
 /**
@@ -21,6 +22,8 @@ export interface AgentFilters {
   state: AgentState | null;
   version: string | null;
   os: string | null;
+  /** 0.9.0: PCs with unmanaged printers (any, of a class) or with dry-run / removed / failed entries. */
+  unmanaged: UnmanagedFilter | null;
   sort: AgentSort;
 }
 
@@ -31,6 +34,7 @@ export function parseAgentFilters(sp: SearchParams): AgentFilters {
     state: oneOf(sp, "state", AGENT_STATES),
     version: one(sp, "version", 32),
     os: one(sp, "os", 64),
+    unmanaged: oneOf(sp, "unmanaged", UNMANAGED_FILTERS),
     sort: oneOf(sp, "sort", AGENT_SORTS) ?? "seen-desc",
   };
 }
@@ -84,6 +88,7 @@ export function filterAgents<T extends AgentFilterRow>(rows: T[], f: AgentFilter
     if (f.state && !agentStates(a, ctx).has(f.state)) return false;
     if (f.version && (a.lastReport?.agentVersion ?? "") !== f.version) return false;
     if (f.os && (a.lastReport?.osVersion ?? "") !== f.os) return false;
+    if (f.unmanaged && (a.revokedAt || !matchesUnmanagedFilter(a.lastReport, f.unmanaged))) return false;
     return true;
   });
   const seen = (a: AgentFilterRow) => a.lastReportAt?.getTime() ?? 0;

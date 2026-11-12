@@ -8,6 +8,7 @@ import type { DriverDecision, PackageForMatch } from "./drivers/auto";
 import type { DriverInf } from "./db/schema";
 import { keyId, publicKeyRaw, randomToken, signBytes } from "./crypto/signing";
 import type { SignedCommand } from "./test-print/command";
+import { serialsFromDeviceId, type ManifestUnmanaged } from "./unmanaged";
 
 export const MANIFEST_SCHEMA = 1;
 
@@ -27,6 +28,10 @@ export interface ManifestPrinterInput {
   defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
   deviceUuid?: string | null;
   macAddresses?: string[];
+  /** 0.9.0: further device UUIDs learned from agent reports (WSD endpoint UUIDs). */
+  extraUuids?: string[];
+  /** IEEE 1284 device ID (serial numbers for legacy matching, 0.9.0). */
+  deviceId?: string | null;
   /** The resolved driver (src/lib/drivers/auto.ts); absent or driverless = IPP Class Driver. */
   driver?: DriverDecision | null;
 }
@@ -73,6 +78,16 @@ export interface ManifestPrinter {
    */
   deviceUuid?: string | null;
   macAddresses?: string[];
+  /**
+   * Agents 0.9.0+: every device UUID of the printer: the IPP printer-uuid and the WSD endpoint UUIDs agents reported
+   * (some printers use different ones). A WSD/IPP port that stores any of them is a queue for this device.
+   */
+  deviceUuids?: string[];
+  /**
+   * Agents 0.9.0+: serial numbers (from the IEEE 1284 device ID), upper-case. A WSD device or queue whose name
+   * contains one as a whole word is a queue for this device. Empty unless takeover is on or dry-run.
+   */
+  serialNumbers?: string[];
   /**
    * Old host names of the device (agents 0.5+): a legacy TCP/IP port whose host equals one of them (case-insensitive,
    * ".local" optional) is a queue for this device. Lower-case; empty unless takeover is on or dry-run.
@@ -134,6 +149,12 @@ export interface ManifestPayload {
   commands?: SignedCommand[];
   /** Agents 0.8+: how often to poll /api/agent/commands (minutes; 0 = only at sync). */
   commandPollMinutes?: number;
+  /**
+   * Agents 0.9.0+: "Remove unmanaged printers" for this PC (OU setting, inherited, or the per-PC override): mode
+   * off | dry-run | on, the keep list (queue-name globs and/or driver names) and whether USB/local printers stay.
+   * Agents always report non-Spoolfree queues; they remove them only in mode on. Older agents ignore it.
+   */
+  unmanaged?: ManifestUnmanaged;
 }
 
 export interface SignedManifest {
@@ -161,11 +182,14 @@ export function buildManifest(args: {
   analytics?: ManifestAnalytics;
   commands?: SignedCommand[];
   commandPollMinutes?: number;
+  unmanaged?: ManifestUnmanaged;
 }): ManifestPayload {
   const list: ManifestPrinter[] = [];
   for (const r of args.resolution.printers) {
     const p = args.printers.get(r.printerId);
     if (!p) continue;
+    const takeover = !!p.legacyTakeover && p.legacyTakeover !== "off";
+    const uuids = [normalizeUuid(p.deviceUuid ?? null), ...(p.extraUuids ?? []).map((u) => normalizeUuid(u))].filter((u): u is string => u !== null);
     list.push({
       id: p.id,
       name: p.name,
@@ -180,7 +204,9 @@ export function buildManifest(args: {
       deviceUuid: normalizeUuid(p.deviceUuid ?? null),
       macAddresses: [...new Set((p.macAddresses ?? []).map((m) => normalizeMac(m)).filter((m): m is string => m !== null))].sort(),
       legacy: { mode: p.legacyTakeover ?? "off", shares: p.legacyTakeover && p.legacyTakeover !== "off" ? (p.legacyShares ?? []) : [] },
-      legacyAliases: p.legacyTakeover && p.legacyTakeover !== "off" ? manifestAliases(p.legacyAliases) : [],
+      deviceUuids: [...new Set(uuids)],
+      legacyAliases: takeover ? manifestAliases(p.legacyAliases) : [],
+      serialNumbers: takeover ? serialsFromDeviceId(p.deviceId) : [],
       ...manifestDriver(p.driver ?? null),
     });
   }
@@ -199,6 +225,7 @@ export function buildManifest(args: {
     analytics: args.analytics ?? { enabled: false, collectDocumentNames: false },
     commands: args.commands ?? [],
     commandPollMinutes: args.commandPollMinutes ?? 0,
+    unmanaged: args.unmanaged ?? { mode: "off", keep: [], keepLocal: true },
     ...(args.agentUpdate
       ? {
           agentVersion: args.agentUpdate.version,

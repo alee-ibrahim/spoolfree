@@ -10,9 +10,22 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { shortDn } from "@/lib/format";
-import { assignPrinter, setBlockInheritance, setOuDefault, setPrinterBlocked, unassignPrinter, type ActionResult } from "../actions";
+import { assignPrinter, setBlockInheritance, setOuDefault, setOuUnmanaged, setPrinterBlocked, unassignPrinter, type ActionResult } from "../actions";
+
+type Mode = "off" | "dry-run" | "on";
+
+export interface OuUnmanagedProps {
+  /** This OU's own values (null = inherit). */
+  own: { mode: Mode | null; keep: string[] | null; keepLocal: boolean | null };
+  /** What it inherits, and from where. */
+  inherited: { mode: Mode; modeFrom: string; keep: string[]; keepFrom: string; keepLocal: boolean; keepLocalFrom: string };
+}
+
+const MODE_LABEL: Record<Mode, string> = { off: "Off (report only)", "dry-run": "Dry-run", on: "On (remove)" };
+const INHERIT = "__inherit__";
 
 interface Props {
   ou: { dn: string; name: string; kind: string; description: string | null; isRoot: boolean };
@@ -27,6 +40,7 @@ interface Props {
   effectiveDefault: string | null;
   computers: { name: string; guid: string }[];
   computersBelow: number;
+  unmanaged: OuUnmanagedProps;
 }
 
 const NONE = "__none__";
@@ -97,6 +111,8 @@ export function OuPanel(p: Props) {
           </Field>
         </CardContent>
       </Card>
+
+      <UnmanagedCard ouDn={p.ou.dn} u={p.unmanaged} />
 
       <Card>
         <CardHeader>
@@ -226,5 +242,138 @@ export function OuPanel(p: Props) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/** "Remove unmanaged printers" for this OU and below (0.9.0): mode, keep list and "keep USB/local", each inheritable. */
+function UnmanagedCard({ ouDn, u }: { ouDn: string; u: OuUnmanagedProps }) {
+  const [pending, start] = useTransition();
+  const ownKeep = u.own.keep !== null;
+  const [draft, setDraft] = useState((u.own.keep ?? u.inherited.keep).join("\n"));
+  const run = (patch: Parameters<typeof setOuUnmanaged>[1], ok: string) =>
+    start(async () => {
+      const r = await setOuUnmanaged(ouDn, patch);
+      if (!r.ok) toast.error(r.error);
+      else toast.success(ok);
+    });
+  const effectiveMode = u.own.mode ?? u.inherited.mode;
+  const dirty = ownKeep && draft.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).join("\n") !== (u.own.keep ?? []).join("\n");
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Unmanaged printers</CardTitle>
+        <CardDescription>
+          Printers on PCs in this OU and below that are not Spoolfree queues: legacy copies, other departments&apos; printers, print-server connections,
+          virtual printers. Agents always report them on the Agents page.
+        </CardDescription>
+        <div className="flex flex-wrap gap-2 pt-1">
+          <Badge variant={effectiveMode === "on" ? "destructive" : "outline"}>Here: {MODE_LABEL[effectiveMode]}</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <Field orientation="responsive">
+          <FieldContent>
+            <FieldLabel htmlFor="ou-unmanaged-mode">Remove unmanaged printers</FieldLabel>
+            <FieldDescription>
+              On removes every queue that is not a Spoolfree queue, except the keep list. Run dry-run first and check &quot;would remove&quot; on the Agents
+              page. Nothing is removed on a PC that has no Spoolfree printer yet.
+            </FieldDescription>
+          </FieldContent>
+          <Select
+            value={u.own.mode ?? INHERIT}
+            disabled={pending}
+            onValueChange={(v) => run({ removeUnmanaged: v === INHERIT ? null : (v as Mode) }, "Saved")}
+          >
+            <SelectTrigger id="ou-unmanaged-mode" className="w-full sm:w-64">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={INHERIT}>
+                Inherit ({MODE_LABEL[u.inherited.mode]} from {u.inherited.modeFrom})
+              </SelectItem>
+              <SelectItem value="off">{MODE_LABEL.off}</SelectItem>
+              <SelectItem value="dry-run">{MODE_LABEL["dry-run"]}</SelectItem>
+              <SelectItem value="on">{MODE_LABEL.on}</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="ou-unmanaged-own-keep">Own keep list</FieldLabel>
+            <FieldDescription>
+              Off: inherits the keep list from {u.inherited.keepFrom}. Entries match queue names (wildcards * and ?) or driver names.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="ou-unmanaged-own-keep"
+            checked={ownKeep}
+            disabled={pending}
+            onCheckedChange={(v) => {
+              if (v) {
+                setDraft(u.inherited.keep.join("\n"));
+                run({ unmanagedKeep: u.inherited.keep }, "This OU now has its own keep list");
+              } else run({ unmanagedKeep: null }, "Keep list inherited again");
+            }}
+          />
+        </Field>
+        {ownKeep ? (
+          <Field>
+            <FieldLabel htmlFor="ou-unmanaged-keep">Keep list</FieldLabel>
+            <Textarea
+              id="ou-unmanaged-keep"
+              rows={4}
+              value={draft}
+              disabled={pending}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder={"Microsoft Print to PDF\n\\\\plotserver\\*"}
+              className="font-mono text-xs"
+            />
+            <FieldDescription>One entry per line. An empty list keeps nothing (USB/local printers follow the setting below).</FieldDescription>
+            <div>
+              <Button size="sm" disabled={pending || !dirty} onClick={() => run({ unmanagedKeep: draft }, "Keep list saved")}>
+                Save keep list
+              </Button>
+            </div>
+          </Field>
+        ) : (
+          <div className="flex flex-wrap gap-1" aria-label="Inherited keep list">
+            {u.inherited.keep.length === 0 ? (
+              <span className="text-sm text-muted-foreground">The inherited keep list is empty.</span>
+            ) : (
+              u.inherited.keep.map((k) => (
+                <Badge key={k} variant="secondary" className="font-mono">
+                  {k}
+                </Badge>
+              ))
+            )}
+          </div>
+        )}
+
+        <Field orientation="responsive">
+          <FieldContent>
+            <FieldLabel htmlFor="ou-unmanaged-local">Keep USB/local printers</FieldLabel>
+            <FieldDescription>USB, parallel and serial printers stay unless this is set to remove.</FieldDescription>
+          </FieldContent>
+          <Select
+            value={u.own.keepLocal === null ? INHERIT : u.own.keepLocal ? "keep" : "remove"}
+            disabled={pending}
+            onValueChange={(v) => run({ keepLocalPrinters: v === INHERIT ? null : v === "keep" }, "Saved")}
+          >
+            <SelectTrigger id="ou-unmanaged-local" className="w-full sm:w-64">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={INHERIT}>
+                Inherit ({u.inherited.keepLocal ? "keep" : "remove"} from {u.inherited.keepLocalFrom})
+              </SelectItem>
+              <SelectItem value="keep">Keep</SelectItem>
+              <SelectItem value="remove">Remove</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+      </CardContent>
+    </Card>
   );
 }

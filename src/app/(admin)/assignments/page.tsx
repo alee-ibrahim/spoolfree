@@ -4,10 +4,11 @@ import { ListFilters, type FilterField } from "@/components/app/list-filters";
 import { PageHeader } from "@/components/app/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ancestorChain, isUnder, normalizeDn, parentDn } from "@/lib/dn";
+import { shortDn } from "@/lib/format";
 import { baseDn, directory } from "@/lib/directory";
 import { buildOuTree, flattenTree } from "@/lib/ou-tree";
 import { resolvePrinters } from "@/lib/resolve";
-import { listPrinters, loadPolicy } from "@/lib/service";
+import { listPrinters, loadPolicy, loadUnmanagedSettings, unmanagedPolicyFor } from "@/lib/service";
 import { requireAdmin } from "@/lib/session";
 import { activeOuTreeFilters, matchOuTree, parseOuTreeFilters, visibleOuTree } from "@/lib/list-filters/directory";
 import { toQuery } from "@/lib/list-filters/params";
@@ -37,7 +38,7 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
       </>
     );
   }
-  const [policy, printers] = await Promise.all([loadPolicy(), listPrinters()]);
+  const [policy, printers, unmanagedSettings] = await Promise.all([loadPolicy(), listPrinters(), loadUnmanagedSettings()]);
   const flat = flattenTree(buildOuTree(containers));
   const selectedDn = typeof params.ou === "string" ? params.ou : (flat[1]?.dn ?? flat[0]?.dn);
   const selected = flat.find((n) => normalizeDn(n.dn) === normalizeDn(selectedDn ?? "")) ?? flat[0];
@@ -55,6 +56,14 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
   const own = policy.assignments.filter((a) => normalizeDn(a.ouDn) === normalizeDn(sel)).map((a) => a.printerId);
   const inOu = computers.filter((c) => normalizeDn(parentDn(c.dn) ?? "") === normalizeDn(sel));
   const below = computers.filter((c) => isUnder(c.dn, sel)).length;
+  // "Remove unmanaged printers" (0.9.0): what this OU would inherit (from its parent) and what it sets itself.
+  // The root inherits only the server defaults.
+  const unmanagedInherited =
+    parent && inherited
+      ? unmanagedPolicyFor(unmanagedSettings, { dn: `CN=__probe__,${parent}` })
+      : unmanagedPolicyFor({ ouSettings: [], computerSettings: [] }, { dn: `CN=__probe__,${sel}` });
+  const ownUnmanaged = unmanagedSettings.ouSettings.find((s) => normalizeDn(s.ouDn) === normalizeDn(sel));
+  const fromLabel = (src: string) => (src === "default" ? "server default" : shortDn(src) || "Domain root");
 
   // Tree filters (URL params, applied here): name search, only OUs with their own printers, OUs that get printer X.
   const f = parseOuTreeFilters(params);
@@ -119,6 +128,21 @@ export default async function AssignmentsPage({ searchParams }: PageProps<"/assi
           effectiveDefault={effective.defaultPrinterId}
           computers={inOu.map((c) => ({ name: c.name, guid: c.objectGuid }))}
           computersBelow={below}
+          unmanaged={{
+            own: {
+              mode: ownUnmanaged?.removeUnmanaged ?? null,
+              keep: ownUnmanaged?.unmanagedKeep ?? null,
+              keepLocal: ownUnmanaged?.keepLocalPrinters ?? null,
+            },
+            inherited: {
+              mode: unmanagedInherited.mode,
+              modeFrom: fromLabel(unmanagedInherited.from.mode),
+              keep: unmanagedInherited.keep,
+              keepFrom: fromLabel(unmanagedInherited.from.keep),
+              keepLocal: unmanagedInherited.keepLocal,
+              keepLocalFrom: fromLabel(unmanagedInherited.from.keepLocal),
+            },
+          }}
         />
       </div>
     </>

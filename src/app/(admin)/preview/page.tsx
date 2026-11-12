@@ -9,10 +9,12 @@ import { directory } from "@/lib/directory";
 import { shortDn } from "@/lib/format";
 import { buildManifest } from "@/lib/manifest";
 import { resolvePrinters } from "@/lib/resolve";
-import { listPrinters, loadPackagesForMatch, loadPolicy, toManifestInput } from "@/lib/service";
+import { listPrinters, loadPackagesForMatch, loadPolicy, loadUnmanagedSettings, toManifestInput, unmanagedPolicyFor } from "@/lib/service";
+import { UnmanagedQueueList } from "@/components/app/unmanaged-queues";
+import { toManifestUnmanaged } from "@/lib/unmanaged";
 import { requireAdmin } from "@/lib/session";
 import { eq } from "drizzle-orm";
-import { ComputerPicker, OverridesEditor } from "./preview-client";
+import { ComputerPicker, ComputerUnmanagedEditor, OverridesEditor } from "./preview-client";
 
 export const metadata = { title: "Preview" };
 
@@ -37,7 +39,7 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
   }
   const guid = typeof params.computer === "string" ? params.computer.toLowerCase() : null;
   const computer = computers.find((c) => c.objectGuid === guid) ?? null;
-  const [policy, printers, packages] = await Promise.all([loadPolicy(), listPrinters(), loadPackagesForMatch()]);
+  const [policy, printers, packages, unmanagedSettings] = await Promise.all([loadPolicy(), listPrinters(), loadPackagesForMatch(), loadUnmanagedSettings()]);
   const byId = new Map(printers.map((p) => [p.id, p]));
   const name = (id: string) => byId.get(id)?.name ?? "(deleted)";
 
@@ -45,6 +47,13 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
   const overrides = computer
     ? await db().select().from(schema.computerOverrides).where(eq(schema.computerOverrides.computerGuid, computer.objectGuid))
     : [];
+  // "Remove unmanaged printers" (0.9.0): the PC's effective policy, what its OUs say (without the PC override), its
+  // own override and the unmanaged queues its agent reported last.
+  const unmanaged = computer ? unmanagedPolicyFor(unmanagedSettings, computer) : null;
+  const unmanagedOu = computer ? unmanagedPolicyFor({ ...unmanagedSettings, computerSettings: [] }, computer) : null;
+  const ownUnmanaged = computer ? unmanagedSettings.computerSettings.find((c) => c.computerGuid.toLowerCase() === computer.objectGuid) : undefined;
+  const [agent] = computer ? await db().select().from(schema.agents).where(eq(schema.agents.objectGuid, computer.objectGuid)) : [];
+  const from = (src: string) => (src === "default" ? "server default" : src === "computer" ? "this PC" : shortDn(src) || "Domain root");
   const manifest =
     computer && resolution
       ? buildManifest({
@@ -54,6 +63,7 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
           now: new Date(),
           ttlHours: 24,
           serial: "preview",
+          unmanaged: unmanaged ? toManifestUnmanaged(unmanaged) : undefined,
         })
       : null;
 
@@ -163,6 +173,67 @@ export default async function PreviewPage({ searchParams }: PageProps<"/preview"
               printers={printers.map((p) => ({ id: p.id, name: p.name }))}
               overrides={overrides.map((o) => ({ id: o.id, printerId: o.printerId, action: o.action, makeDefault: o.makeDefault }))}
             />
+
+            {unmanaged && unmanagedOu && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Unmanaged printers</CardTitle>
+                  <CardDescription>
+                    Queues on {computer.name} that are not Spoolfree queues. The agent always reports them; it removes them only when the setting is on,
+                    except the keep list{unmanaged.keepLocal ? " and USB/local printers" : ""}.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-4">
+                  <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-[auto_1fr]">
+                    <dt className="text-muted-foreground">Setting</dt>
+                    <dd>
+                      <Badge variant={unmanaged.mode === "on" ? "destructive" : "outline"}>{unmanaged.mode}</Badge>
+                      <span className="ml-2 text-xs text-muted-foreground">from {from(unmanaged.from.mode)}</span>
+                    </dd>
+                    <dt className="text-muted-foreground">Keep list</dt>
+                    <dd className="flex flex-wrap items-center gap-1">
+                      {unmanaged.keep.length === 0 ? (
+                        <span className="text-muted-foreground">empty</span>
+                      ) : (
+                        unmanaged.keep.map((k) => (
+                          <Badge key={k} variant="secondary" className="font-mono">
+                            {k}
+                          </Badge>
+                        ))
+                      )}
+                      <span className="text-xs text-muted-foreground">from {from(unmanaged.from.keep)}</span>
+                    </dd>
+                    <dt className="text-muted-foreground">USB/local printers</dt>
+                    <dd>
+                      {unmanaged.keepLocal ? "kept" : "removed"}
+                      <span className="ml-2 text-xs text-muted-foreground">from {from(unmanaged.from.keepLocal)}</span>
+                    </dd>
+                  </dl>
+                  <ComputerUnmanagedEditor
+                    computer={{ guid: computer.objectGuid, name: computer.name }}
+                    own={{ mode: ownUnmanaged?.removeUnmanaged ?? null, keepLocal: ownUnmanaged?.keepLocalPrinters ?? null }}
+                    ou={{ mode: unmanagedOu.mode, modeFrom: from(unmanagedOu.from.mode), keepLocal: unmanagedOu.keepLocal, keepLocalFrom: from(unmanagedOu.from.keepLocal) }}
+                  />
+                  <div className="flex flex-col gap-2">
+                    <div className="text-sm font-medium">Last agent report</div>
+                    {!agent?.lastReport ? (
+                      <p className="text-sm text-muted-foreground">No agent report from this PC yet.</p>
+                    ) : !Array.isArray(agent.lastReport.unmanaged) ? (
+                      <p className="text-sm text-muted-foreground">The agent does not report unmanaged printers yet (needs agent 0.9.0; it updates itself).</p>
+                    ) : agent.lastReport.unmanaged.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No unmanaged printers.</p>
+                    ) : (
+                      <>
+                        {agent.lastReport.unmanagedPolicy?.blocked && (
+                          <p className="text-xs text-muted-foreground">Nothing removed: {agent.lastReport.unmanagedPolicy.blocked}</p>
+                        )}
+                        <UnmanagedQueueList items={agent.lastReport.unmanaged} />
+                      </>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader>

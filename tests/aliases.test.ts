@@ -65,6 +65,7 @@ describe("bulk CLI: aliases and IPP path", () => {
     speedSamples: [],
     speedCheckedAt: null,
     macAddresses: [],
+    extraUuids: [],
     identityCheckedAt: null,
     lastTestAt: null,
     lastTest: null,
