@@ -21,6 +21,10 @@ import { Item, ItemActions, ItemContent, ItemGroup, ItemTitle } from "@/componen
 import { activeAgentFilters, agentFacetOptions, agentOuOptions, filterAgents, parseAgentFilters, type AgentFilters } from "@/lib/list-filters/agents";
 import { RevokeButton } from "./revoke-button";
 import { AgentTestPrintButton } from "@/components/app/test-print-dialog";
+import { UnmanagedSummaryToggle } from "@/components/app/unmanaged-queues";
+import Link from "next/link";
+import { UNMANAGED_CLASSES } from "@/lib/db/schema";
+import { UNMANAGED_CLASS_LABELS, unmanagedSummary, type UnmanagedFilter } from "@/lib/unmanaged";
 
 export const metadata = { title: "Agents" };
 
@@ -60,10 +64,24 @@ export default async function AgentsPage({ searchParams }: PageProps<"/agents">)
     },
     { kind: "select", key: "ou", label: "OU", allLabel: "All OUs", searchable: true, options: agentOuOptions(all).map((o) => ({ value: o, label: shortDn(o) || o })) },
     { kind: "select", key: "version", label: "Agent version", allLabel: "Any version", searchable: true, options: facets.versions.map((v) => ({ value: v, label: `v${v}` })) },
+    {
+      kind: "select",
+      key: "unmanaged",
+      label: "Unmanaged printers",
+      allLabel: "Any",
+      options: [
+        { value: "any", label: "Has unmanaged printers" },
+        ...UNMANAGED_CLASSES.map((c) => ({ value: c, label: UNMANAGED_CLASS_LABELS[c] })),
+        { value: "would-remove", label: "Dry-run: would remove" },
+        { value: "removed", label: "Removed some" },
+        { value: "failed", label: "Removal failed" },
+      ],
+    },
     { kind: "select", key: "os", label: "OS build", allLabel: "Any OS build", searchable: true, options: facets.os.map((v) => ({ value: v, label: v })) },
     { kind: "sort", key: "sort", label: "Sort", defaultValue: "seen-desc", options: [{ value: "seen-desc", label: "Last seen (newest)" }, { value: "seen-asc", label: "Last seen (oldest)" }, { value: "name", label: "Computer name" }] },
   ];
   const filtered = activeAgentFilters(f) > 0 || !!f.q;
+  const unmanaged = unmanagedSummary(all);
 
   return (
     <>
@@ -88,6 +106,7 @@ export default async function AgentsPage({ searchParams }: PageProps<"/agents">)
             </AlertDescription>
           </Alert>
         )}
+        {unmanaged.reportingPcs > 0 && <UnmanagedFleetCard s={unmanaged} active={f.unmanaged} />}
         {all.length > 0 && (
           <Suspense>
             <ListFilters
@@ -341,6 +360,7 @@ function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) 
                             ))}
                           </div>
                         )}
+                        {!a.revokedAt && <UnmanagedSummaryToggle report={r} />}
       </>
     ),
     version: (
@@ -385,4 +405,41 @@ function agentParts(a: AgentRow, { staleBefore, latest, selfUpdate }: AgentCtx) 
       </>
     ),
   };
+}
+
+/** Fleet summary of "Remove unmanaged printers" (agents 0.9.0+): every count links to the matching filter. */
+function UnmanagedFleetCard({ s, active }: { s: ReturnType<typeof unmanagedSummary>; active: UnmanagedFilter | null }) {
+  const link = (value: UnmanagedFilter, label: string, count: number, detail?: string, tone?: string) => (
+    <Link
+      key={value}
+      href={`/agents?unmanaged=${value}`}
+      aria-current={active === value ? "true" : undefined}
+      className={`flex min-h-11 flex-col justify-center rounded-md border px-3 py-1.5 text-sm transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${active === value ? "border-primary bg-muted" : ""}`}
+    >
+      <span className={`font-medium tabular-nums ${tone ?? ""}`}>
+        {count} PC{count === 1 ? "" : "s"}
+        {detail ? <span className="font-normal text-muted-foreground"> · {detail}</span> : null}
+      </span>
+      <span className="text-xs text-muted-foreground">{label}</span>
+    </Link>
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Unmanaged printers</CardTitle>
+        <CardDescription>
+          {s.pcs} of {s.reportingPcs} reporting PC{s.reportingPcs === 1 ? "" : "s"} have printers that are not Spoolfree queues. Set &quot;Remove unmanaged printers&quot; per OU on Assignments.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {link("any", "With unmanaged printers", s.pcs)}
+        {UNMANAGED_CLASSES.filter((c) => s.byClass[c].pcs > 0).map((c) =>
+          link(c, UNMANAGED_CLASS_LABELS[c], s.byClass[c].pcs, `${s.byClass[c].queues} queue${s.byClass[c].queues === 1 ? "" : "s"}`),
+        )}
+        {s.wouldRemovePcs > 0 && link("would-remove", "Dry-run: would remove", s.wouldRemovePcs, undefined, "text-amber-700 dark:text-amber-500")}
+        {s.removedPcs > 0 && link("removed", "Removed in the last sync", s.removedPcs)}
+        {s.failedPcs > 0 && link("failed", "Removal failed", s.failedPcs, undefined, "text-destructive")}
+      </CardContent>
+    </Card>
+  );
 }

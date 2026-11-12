@@ -8,10 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
-import { addOverride, removeOverride } from "../actions";
+import { addOverride, removeOverride, setComputerUnmanaged } from "../actions";
 
 export function ComputerPicker({
   computers,
@@ -139,5 +140,80 @@ export function OverridesEditor({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+type UnmanagedMode = "off" | "dry-run" | "on";
+const MODE_LABEL: Record<UnmanagedMode, string> = { off: "Off (report only)", "dry-run": "Dry-run", on: "On (remove)" };
+const AS_OU = "__ou__";
+
+/**
+ * Per-PC override of "Remove unmanaged printers" and "keep USB/local printers" (0.9.0). The keep list is set per OU.
+ */
+export function ComputerUnmanagedEditor({
+  computer,
+  own,
+  ou,
+}: {
+  computer: { guid: string; name: string };
+  /** This PC's own values (null = as the OU says). */
+  own: { mode: UnmanagedMode | null; keepLocal: boolean | null };
+  /** What the OUs say, and from where. */
+  ou: { mode: UnmanagedMode; modeFrom: string; keepLocal: boolean; keepLocalFrom: string };
+}) {
+  const [pending, start] = useTransition();
+  const router = useRouter();
+  const run = (patch: { removeUnmanaged?: UnmanagedMode | null; keepLocalPrinters?: boolean | null }) =>
+    start(async () => {
+      const r = await setComputerUnmanaged({ computerGuid: computer.guid, ...patch });
+      if (!r.ok) toast.error(r.error);
+      else {
+        toast.success(`Saved for ${computer.name}`);
+        router.refresh();
+      }
+    });
+  return (
+    <div className="flex flex-col gap-4">
+      <Field orientation="responsive">
+        <FieldContent>
+          <FieldLabel htmlFor="pc-unmanaged-mode">Remove unmanaged printers on this PC</FieldLabel>
+          <FieldDescription>Overrides the OU setting for {computer.name} only.</FieldDescription>
+        </FieldContent>
+        <Select value={own.mode ?? AS_OU} disabled={pending} onValueChange={(v) => run({ removeUnmanaged: v === AS_OU ? null : (v as UnmanagedMode) })}>
+          <SelectTrigger id="pc-unmanaged-mode" className="w-full sm:w-64">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={AS_OU}>
+              As the OU says ({MODE_LABEL[ou.mode]}, {ou.modeFrom})
+            </SelectItem>
+            <SelectItem value="off">{MODE_LABEL.off}</SelectItem>
+            <SelectItem value="dry-run">{MODE_LABEL["dry-run"]}</SelectItem>
+            <SelectItem value="on">{MODE_LABEL.on}</SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+      <Field orientation="responsive">
+        <FieldContent>
+          <FieldLabel htmlFor="pc-unmanaged-local">Keep USB/local printers on this PC</FieldLabel>
+        </FieldContent>
+        <Select
+          value={own.keepLocal === null ? AS_OU : own.keepLocal ? "keep" : "remove"}
+          disabled={pending}
+          onValueChange={(v) => run({ keepLocalPrinters: v === AS_OU ? null : v === "keep" })}
+        >
+          <SelectTrigger id="pc-unmanaged-local" className="w-full sm:w-64">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={AS_OU}>
+              As the OU says ({ou.keepLocal ? "keep" : "remove"}, {ou.keepLocalFrom})
+            </SelectItem>
+            <SelectItem value="keep">Keep</SelectItem>
+            <SelectItem value="remove">Remove</SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+    </div>
   );
 }

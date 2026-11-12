@@ -41,9 +41,11 @@ export async function refreshIdentity(
     snmpMacs = null;
   }
   const next = mergeIdentity({ deviceUuid: p.deviceUuid, macAddresses: p.macAddresses }, { uuid, model, snmpMacs });
+  // 0.9.0: another device answers at this address: the WSD UUIDs agents reported for the old one are dropped too.
+  const deviceChanged = !!p.deviceUuid && next.deviceUuid !== p.deviceUuid;
   await db()
     .update(schema.printers)
-    .set({ deviceUuid: next.deviceUuid, macAddresses: next.macAddresses, identityCheckedAt: new Date(), ...(deviceId ? { deviceId } : {}) })
+    .set({ deviceUuid: next.deviceUuid, macAddresses: next.macAddresses, identityCheckedAt: new Date(), ...(deviceId ? { deviceId } : {}), ...(deviceChanged ? { extraUuids: [] } : {}) })
     .where(eq(schema.printers.id, p.id));
   return next;
 }

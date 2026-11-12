@@ -555,6 +555,64 @@ if ($PSCmdlet.ShouldProcess('default printer', 'set')) {
     Set-SpoolfreeDefaultPrinter -Name ([string]$manifest.defaultPrinter)
 }
 
+# Unmanaged printers (0.9.0): every non-Spoolfree queue is reported with a class; manifest.unmanaged decides what is
+# removed (off | dry-run | on, keep list, keep USB/local). Runs after the Spoolfree queues were created, so the safety
+# rule (nothing is removed on a PC without a Spoolfree queue) sees this sync's result. Per-user \\server\share
+# connections are left to the logon task, which gets the rules through the published takeover state.
+$unmanagedSettings = Get-SpoolfreeUnmanagedSettings $manifest
+$unmanagedEntries = New-Object System.Collections.Generic.List[object]
+$unmanagedPolicy = [ordered]@{ mode = $unmanagedSettings.Mode; keepLocal = $unmanagedSettings.KeepLocal; keep = @($unmanagedSettings.Keep); blocked = $null }
+$spoolfreeQueues = @()
+$portsAfter = $null
+try {
+    $wanted = @{}
+    foreach ($p in @($manifest.printers)) { $wanted[([string]$p.name).ToLowerInvariant()] = $true }
+    $queuesAfter = Get-SpoolfreeQueueInventory
+    $portsAfter = Get-SpoolfreePortInventory
+    $existingNames = @{}
+    foreach ($q in $queuesAfter) { $existingNames[$q.Name.ToLowerInvariant()] = $true }
+    $installedAfter = @(Get-SpoolfreeInstalled | ForEach-Object { [string]$_.Name })
+    $spoolfreeQueues = @($installedAfter | Where-Object { $wanted.ContainsKey($_.ToLowerInvariant()) -and $existingNames.ContainsKey($_.ToLowerInvariant()) })
+    $printerSets = @(foreach ($p in @($manifest.printers)) { [pscustomobject]@{ Printer = $p; Addresses = @(Get-SpoolfreePrinterAddressSet -Printer $p) } })
+    $found = @(Get-SpoolfreeUnmanagedQueues -Queues $queuesAfter -Ports $portsAfter -Printers $printerSets -LegacyServers $legacyServers -Installed $installedAfter -ServerId $serverId -ServerPrinterIds $serverPrinterIds)
+    $decision = Get-SpoolfreeUnmanagedPlan -Entries $found -Mode $unmanagedSettings.Mode -Keep $unmanagedSettings.Keep -KeepLocal $unmanagedSettings.KeepLocal -SpoolfreeCount $spoolfreeQueues.Count
+    $unmanagedPolicy.blocked = $decision.Blocked
+    if ($decision.Blocked) { Write-Log "Unmanaged printers: $($decision.Blocked)." }
+    $unmanagedRemoved = @{}
+    foreach ($e in @($decision.Entries)) {
+        if ($e['action'] -eq 'remove') {
+            if ($PSCmdlet.ShouldProcess([string]$e['queue'], 'Remove unmanaged printer')) {
+                try {
+                    Remove-SpoolfreeQueue -Name ([string]$e['queue'])
+                    $e['action'] = 'removed'
+                    $replacement = Get-SpoolfreeUnmanagedReplacement -Entry $e -DefaultPrinter ([string]$manifest.defaultPrinter) -Spoolfree $spoolfreeQueues
+                    if ($replacement) { $unmanagedRemoved[[string]$e['queue']] = $replacement }
+                    Write-Log "Unmanaged printer '$($e['queue'])' removed ($($e['class'])$(if ($e['reason']) { ", $($e['reason'])" }))."
+                } catch {
+                    $e['action'] = 'failed'
+                    $e['error'] = $_.Exception.Message
+                    Write-Log "Unmanaged printer '$($e['queue'])': remove failed: $($_.Exception.Message)"
+                }
+            } else { $e['action'] = 'would-remove' }
+        } elseif ($e['action'] -eq 'would-remove') {
+            Write-Log "Unmanaged printer '$($e['queue'])' would be removed ($($e['class'])); Remove unmanaged printers is in dry-run."
+        }
+        $unmanagedEntries.Add($e)
+    }
+    # Users whose default was a removed queue get the replacement at their next logon (removed map), and the logon
+    # task removes their own connections by the same rules.
+    if ($PSCmdlet.ShouldProcess('unmanaged printer rules', 'publish')) {
+        $publish = [ordered]@{ mode = $unmanagedSettings.Mode; keep = @($unmanagedSettings.Keep); keepLocal = $unmanagedSettings.KeepLocal; spoolfree = @($spoolfreeQueues); defaultQueue = [string]$manifest.defaultPrinter; servers = @($legacyServers) }
+        try { Set-SpoolfreeTakeoverState -Servers $legacyServers -Rules $legacyRules.ToArray() -Removed $unmanagedRemoved -Recreated @{} -Unmanaged $publish }
+        catch { Write-Log "Publishing the unmanaged printer rules failed: $($_.Exception.Message)" }
+    }
+} catch {
+    $errors.Add("unmanaged printers: $($_.Exception.Message)")
+    Write-Log "Checking unmanaged printers failed: $($_.Exception.Message)"
+}
+foreach ($e in (Get-SpoolfreeUserUnmanagedResults)) { if ($unmanagedEntries.Count -lt 300) { $unmanagedEntries.Add($e) } }
+$unmanagedReport = @($unmanagedEntries | Select-Object -First 300)
+
 # Self-update (0.4.3+): install the agent version the server offers; it runs at the next sync. Only from the
 # installed layout (<InstallDir>\current, run by the launcher), never from a copy run by hand.
 if ((Split-Path $PSScriptRoot -Leaf) -eq 'current' -and $PSCmdlet.ShouldProcess('Spoolfree agent', 'self-update')) {
@@ -616,7 +674,10 @@ if ($PSCmdlet.ShouldProcess('print analytics', 'collect and send')) {
 $applied = @(Get-SpoolfreeInstalled | ForEach-Object { $_.Name })
 $queueReport = @(Get-SpoolfreeInstalled | ForEach-Object {
         $q = Get-SpoolfreeQueueByName -Name ([string]$_.Name)
-        [ordered]@{ name = [string]$_.Name; driver = $(if ($q) { [string]$q.DriverName } else { $null }); port = $(if ($q) { [string]$q.PortName } else { $null }); method = [string]$_.Method; vendorFallback = $(if ($_.VendorFallback) { [string]$_.VendorFallback } else { $null }) }
+        # 0.9.0: the device UUIDs the queue's WSD-monitor port stores, so the server learns the printer's WSD UUIDs.
+        $portInfo = if ($q -and $portsAfter -and $portsAfter.ContainsKey([string]$q.PortName)) { $portsAfter[[string]$q.PortName] } else { $null }
+        $uuids = @(@(Get-SpoolfreeProperty $portInfo 'Uuids') | Where-Object { $_ } | ForEach-Object { [string]$_ } | Select-Object -First 8)
+        [ordered]@{ name = [string]$_.Name; driver = $(if ($q) { [string]$q.DriverName } else { $null }); port = $(if ($q) { [string]$q.PortName } else { $null }); method = [string]$_.Method; vendorFallback = $(if ($_.VendorFallback) { [string]$_.VendorFallback } else { $null }); uuids = $uuids }
     } | Select-Object -First 200)
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 $report = [ordered]@{
@@ -638,6 +699,8 @@ $report = [ordered]@{
     commands       = $commandState
     queues         = $queueReport
     drivers        = @($driverResults | Select-Object -First 200)
+    unmanaged      = $unmanagedReport
+    unmanagedPolicy = $unmanagedPolicy
     durationMs     = [int]((Get-Date) - $started).TotalMilliseconds
 }
 try {

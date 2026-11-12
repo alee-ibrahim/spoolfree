@@ -49,6 +49,7 @@ function printerRow(over: Partial<CurrentState["printers"][number]> = {}): Curre
     speedSamples: [],
     speedCheckedAt: null,
     macAddresses: [],
+    extraUuids: [],
     identityCheckedAt: null,
     lastTestAt: null,
     lastTest: null,

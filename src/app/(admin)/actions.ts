@@ -17,6 +17,7 @@ import { audit, loadPolicy } from "@/lib/service";
 import { deletePrinterWithReferences, printerSnapshot } from "@/lib/printer-lifecycle";
 import { PRINTER_NAME_RE, PRINTER_NAME_RULE } from "@/lib/printer-name";
 import { runPrinterTest, type TestResult } from "@/lib/printer-test";
+import { keepListInput } from "@/lib/unmanaged";
 import {
   applyOuChanges,
   auditWith,
@@ -331,7 +332,7 @@ function sidesSupportWarning(sides: string, supported: string[] | undefined): st
 const pick = printerSnapshot;
 
 /** Another device may answer at a new endpoint: forget its identity until Test or the poller reads it again. */
-const NO_IDENTITY = { deviceUuid: null, macAddresses: [] as string[], identityCheckedAt: null, deviceId: null };
+const NO_IDENTITY = { deviceUuid: null, macAddresses: [] as string[], extraUuids: [] as string[], identityCheckedAt: null, deviceId: null };
 
 /** Auto driver mode starts over: no sticky vendor decision, no speed samples. */
 const NO_AUTO_DECISION = { autoVendorReason: null, autoVendorAt: null, speedSamples: [] as SpeedSample[], speedCheckedAt: null };
@@ -424,7 +425,9 @@ async function getSettings(ouDn: string) {
 
 async function upsertSettings(
   ouDn: string,
-  patch: Partial<Pick<typeof schema.ouSettings.$inferInsert, "blockInheritance" | "blockedPrinterIds" | "defaultPrinterId">>,
+  patch: Partial<
+    Pick<typeof schema.ouSettings.$inferInsert, "blockInheritance" | "blockedPrinterIds" | "defaultPrinterId" | "removeUnmanaged" | "unmanagedKeep" | "keepLocalPrinters">
+  >,
 ) {
   const existing = await getSettings(ouDn);
   if (existing) {
@@ -461,6 +464,66 @@ export async function setOuDefault(ouDn: string, printerId: string | null): Prom
   const admin = await requireAdmin();
   await upsertSettings(ouDn, { defaultPrinterId: printerId });
   await audit(admin.email, "ou.default", "ou", ouDn, { printerId });
+  revalidateAll();
+  return { ok: true };
+}
+
+/* ---------- "Remove unmanaged printers" (0.9.0) ---------- */
+
+const UnmanagedPatch = z
+  .object({
+    /** null = inherit. */
+    removeUnmanaged: z.enum(["off", "dry-run", "on"]).nullable().optional(),
+    /** null = inherit; a string or list = this OU's own keep list. */
+    unmanagedKeep: keepListInput.nullable().optional(),
+    keepLocalPrinters: z.boolean().nullable().optional(),
+  })
+  .strict();
+
+/** Sets an OU's unmanaged-printer settings (fields left out stay; null = inherit). */
+export async function setOuUnmanaged(ouDn: string, input: z.input<typeof UnmanagedPatch>): Promise<ActionResult> {
+  const admin = await requireAdmin();
+  const parsed = UnmanagedPatch.safeParse(input);
+  if (!parsed.success) return { ok: false, error: firstError(parsed.error) };
+  if (!ouDn.trim()) return { ok: false, error: "No OU" };
+  const before = await getSettings(ouDn);
+  await upsertSettings(ouDn, parsed.data);
+  await audit(admin.email, "ou.unmanaged", "ou", ouDn, {
+    before: { removeUnmanaged: before?.removeUnmanaged ?? null, unmanagedKeep: before?.unmanagedKeep ?? null, keepLocalPrinters: before?.keepLocalPrinters ?? null },
+    changes: parsed.data,
+  });
+  revalidateAll();
+  return { ok: true };
+}
+
+const ComputerUnmanagedPatch = UnmanagedPatch.omit({ unmanagedKeep: true }).extend({ computerGuid: z.string().min(1) }).strict();
+
+/** Per-PC override of "Remove unmanaged printers" and "keep USB/local printers" (null = as the OU says). */
+export async function setComputerUnmanaged(input: z.input<typeof ComputerUnmanagedPatch>): Promise<ActionResult> {
+  const admin = await requireAdmin();
+  const parsed = ComputerUnmanagedPatch.safeParse(input);
+  if (!parsed.success) return { ok: false, error: firstError(parsed.error) };
+  const { computerGuid, ...patch } = parsed.data;
+  const computer = (await directory().listComputers()).find((c) => c.objectGuid === computerGuid.toLowerCase());
+  if (!computer) return { ok: false, error: "Computer not found in directory" };
+  const [before] = await db().select().from(schema.computerSettings).where(eq(schema.computerSettings.computerGuid, computer.objectGuid));
+  const next = {
+    removeUnmanaged: patch.removeUnmanaged === undefined ? (before?.removeUnmanaged ?? null) : patch.removeUnmanaged,
+    keepLocalPrinters: patch.keepLocalPrinters === undefined ? (before?.keepLocalPrinters ?? null) : patch.keepLocalPrinters,
+  };
+  if (next.removeUnmanaged === null && next.keepLocalPrinters === null) {
+    await db().delete(schema.computerSettings).where(eq(schema.computerSettings.computerGuid, computer.objectGuid));
+  } else {
+    await db()
+      .insert(schema.computerSettings)
+      .values({ computerGuid: computer.objectGuid, computerName: computer.name, ...next })
+      .onConflictDoUpdate({ target: schema.computerSettings.computerGuid, set: { ...next, computerName: computer.name, updatedAt: new Date() } });
+  }
+  await audit(admin.email, "computer.unmanaged", "computer", computer.objectGuid, {
+    computer: computer.name,
+    before: { removeUnmanaged: before?.removeUnmanaged ?? null, keepLocalPrinters: before?.keepLocalPrinters ?? null },
+    after: next,
+  });
   revalidateAll();
   return { ok: true };
 }

@@ -31,8 +31,12 @@ Describe 'Sync report literal' {
         $fallbacks = New-Object System.Collections.Generic.List[object]; $fallbacks.Add([ordered]@{ printer = 'A'; method = 'TcpIpPort'; reason = 'r' })
         $sides = [ordered]@{ A = 'auto' }
         $method = 'IppURL'
+        $unmanagedReport = @([ordered]@{ queue = 'Q2'; class = 'virtual'; action = 'kept' })
+        $unmanagedPolicy = [ordered]@{ mode = 'on'; keepLocal = $true; keep = @('Microsoft Print to PDF'); blocked = $null }
         $started = Get-Date
         $r = Invoke-Expression $script:ReportExpr
+        @($r.unmanaged)[0].queue | Should -Be 'Q2'
+        $r.unmanagedPolicy.mode | Should -Be 'on'
         @($r.critical) | Should -Be @('PC left without printer A')
         @($r.fallbacks)[0].method | Should -Be 'TcpIpPort'
         @($r.errors) | Should -Be @('e')

@@ -6,6 +6,10 @@
        to SYSTEM): matched against the rules the sync task published; removed in "on" mode, only
        reported in "dry-run" mode. Results go to %ProgramData%\Spoolfree\UserTakeover\<SID>.json and
        reach the server with the next sync report.
+    1b. (0.9.0) "Remove unmanaged printers" for the user's own connections: every \\server\share connection is
+       reported (<SID>.unmanaged.json) and, when the PC's setting is on, removed unless the keep list keeps it.
+       Nothing is removed while no Spoolfree queue exists, and the user's default is first moved to a Spoolfree
+       queue (the printer the connection is a copy of, the OU default or the first Spoolfree printer).
     2. If the user's default printer was a queue removed by takeover, the replacing Spoolfree queue
        becomes the default.
     3. Applies the default printer chosen by Spoolfree policy, but only when that policy value changed
@@ -65,6 +69,51 @@ if ($takeover) {
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         $json = if ($results.Count) { ConvertTo-Json -InputObject @($results.ToArray()) -Depth 3 -Compress } else { '[]' }
         Set-Content -LiteralPath (Join-Path $dir "$sid.json") -Value $json -Encoding UTF8
+    }
+}
+
+# --- 1b. Unmanaged printers: the user's own connections (0.9.0) ---------------------------------------------
+$unmanaged = Get-SpoolfreeProperty $takeover 'unmanaged'
+if ($unmanaged) {
+    $u = Get-SpoolfreeUnmanagedSettings ([pscustomobject]@{ unmanaged = $unmanaged })
+    $userResults = New-Object System.Collections.Generic.List[object]
+    $existingNow = @(Get-Printer | ForEach-Object { [string]$_.Name })
+    $spoolfree = @(@(Get-SpoolfreeProperty $unmanaged 'spoolfree') | Where-Object { $_ } | ForEach-Object { [string]$_ } | Where-Object { $existingNow -contains $_ })
+    $servers = @(Get-SpoolfreeProperty $unmanaged 'servers' | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $rules = @(Get-SpoolfreeProperty $takeover 'rules' | Where-Object { $_ })
+    $printerSets = @(foreach ($r in $rules) {
+            [pscustomobject]@{ Printer = [pscustomobject]@{ name = [string](Get-SpoolfreeProperty $r 'printer'); legacy = [pscustomobject]@{ mode = [string](Get-SpoolfreeProperty $r 'mode'); shares = @(Get-SpoolfreeProperty $r 'shares') } }; Addresses = @() }
+        })
+    $connections = @(Get-SpoolfreeQueueInventory -ConnectionsOnly)
+    $found = @(Get-SpoolfreeUnmanagedQueues -Queues $connections -Printers $printerSets -LegacyServers $servers -Scope 'user')
+    $decision = Get-SpoolfreeUnmanagedPlan -Entries $found -Mode $u.Mode -Keep $u.Keep -KeepLocal $u.KeepLocal -SpoolfreeCount $spoolfree.Count
+    foreach ($e in @($decision.Entries)) {
+        if ($e['action'] -eq 'remove') {
+            $queue = [string]$e['queue']
+            $replacement = Get-SpoolfreeUnmanagedReplacement -Entry $e -DefaultPrinter ([string](Get-SpoolfreeProperty $unmanaged 'defaultQueue')) -Spoolfree $spoolfree
+            $isDefault = $currentDefault -and $currentDefault -ieq $queue
+            if ($isDefault -and -not ($replacement -and (Set-UserDefault $replacement))) {
+                $e['action'] = 'kept'
+                $e['reason'] = 'the user''s default printer, and no Spoolfree printer could become the default'
+            } else {
+                try {
+                    Remove-SpoolfreeQueue -Name $queue
+                    $e['action'] = 'removed'
+                    if ($replacement) { $removedHere[$queue] = $replacement }
+                    if ($isDefault) { $currentDefault = $replacement }
+                } catch {
+                    $e['action'] = 'failed'
+                    $e['error'] = $_.Exception.Message
+                }
+            }
+        }
+        $userResults.Add($e)
+    }
+    $dir = Join-Path $env:ProgramData 'Spoolfree\UserTakeover'
+    if (Test-Path $dir) {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $json = if ($userResults.Count) { ConvertTo-Json -InputObject @($userResults.ToArray() | Select-Object -First 200) -Depth 3 -Compress } else { '[]' }
+        Set-Content -LiteralPath (Join-Path $dir "$sid.unmanaged.json") -Value $json -Encoding UTF8
     }
 }
 

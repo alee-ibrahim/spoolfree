@@ -11,7 +11,9 @@
  * assignments are added (and with --prune-assignments, assignments of the listed printers that are not
  * in the file are removed). A YAML `computers:` list sets per-computer overrides (computers by name or
  * DN, looked up in the directory; --prune-overrides removes overrides of the listed computers that the
- * file does not mention). Every change is audit-logged with actor "cli". "-" reads stdin.
+ * file does not mention). A YAML `ous:` list (0.9.0) sets the "Remove unmanaged printers" settings of OUs (dn,
+ * removeUnmanaged, unmanagedKeep, keepLocalPrinters; "inherit" clears a value); computers take removeUnmanaged and
+ * keepLocalPrinters too. Every change is audit-logged with actor "cli". "-" reads stdin.
  *
  * delete and rename do what the admin UI's Delete and rename (Edit, name only) do, through the same code
  * (src/lib/printer-lifecycle.ts): delete removes the printer with its OU assignments, OU defaults, OU blocks and
@@ -21,7 +23,7 @@
  * In the image: kubectl exec -i -n <ns> deploy/spoolfree -c spoolfree -- node cli/spoolfree-cli.mjs printers import - --dry-run < printers.yaml
  */
 import { readFileSync } from "node:fs";
-import { apply, describe, exportCsv, exportYaml, loadState, parseDocument, plan, planComputers, type DirectoryComputer } from "../src/lib/bulk";
+import { apply, describe, exportCsv, exportYaml, loadState, parseDocument, plan, planComputers, planOus, type DirectoryComputer } from "../src/lib/bulk";
 import { config, directoryMode } from "../src/lib/config";
 import { db, schema, sqlClient } from "../src/lib/db";
 import { runPrinterTest } from "../src/lib/printer-test";
@@ -85,6 +87,7 @@ export async function printersCli(argv: string[]): Promise<number> {
   const doc = parseDocument(text, fmt);
   const state = await loadState();
   const steps = plan(doc.printers, state, { pruneAssignments: flag("prune-assignments") });
+  steps.push(...planOus(doc.ous, state));
   if (doc.computers.length) {
     const newPrinters = steps.flatMap((s) => (s.kind === "create" ? [s.name] : []));
     steps.push(...planComputers(doc.computers, state, await directoryComputers(), { pruneOverrides: flag("prune-overrides"), newPrinters }));
@@ -92,7 +95,7 @@ export async function printersCli(argv: string[]): Promise<number> {
   const changes = steps.filter((s) => s.kind !== "unchanged");
   for (const s of steps) console.log(describe(s));
   console.log(
-    `${doc.printers.length} printer(s) and ${doc.computers.length} computer(s) in the file, ${changes.length} change(s)${flag("dry-run") ? " (dry run: nothing written)" : ""}.`,
+    `${doc.printers.length} printer(s), ${doc.ous.length} OU(s) and ${doc.computers.length} computer(s) in the file, ${changes.length} change(s)${flag("dry-run") ? " (dry run: nothing written)" : ""}.`,
   );
   if (!flag("dry-run") && changes.length) {
     await apply(changes);

@@ -111,6 +111,20 @@ const schema = z.object({
   /** Legacy queue takeover for printers added in the web UI (the form starts with this value): on | dry-run | off. */
   DEFAULT_LEGACY_TAKEOVER: z.string().trim().toLowerCase().default("on").pipe(z.enum(["on", "dry-run", "off"])),
 
+  /**
+   * 0.9.0: the keep list of "Remove unmanaged printers" when no OU sets one: queue-name globs and/or driver names,
+   * separated by ";" or new lines. Default: Microsoft Print to PDF.
+   */
+  UNMANAGED_KEEP_DEFAULT: z
+    .string()
+    .default("Microsoft Print to PDF")
+    .transform((v) =>
+      v
+        .split(/[;\r\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+
   // Print analytics (agents 0.5+ read PrintService event 307 on PCs). Off unless "1"/"true".
   ANALYTICS_ENABLED: bool,
   /** Also collect document names (titles can be personal or confidential). Off unless "1"/"true". */

@@ -199,3 +199,26 @@ print through its Spoolfree queue).
   the machine token, which must be valid and not revoked. When nothing is pending, that is all it does. When commands
   are pending it also checks the computer in the directory, as the manifest does, before it signs and hands them out.
   Commands also travel in the signed manifest, so the poll is only a faster path.
+
+### Removing unmanaged printers (0.9.0+)
+
+**Remove unmanaged printers** lets the server make agents (SYSTEM) remove print queues that Spoolfree did not create.
+
+- **Who can turn it on.** Admins only (Assignments and Preview call `requireAdmin()`), or the bulk CLI with database
+  access. Every change is audit-logged (`ou.unmanaged`, `computer.unmanaged`). It is off by default for every OU and is
+  delivered only in the signed manifest; an agent never removes anything because of unsigned input.
+- **What it can do.** Remove print queues and the user's own printer connections (as that user, at logon). It cannot
+  run code, delete files or drivers, or touch anything but print queues. Spoolfree queues of this server are never
+  removed by it, and RDP-redirected printers are left out.
+- **Limits of the damage.** Nothing is removed on a PC without a working Spoolfree queue; the keep list and (by
+  default) USB/local printers stay; dry-run comes first in the rollout; a user's own default connection is removed only
+  after a Spoolfree printer became their default. Every removal is in the report, `sync.log` and the audit log
+  (`agent.unmanaged_removed`, `agent.unmanaged_remove_failed`).
+- **Per-user results.** The logon task writes `<SID>.unmanaged.json` in the same folder as the takeover results (users
+  can create their own file but not read or change others'); the sync takes the scope from the file's owner and
+  validates every entry (known classes and actions, capped strings).
+- **Learned device UUIDs.** The server adds WSD/IPP UUIDs to a printer from agent reports (the PC's own Spoolfree queue
+  port, or a legacy queue matched by UUID, MAC or serial). A compromised enrolled PC could report a wrong UUID, which
+  could make other PCs treat a queue for that UUID as a legacy copy of the printer. Limits: only well-formed UUIDs, never
+  one another printer already has, at most 8 per printer, each `printer.uuid_learned` audit row names the PC, and they
+  are cleared when the printer's endpoint or IPP `printer-uuid` changes. Revoke the PC's agent if that happens.

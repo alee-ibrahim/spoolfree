@@ -9,6 +9,7 @@ import { autoSettings, config } from "./config";
 import { decideDriver, type DriverDecision, type PackageForMatch } from "./drivers/auto";
 import { listDriverPackages, toPackageForMatch } from "./drivers/store";
 import type { SignedCommand } from "./test-print/command";
+import { resolveUnmanaged, toManifestUnmanaged, type ComputerUnmanagedSetting, type OuUnmanagedSetting, type UnmanagedPolicy } from "./unmanaged";
 
 export async function audit(
   actor: string,
@@ -45,6 +46,21 @@ export async function loadPolicy(): Promise<Policy> {
   };
 }
 
+/** "Remove unmanaged printers" settings of every OU and the per-PC overrides (0.9.0). */
+export async function loadUnmanagedSettings(): Promise<{ ouSettings: OuUnmanagedSetting[]; computerSettings: ComputerUnmanagedSetting[] }> {
+  const d = db();
+  const [ous, computers] = await Promise.all([d.select().from(schema.ouSettings), d.select().from(schema.computerSettings)]);
+  return {
+    ouSettings: ous.map((s) => ({ ouDn: s.ouDn, removeUnmanaged: s.removeUnmanaged ?? null, unmanagedKeep: s.unmanagedKeep ?? null, keepLocalPrinters: s.keepLocalPrinters ?? null })),
+    computerSettings: computers.map((c) => ({ computerGuid: c.computerGuid, removeUnmanaged: c.removeUnmanaged ?? null, keepLocalPrinters: c.keepLocalPrinters ?? null })),
+  };
+}
+
+/** The unmanaged-printer policy a computer (or, with dn CN=__probe__,<ou>, an OU) gets. */
+export function unmanagedPolicyFor(settings: Awaited<ReturnType<typeof loadUnmanagedSettings>>, computer: { dn: string; objectGuid?: string | null }): UnmanagedPolicy {
+  return resolveUnmanaged({ baseDn: baseDn(), ...settings, computer, defaultKeep: config().UNMANAGED_KEEP_DEFAULT });
+}
+
 export async function listPrinters() {
   return db().select().from(schema.printers).orderBy(schema.printers.name);
 }
@@ -76,12 +92,14 @@ export function toManifestInput(p: typeof schema.printers.$inferSelect, packages
     defaultSides: p.defaultSides,
     deviceUuid: p.deviceUuid,
     macAddresses: p.macAddresses,
+    extraUuids: p.extraUuids,
+    deviceId: p.deviceId,
     driver: driverDecision(p, packages),
   };
 }
 
 export async function manifestForComputer(computer: ComputerObject, commands: SignedCommand[] = []) {
-  const [policy, printers, packages] = await Promise.all([loadPolicy(), listPrinters(), loadPackagesForMatch()]);
+  const [policy, printers, packages, unmanaged] = await Promise.all([loadPolicy(), listPrinters(), loadPackagesForMatch(), loadUnmanagedSettings()]);
   const resolution = resolvePrinters(policy, computer);
   return buildManifest({
     resolution,
@@ -98,6 +116,7 @@ export async function manifestForComputer(computer: ComputerObject, commands: Si
     },
     commands,
     commandPollMinutes: config().AGENT_COMMAND_POLL_MINUTES,
+    unmanaged: toManifestUnmanaged(unmanagedPolicyFor(unmanaged, computer)),
   });
 }
 
