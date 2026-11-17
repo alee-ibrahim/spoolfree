@@ -66,12 +66,19 @@ When a printer resolves to vendor, the server picks a package:
    `USBPRINT\BROTHERHL-3150CDN_SEED27` and `WSDPRINT\...`: MFG+MDL with the spaces removed, truncated, plus a 4-digit
    checksum. If no hardware ID matches, it compares the driver name with the printer's make and model. When several
    packages match, the newest upload wins.
+
+   The ID is cut off after 20 characters, so it often ends before the model number: `HPHP_Color_LaserJet_E8DF` is
+   the start of every HP Color LaserJet, and only the checksum tells an M478 from an M453 or an MFP 3303. Since
+   0.9.4, such an ID counts only when the driver's name also names the printer (`HP Color LaserJet Pro M478f-9f
+   PCL-6 (V4)` for an M478f-9f). Up to 0.9.3, it matched any model with the same start, and the newest such package
+   won, so a printer could get another model's driver.
 2. **A universal driver that lists the printer.** A package uploaded as **universal**, for example Brother Universal
    Printer or HP Universal Printing PCL 6, is used only when its INF **lists the printer itself**: a hardware ID that
    matches the device ID, or a model name that matches its make and model (0.7.7). It is never chosen by brand alone:
    a brand's universal driver does not fit all its models. A Brother HL-2250DN, for example, takes PCL XL only through
    an emulation that the universal driver's output does not suit. A universal driver whose name says "Mono" is never
-   chosen for a colour printer, because it would print in grey.
+   chosen for a colour printer, because it would print in grey. The rule above for cut-off hardware IDs applies here
+   too: HP UPD IDs such as `Hewlett-PackardHP_Co5005` end before the model, so they alone no longer select the UPD.
 
    Up to 0.7.6, a universal package served every printer of its brand that no exact package covered.
 

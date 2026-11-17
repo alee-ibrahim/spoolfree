@@ -100,17 +100,40 @@ export function brandKey(s: string | null | undefined): string | null {
 }
 
 /**
- * Does an INF hardware ID name this device? 1284 IDs are MFG+MDL without spaces, truncated, plus a 4-hex checksum
- * ("BrotherHL-3150CDN_seri8E9A", "USBPRINT\BrotherHL-3150CDN_seri8E9A", "WSDPRINT\..."). Compared letters and
- * digits only, as a prefix of MFG+MDL (the ID is truncated), at least 8 characters long.
+ * Letters and digits of MFG+MDL up to and including the model number: MDL's first word with a digit ("HL-3150CDN",
+ * "M478f-9f"). The whole MFG+MDL when MDL has no such word.
  */
-export function hardwareIdMatches(hardwareId: string, mfg: string | null, mdl: string | null): boolean {
-  if (!mdl) return false;
+function modelKey(mfg: string | null, mdl: string): string {
+  const words = mdl.trim().split(/\s+/);
+  const i = words.findIndex((w) => /\d/.test(w));
+  return norm(`${mfg ?? ""}${i < 0 ? mdl : words.slice(0, i + 1).join(" ")}`);
+}
+
+/**
+ * How an INF hardware ID names this device. 1284 IDs are MFG+MDL without spaces, truncated to 20 characters, plus a
+ * 4-hex checksum ("BrotherHL-3150CDN_seri8E9A", "USBPRINT\BrotherHL-3150CDN_seri8E9A", "WSDPRINT\..."). Compared
+ * letters and digits only, as a prefix of MFG+MDL, at least 8 characters long.
+ *
+ * - "model": the ID reaches the model number ("BROTHERHL-L5100DN_SE" for an HL-L5100DN series).
+ * - "prefix": the ID was truncated before the model number, so it fits many models: "HPHP_Color_LaserJet_" is the
+ *   start of every HP Color LaserJet (M453, M478, MFP M282, MFP 3303...). Only the checksum, which Spoolfree does
+ *   not compute, tells them apart, so a prefix alone never picks a driver (0.9.4).
+ */
+export function hardwareIdMatch(hardwareId: string, mfg: string | null, mdl: string | null): "model" | "prefix" | null {
+  if (!mdl) return null;
   const core = hardwareId.slice(hardwareId.lastIndexOf("\\") + 1);
   const target = norm(`${mfg ?? ""}${mdl}`);
+  const key = modelKey(mfg, mdl);
   const candidates = [norm(core)];
   if (/[0-9a-fA-F]{4}$/.test(core) && core.length > 12) candidates.push(norm(core.slice(0, -4)));
-  return candidates.some((c) => c.length >= 8 && (target === c || target.startsWith(c)));
+  const hits = candidates.filter((c) => c.length >= 8 && (target === c || target.startsWith(c)));
+  if (!hits.length) return null;
+  return hits.some((c) => c.length >= key.length) ? "model" : "prefix";
+}
+
+/** Does an INF hardware ID name this device's model (hardwareIdMatch "model")? */
+export function hardwareIdMatches(hardwareId: string, mfg: string | null, mdl: string | null): boolean {
+  return hardwareIdMatch(hardwareId, mfg, mdl) === "model";
 }
 
 /** The device's make and model as a driver name would say it: printer-make-and-model or the admin's model field. */
@@ -143,10 +166,14 @@ export function matchPackage(p: Pick<PrinterForDecision, "model" | "deviceId" | 
       for (const pkg of newest.filter((x) => x.universal === universal)) {
         for (const inf of pkg.infs) {
           for (const m of inf.models) {
+            const n = stripSeries(norm(m.name));
+            // 0.9.4: a hardware ID cut off before the model number counts only when the driver name names the device too
+            // ("HP Color LaserJet Pro M478f-9f PCL-6 (V4)" for an M478f-9f, never the M453-4 driver).
             const ok =
               pass === "hwid"
-                ? m.hardwareIds.some((h) => hardwareIdMatches(h, mfg, mdl))
-                : names.includes(stripSeries(norm(m.name)));
+                ? m.hardwareIds.some((h) => hardwareIdMatches(h, mfg, mdl)) ||
+                  (m.hardwareIds.some((h) => hardwareIdMatch(h, mfg, mdl) === "prefix") && names.some((x) => n.startsWith(x)))
+                : names.includes(n);
             if (!ok) continue;
             // A monochrome universal driver would print a colour printer's jobs in grey.
             if (universal && colour && /mono(chrome)?/i.test(m.name)) continue;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideDriver, hardwareIdMatches, matchPackage, medianSecondsPerPage, mergeSpeedSamples, newStickyReason, parseDeviceId, vendorReason, type PackageForMatch, type PrinterForDecision } from "@/lib/drivers/auto";
+import { decideDriver, hardwareIdMatch, hardwareIdMatches, matchPackage, medianSecondsPerPage, mergeSpeedSamples, newStickyReason, parseDeviceId, vendorReason, type PackageForMatch, type PrinterForDecision } from "@/lib/drivers/auto";
 import { decodeInf, parseInf } from "@/lib/drivers/inf";
 import { DriverPackageError, driverNames, inspectDriverPackage } from "@/lib/drivers/package";
 import { bufferSource, listEntries, readEntry, unsafeEntryName } from "@/lib/drivers/zip";
@@ -173,6 +173,34 @@ describe("1284 device IDs and package matching", () => {
     expect(matchPackage(colourBrother, [colourL6415])).toBeNull();
     const monoBrother = printer({ deviceId: "MFG:Brother;MDL:HL-L6415DW series;", lastTest: { color: false } });
     expect(matchPackage(monoBrother, [universalPkg])).toMatchObject({ match: "universal" });
+  });
+
+  it("never picks another model's driver from a hardware ID cut off before the model number (0.9.4)", () => {
+    // Both INFs list "HPHP_Color_LaserJet_" + checksum: the 20-character ID ends before the model number.
+    const hpPkg = (id: string, name: string, hwid: string, uploadedAt: string): PackageForMatch => ({
+      ...exactPkg,
+      id,
+      name,
+      manufacturer: "hp",
+      uploadedAt,
+      infs: [{ ...exactPkg.infs[0], path: `${id.slice(0, 4)}.inf`, models: [{ name, hardwareIds: [`USBPRINT\\${hwid}`, `WSDPRINT\\${hwid}`] }] }],
+    });
+    const m453 = hpPkg("44444444-4444-4444-8444-444444444444", "HP Color LaserJet Pro M453-4 PCL-6 (V4)", "HPHP_Color_LaserJet_1A2B", "2026-01-02T00:00:00Z");
+    const m478 = hpPkg("55555555-5555-4555-8555-555555555555", "HP Color LaserJet Pro M478f-9f PCL-6 (V4)", "HPHP_Color_LaserJet_E8DF", "2026-01-01T00:00:00Z");
+    expect(hardwareIdMatch("USBPRINT\\HPHP_Color_LaserJet_E8DF", "HP", "HP Color LaserJet Pro M478f-9f")).toBe("prefix");
+    expect(hardwareIdMatch("USBPRINT\\BROTHERHL-3150CDN_SEED27", "Brother", "HL-3150CDN series")).toBe("model");
+    expect(hardwareIdMatches("USBPRINT\\HPHP_Color_LaserJet_1A2B", "HP", "HP Color LaserJet Pro M478f-9f")).toBe(false);
+
+    // The newer M453-4 package used to win for every HP Color LaserJet.
+    const m478Printer = printer({ deviceId: "MFG:HP;MDL:HP Color LaserJet Pro M478f-9f;CLS:PRINTER;", model: "HP Color LaserJet Pro M478f-9f" });
+    expect(matchPackage(m478Printer, [m453, m478])).toMatchObject({ match: "exact", driverName: "HP Color LaserJet Pro M478f-9f PCL-6 (V4)" });
+    expect(matchPackage(m478Printer, [m453])).toBeNull();
+    const mfp = printer({ deviceId: "MFG:HP;MDL:HP Color LaserJet Pro MFP 3303;", model: "HP Color LaserJet Pro MFP 3303" });
+    expect(matchPackage(mfp, [m453, m478])).toBeNull();
+    // A universal driver listed only by such a prefix is not chosen either.
+    const upd: PackageForMatch = { ...hpUpd, infs: [{ ...hpUpd.infs[0], models: [{ name: "HP Universal Printing PCL 6", hardwareIds: ["USBPRINT\\Hewlett-PackardHP_Co5005"] }] }] };
+    const m252 = printer({ deviceId: "MFG:Hewlett-Packard;MDL:HP Color LaserJet Pro M252n;", lastTest: { color: true } });
+    expect(matchPackage(m252, [upd])).toBeNull();
   });
 
   it("matches by make and model when there is no device ID", () => {
