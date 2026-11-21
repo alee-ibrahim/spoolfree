@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { generateSeed, keyId, privateKeyFromSeed, publicKeyRaw, verifyBytes } from "@/lib/crypto/signing";
-import { buildManifest, httpUrlFor, signManifest, type ManifestPrinterInput } from "@/lib/manifest";
+import { buildManifest, httpUrlFor, signManifest, twoSidedFromTest, type ManifestPrinterInput } from "@/lib/manifest";
 import { renderMetrics } from "@/lib/metrics";
 import { resolvePrinters } from "@/lib/resolve";
 import { errorStateToReasons, suppliesToMarkers } from "@/lib/status/snmp";
@@ -124,5 +124,31 @@ describe("manifest: duplex and legacy takeover", () => {
     const m = buildManifest({ resolution: resolution(), printers: p, computer, now: new Date("2026-11-05T00:00:00Z"), ttlHours: 24, legacyPrintServers: ["printsrv01.example.org"] });
     expect(m.printers[0]).toMatchObject({ defaultSides: "two-sided-long-edge", legacy: { mode: "dry-run", shares: ["StaffCopier"] } });
     expect(m.legacyPrintServers).toEqual(["printsrv01.example.org"]);
+  });
+  it("carries twoSided (0.9.5), null when unknown", () => {
+    expect(manifest().printers[0].twoSided).toBeNull();
+    const p = new Map(printers);
+    p.set("p1", { ...printers.get("p1")!, twoSided: true });
+    p.set("p2", { ...printers.get("p2")!, twoSided: false });
+    const m = buildManifest({ resolution: resolution(), printers: p, computer, now: new Date("2026-11-05T00:00:00Z"), ttlHours: 24 });
+    expect(m.printers.map((x) => x.twoSided)).toEqual([true, false]);
+  });
+});
+
+describe("twoSidedFromTest", () => {
+  it("reads sides-supported from a successful Test", () => {
+    expect(twoSidedFromTest({ sidesSupported: ["one-sided", "two-sided-long-edge", "two-sided-short-edge"] })).toBe(true);
+    expect(twoSidedFromTest({ sidesSupported: ["one-sided"] })).toBe(false);
+    expect(twoSidedFromTest({ sidesSupported: [] })).toBe(false);
+  });
+  it("falls back to the duplex flag of old Test results", () => {
+    expect(twoSidedFromTest({ duplex: true })).toBe(true);
+    expect(twoSidedFromTest({ duplex: false })).toBe(false);
+  });
+  it("is unknown without a Test or when the Test failed", () => {
+    expect(twoSidedFromTest(null)).toBeNull();
+    expect(twoSidedFromTest(undefined)).toBeNull();
+    expect(twoSidedFromTest({ error: "timeout", sidesSupported: ["one-sided", "two-sided-long-edge"] })).toBeNull();
+    expect(twoSidedFromTest({})).toBeNull();
   });
 });

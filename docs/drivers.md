@@ -205,6 +205,18 @@ so the default stays one-sided unless the printer's `defaultSides` says otherwis
 changed. Installable options that a driver keeps privately (for example Brother's lower-tray setting) are not copied
 from the replaced legacy queue.
 
+**Duplex unit (0.9.5).** Many vendor drivers (HP PCL-6 V4, for example) have an installable *Duplex Unit* option that
+starts as *Not Installed* and is filled in by asking the printer over SNMP. The agent's Standard TCP/IP ports have SNMP
+off, so such a driver never learns that the printer has a duplex unit and hides or ignores "Print on both sides". The
+manifest now says whether the printer prints two-sided (`twoSided`, from its last successful **Test**:
+`sides-supported` lists a two-sided value; a failed Test is not stored, so the previous result is kept). On a vendor queue for a two-sided printer, the agent sets a driver property named
+`Config:...Duplex...` (e.g. `Config:DuplexUnit`) from `NotInstalled` to `Installed` at every sync where it is still
+`NotInstalled`, then runs the automatic duplex step and the default duplex above again for that queue (a two-sided
+default the driver rejected before the unit was installed is applied now). If the driver still reads `NotInstalled`
+after the change, the agent logs a warning once and leaves that queue alone until it is re-created. It never sets the
+option back to *Not Installed*; with `twoSided` false or unknown (no successful Test yet) the driver is left alone.
+Run **Test** on a printer before relying on this.
+
 Everything else works as for driverless queues: the "Managed by Spoolfree" comment and marker, legacy takeover
 (matching by IP, host name, aliases, MAC and printer-uuid), renames, default printer carry-over, the default duplex
 and print analytics. The default duplex is applied with `Set-PrintConfiguration` where the driver supports it; a

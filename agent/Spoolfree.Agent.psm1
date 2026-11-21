@@ -11,7 +11,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:AgentVersion = '0.9.4'
+$script:AgentVersion = '0.9.5'
 $script:RegistryRoot = 'HKLM:\SOFTWARE\Spoolfree'
 $script:PrinterRegistry = 'HKLM:\SOFTWARE\Spoolfree\Printers'
 $script:CommentPrefix = 'Managed by Spoolfree'
@@ -1329,7 +1329,8 @@ function Get-SpoolfreeInstalled {
         $auto = if ($p.PSObject.Properties['AutoDuplex']) { [string]$p.AutoDuplex } else { '' }
         $tried = if ($p.PSObject.Properties['MigrateTried']) { [string]$p.MigrateTried } else { '' }
         $vf = if ($p.PSObject.Properties['VendorFallback']) { [string]$p.VendorFallback } else { '' }
-        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName; Sides = $sides; AutoDuplex = $auto; MigrateTried = $tried; VendorFallback = $vf }
+        $du = if ($p.PSObject.Properties['DuplexUnit']) { [string]$p.DuplexUnit } else { '' }
+        [pscustomobject]@{ Name = $p.Name; Id = $p.Id; Revision = [int]$p.Revision; Url = $p.Url; Method = $p.Method; PortName = $p.PortName; Sides = $sides; AutoDuplex = $auto; MigrateTried = $tried; VendorFallback = $vf; DuplexUnit = $du }
     }
     return @($list)
 }
@@ -1356,20 +1357,20 @@ function Set-SpoolfreeMarker {
     New-ItemProperty -Path $key -Name Method -Value $Method -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name PortName -Value $PortName -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Server -Value $ServerId -PropertyType String -Force | Out-Null
-    # 0.7.7: a (re)created queue starts without these (0.8.1: and without VendorFallback; the caller sets it).
-    Remove-ItemProperty -Path $key -Name AutoDuplex, MigrateTried, VendorFallback -ErrorAction SilentlyContinue
+    # 0.7.7: a (re)created queue starts without these (0.8.1: and without VendorFallback; the caller sets it; 0.9.5: DuplexUnit).
+    Remove-ItemProperty -Path $key -Name AutoDuplex, MigrateTried, VendorFallback, DuplexUnit -ErrorAction SilentlyContinue
 }
 
 function Set-SpoolfreeMarkerValue {
-    <# 0.7.7: one string value on an existing marker (AutoDuplex, MigrateTried, VendorFallback). #>
+    <# 0.7.7: one string value on an existing marker (AutoDuplex, MigrateTried, VendorFallback, DuplexUnit). #>
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Property, [AllowEmptyString()][string]$Value)
     $key = Get-SpoolfreeMarkerKey -Name $Name
     if (Test-Path $key) { New-ItemProperty -Path $key -Name $Property -Value $Value -PropertyType String -Force | Out-Null }
 }
 
 function Set-SpoolfreeMarkerSides {
-    <# Records the duplex default last applied to a queue (so it is re-applied only when the manifest changes). #>
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Sides)
+    <# Records the duplex default last applied to a queue (so it is re-applied only when the manifest changes). '' clears it (0.9.5). #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][AllowEmptyString()][string]$Sides)
     $key = Get-SpoolfreeMarkerKey -Name $Name
     if (Test-Path $key) { New-ItemProperty -Path $key -Name Sides -Value $Sides -PropertyType String -Force | Out-Null }
 }
@@ -1875,6 +1876,68 @@ function Enable-SpoolfreeAutoDuplex {
     Set-PrintConfiguration -PrinterName $Name -PrintTicketXml $ticket -ErrorAction Stop
     if ($mode) { Set-PrintConfiguration -PrinterName $Name -DuplexingMode $mode -ErrorAction Stop }
     return 'automatic'
+}
+
+function Get-SpoolfreeDuplexUnitProperty {
+    <#
+    .SYNOPSIS
+        Pure (0.9.5): the driver property to set to 'Installed' so a vendor queue offers two-sided printing, or $null.
+        Drivers with an installable duplex unit (GPD feature, e.g. HP's 'Config:DuplexUnit') default to 'NotInstalled'
+        and learn the real value from the printer over SNMP; on a Standard TCP/IP port without SNMP they never do and
+        hide two-sided printing. Only when the server knows the printer prints two-sided (manifest printer.twoSided
+        is $true), and only a 'NotInstalled' value is changed: never the other way round.
+    #>
+    param([AllowNull()][object[]]$Properties, [AllowNull()]$TwoSided)
+    if ($TwoSided -isnot [bool] -or -not $TwoSided) { return $null }
+    foreach ($p in @($Properties)) {
+        $n = [string](Get-SpoolfreeProperty $p 'PropertyName')
+        $v = [string](Get-SpoolfreeProperty $p 'Value')
+        if ($n -match '^Config:[A-Za-z]*Duplex[A-Za-z]*$' -and $v -eq 'NotInstalled') { return $n }
+    }
+    return $null
+}
+
+function Set-SpoolfreeDuplexUnit {
+    <#
+    .SYNOPSIS
+        0.9.5: marks the vendor driver's installable duplex unit as installed on a queue for a two-sided printer.
+        Returns $null when nothing was needed, else { Property; Installed }: Installed is $true only when the value
+        read back after setting it is 'Installed' (some drivers accept the call and keep 'NotInstalled'). Throws on
+        failure.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [AllowNull()]$TwoSided)
+    if ($TwoSided -isnot [bool] -or -not $TwoSided) { return $null }
+    $props = @(Get-PrinterProperty -PrinterName $Name -ErrorAction Stop)
+    $prop = Get-SpoolfreeDuplexUnitProperty -Properties $props -TwoSided $TwoSided
+    if (-not $prop) { return $null }
+    Set-PrinterProperty -PrinterName $Name -PropertyName $prop -Value 'Installed' -ErrorAction Stop
+    $after = @(Get-PrinterProperty -PrinterName $Name -PropertyName $prop -ErrorAction Stop) | Select-Object -First 1
+    $installed = [string](Get-SpoolfreeProperty $after 'Value') -eq 'Installed'
+    return [pscustomobject]@{ Property = $prop; Installed = $installed }
+}
+
+function Update-SpoolfreeVendorDuplexUnit {
+    <#
+    .SYNOPSIS
+        0.9.5: the per-queue sync step for a vendor queue (Marker from Get-SpoolfreeInstalled). When the duplex unit is
+        now installed, the AutoDuplex and Sides markers are cleared so the automatic duplex step and the default duplex
+        run again for the queue (a vendor driver that rejected a two-sided default before the unit was installed has
+        it recorded in Sides already). When the driver keeps 'NotInstalled', the DuplexUnit marker records it and the
+        queue is not tried again until it is re-created (no warning at every sync). Returns a log line or $null.
+        Throws on failure (retried at the next sync).
+    #>
+    param([Parameter(Mandatory)]$Marker, [AllowNull()]$TwoSided)
+    $name = [string]$Marker.Name
+    if ([string](Get-SpoolfreeProperty $Marker 'DuplexUnit') -eq 'ignored') { return $null }
+    $r = Set-SpoolfreeDuplexUnit -Name $name -TwoSided $TwoSided
+    if (-not $r) { return $null }
+    if ($r.Installed) {
+        Set-SpoolfreeMarkerValue -Name $name -Property 'AutoDuplex' -Value ''
+        Set-SpoolfreeMarkerSides -Name $name -Sides ''
+        return "${name}: $($r.Property) set to Installed in the vendor driver (the printer prints two-sided)."
+    }
+    Set-SpoolfreeMarkerValue -Name $name -Property 'DuplexUnit' -Value 'ignored'
+    return "${name}: WARNING: the vendor driver kept $($r.Property) at NotInstalled after setting it to Installed; not tried again until the queue is re-created."
 }
 
 function Install-SpoolfreePrinter {

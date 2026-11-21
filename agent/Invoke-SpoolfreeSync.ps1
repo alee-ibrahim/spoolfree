@@ -502,6 +502,25 @@ try {
     }
 } catch { Write-Log "Checking for printers lost by takeover failed: $($_.Exception.Message)" }
 
+# 0.9.5: vendor queues of two-sided printers (manifest printer.twoSided): a driver whose installable duplex unit is
+# 'NotInstalled' (it cannot ask the printer over a TCP/IP port without SNMP) gets it set to 'Installed', otherwise it
+# hides two-sided printing. Checked every sync (cheap, and a re-created queue starts at 'NotInstalled' again); the
+# automatic duplex step and the default duplex below then run again for that queue, now that the driver lists two-sided
+# options. A driver that keeps 'NotInstalled' is noted once in the marker and left alone until the queue is re-created.
+$vendorMarkers = @{}
+foreach ($m in @(Get-SpoolfreeInstalled | Where-Object { $_.Method -eq 'Vendor' })) { $vendorMarkers[([string]$m.Name).ToLowerInvariant()] = $m }
+foreach ($p in @($manifest.printers)) {
+    $name = [string]$p.name
+    if (-not $vendorMarkers.ContainsKey($name.ToLowerInvariant())) { continue }
+    $two = Get-SpoolfreeProperty $p 'twoSided'
+    if ($two -isnot [bool] -or -not $two) { continue }
+    if (-not $PSCmdlet.ShouldProcess($name, 'Mark the duplex unit as installed')) { continue }
+    try {
+        $msg = Update-SpoolfreeVendorDuplexUnit -Marker $vendorMarkers[$name.ToLowerInvariant()] -TwoSided $two
+        if ($msg) { Write-Log $msg }
+    } catch { Write-Log "${name}: could not mark the duplex unit as installed: $($_.Exception.Message)" }
+}
+
 # Default duplex: applied after the queue exists, re-applied only when the manifest value changes
 # (recorded in the marker) or the queue was re-created. A failure is retried at the next sync.
 # 0.7.7: vendor queues get the driver's automatic two-sided mode (some start in manual duplex), once per queue.

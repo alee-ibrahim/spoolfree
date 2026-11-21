@@ -12,6 +12,17 @@ import { serialsFromDeviceId, type ManifestUnmanaged } from "./unmanaged";
 
 export const MANIFEST_SCHEMA = 1;
 
+/**
+ * 0.9.5: whether a printer prints two-sided, from its last successful Test (a failed Test is not stored, so the
+ * value from the previous successful one is kept); null when no Test result is stored (unknown: agents then leave the
+ * driver alone). Old Test results without sidesSupported use the stored duplex flag.
+ */
+export function twoSidedFromTest(t: { error?: string | null; duplex?: boolean; sidesSupported?: string[] } | null | undefined): boolean | null {
+  if (!t || t.error) return null;
+  if (Array.isArray(t.sidesSupported)) return t.sidesSupported.some((s) => s.toLowerCase().startsWith("two-sided"));
+  return typeof t.duplex === "boolean" ? t.duplex : null;
+}
+
 export interface ManifestPrinterInput {
   id: string;
   name: string;
@@ -26,6 +37,8 @@ export interface ManifestPrinterInput {
   legacyShares?: string[];
   legacyAliases?: string[];
   defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
+  /** 0.9.5: the printer prints two-sided (last successful Test: sides-supported); null when never tested. */
+  twoSided?: boolean | null;
   deviceUuid?: string | null;
   macAddresses?: string[];
   /** 0.9.0: further device UUIDs learned from agent reports (WSD endpoint UUIDs). */
@@ -72,6 +85,12 @@ export interface ManifestPrinter {
   legacy?: { mode: "off" | "dry-run" | "on"; shares: string[] };
   /** Default duplex for the queue (agents 0.4+): auto | one-sided | two-sided-long-edge | two-sided-short-edge. */
   defaultSides?: "auto" | "one-sided" | "two-sided-long-edge" | "two-sided-short-edge";
+  /**
+   * Agents 0.9.5+: the printer prints two-sided (its last Test listed a two-sided sides-supported value); null when
+   * unknown. On vendor queues the agent then marks the driver's installable duplex unit as installed, which drivers
+   * on a plain TCP/IP port cannot detect themselves (they default to "not installed" and hide two-sided printing).
+   */
+  twoSided?: boolean | null;
   /**
    * Device identity for legacy queue takeover (agents 0.4.2+): the IPP printer-uuid (bare, lower-case), which
    * WSD/IPP ports store, and MAC addresses (12 lower-case hex digits), which Brother default host names embed.
@@ -201,6 +220,7 @@ export function buildManifest(args: {
       revision: p.revision,
       isDefault: r.printerId === args.resolution.defaultPrinterId,
       defaultSides: p.defaultSides ?? "auto",
+      twoSided: p.twoSided ?? null,
       deviceUuid: normalizeUuid(p.deviceUuid ?? null),
       macAddresses: [...new Set((p.macAddresses ?? []).map((m) => normalizeMac(m)).filter((m): m is string => m !== null))].sort(),
       legacy: { mode: p.legacyTakeover ?? "off", shares: p.legacyTakeover && p.legacyTakeover !== "off" ? (p.legacyShares ?? []) : [] },

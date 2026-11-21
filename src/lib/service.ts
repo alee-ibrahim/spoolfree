@@ -2,7 +2,7 @@ import "server-only";
 import { desc } from "drizzle-orm";
 import { db, schema } from "./db";
 import { baseDn, directory, type ComputerObject } from "./directory";
-import { buildManifest, type ManifestPrinterInput } from "./manifest";
+import { buildManifest, twoSidedFromTest, type ManifestPrinterInput } from "./manifest";
 import { resolvePrinters, type Policy } from "./resolve";
 import { agentUpdateForManifest } from "./agent-update";
 import { autoSettings, config } from "./config";
@@ -90,6 +90,7 @@ export function toManifestInput(p: typeof schema.printers.$inferSelect, packages
     legacyShares: p.legacyShares,
     legacyAliases: p.legacyAliases,
     defaultSides: p.defaultSides,
+    twoSided: twoSidedFromTest(p.lastTest),
     deviceUuid: p.deviceUuid,
     macAddresses: p.macAddresses,
     extraUuids: p.extraUuids,
