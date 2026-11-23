@@ -1,7 +1,10 @@
+import { ListChecksIcon } from "lucide-react";
+import Link from "next/link";
 import { Suspense } from "react";
 import { ListFilters, type FilterField } from "@/components/app/list-filters";
 import { NoMatches } from "@/components/app/no-matches";
 import { PageHeader } from "@/components/app/page-header";
+import { Button } from "@/components/ui/button";
 import type { OuOption } from "@/components/app/ou-picker";
 import type { PcOption } from "@/components/app/pc-picker";
 import { config } from "@/lib/config";
@@ -90,7 +93,20 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
     }) ?? null;
   return (
     <>
-      <PageHeader title="Printers" actions={<PrinterFormDialog ouOptions={options} pcOptions={pcOptions} packages={packageOptions} defaultLegacyTakeover={config().DEFAULT_LEGACY_TAKEOVER} />} />
+      <PageHeader
+        title="Printers"
+        actions={
+          <>
+            <Button asChild variant="outline">
+              <Link href="/jobs">
+                <ListChecksIcon data-icon="inline-start" aria-hidden />
+                Recent jobs
+              </Link>
+            </Button>
+            <PrinterFormDialog ouOptions={options} pcOptions={pcOptions} packages={packageOptions} defaultLegacyTakeover={config().DEFAULT_LEGACY_TAKEOVER} />
+          </>
+        }
+      />
       <div className="flex flex-col gap-3 p-4 md:gap-4 md:p-6">
         {allPrinters.length > 0 && (
           <Suspense>

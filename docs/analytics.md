@@ -65,6 +65,21 @@ local queues, so their jobs are logged on the PC.
 - **CSV export** of the job log for the current filters (at most 100,000 rows). Cells that start with `=`, `+`, `-` or
   `@` are prefixed with `'` so spreadsheets do not run them as formulas.
 
+## The Recent jobs page
+
+**Recent jobs** (in the nav, and linked from the Printers page) lists the latest jobs of all printers in one table:
+printer, job (document name when collected, or "Test page"), user and PC, state, pages, submitted and completed time.
+Filter by printer, state and source, or search user, PC, document or printer. 50 per page, newest first.
+
+It reads only Spoolfree's own tables, so opening it sends nothing to any printer:
+
+- **PC jobs** from `print_jobs` (the agent reports above). Event 307 is logged when a job is done, so these are always
+  "printed" and have only a completed time. Without `ANALYTICS_ENABLED` there are none, and the page says so.
+- **Test prints** from the admin UI, with their full state (queued, sent, printing, printed, failed, ...).
+
+Jobs that never pass through a Windows PC (copies, USB, mobile or direct-IP printing) are not listed; the printer
+counters above count their pages. `ANALYTICS_RETENTION_DAYS` bounds the PC jobs.
+
 ## Privacy
 
 Print logs are personal data. They say who printed, when, from which PC, how much and, with document names on, what.
