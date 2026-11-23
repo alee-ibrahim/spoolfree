@@ -11,7 +11,7 @@ import {
   printerAttributes,
   Tag,
 } from "@/lib/ipp/encoding";
-import { checkDriverless, lowMarkers, markersFrom, needsAttention, normalizeLevel, printerUri, statusFromIpp } from "@/lib/ipp/interpret";
+import { checkDriverless, lowMarkers, markersFrom, needsAttention, normalizeLevel, offlineStatus, printerUri, statusFromIpp } from "@/lib/ipp/interpret";
 import { SIMS, startSim } from "../scripts/fake-printers";
 
 describe("IPP encoder", () => {
@@ -144,13 +144,22 @@ describe("IPP interpretation", () => {
         "marker-names": ["Black"],
         "marker-levels": [5],
         "printer-impressions-completed": [1234],
+        "queued-job-count": [4],
       },
       15,
     );
     expect(s.state).toBe("stopped");
+    expect(s.queuedJobs).toBe(4);
     expect(needsAttention(s)).toEqual(["media-jam"]);
     expect(lowMarkers(s).map((m) => m.name)).toEqual(["Black"]);
     expect(s.pageCount).toBe(1234);
+  });
+
+  it("treats a missing or invalid queued-job-count as unknown, not zero", () => {
+    expect(statusFromIpp({ "printer-state": [3] }, 15).queuedJobs).toBeNull();
+    expect(statusFromIpp({ "printer-state": [3], "queued-job-count": [-1] }, 15).queuedJobs).toBeNull();
+    expect(statusFromIpp({ "printer-state": [3], "queued-job-count": [0] }, 15).queuedJobs).toBe(0);
+    expect(offlineStatus("timeout").queuedJobs).toBeNull();
   });
 
   it("builds printer URIs", () => {
@@ -178,6 +187,7 @@ describe("IPP client against the simulator", () => {
     expect(s.online).toBe(true);
     expect(s.markers[0]).toMatchObject({ name: "Black Cartridge", level: 8, low: true });
     expect(s.pageCount).toBe(120447);
+    expect(s.queuedJobs).toBe(0);
   });
 
   it("times out on unreachable printers", async () => {

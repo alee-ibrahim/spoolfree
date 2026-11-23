@@ -1,0 +1,1 @@
+ALTER TABLE "printer_status" ADD COLUMN "queued_job_count" integer;

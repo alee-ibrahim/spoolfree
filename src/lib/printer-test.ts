@@ -6,6 +6,7 @@ import { getPrinterAttributes } from "./ipp/client";
 import { detectIppPath, IppDetectError, type DetectedPath } from "./ipp/detect";
 import { checkDriverless, printerUri, TEST_ATTRIBUTES, type DriverlessCheck } from "./ipp/interpret";
 import { refreshIdentity } from "./status/identity";
+import { refreshScanner } from "./escl/service";
 
 /**
  * Printer Test (IPP Get-Printer-Attributes), shared by the admin UI and the CLI (printers test): confirms the device
@@ -64,6 +65,8 @@ export async function runPrinterTest(actor: string, p: typeof schema.printers.$i
     if (changed) await audit(actor, "printer.ipp_path_detected", p.id, { before: p.ippPath, after: found.path, version: found.version });
     // printer-uuid and MAC addresses go into the manifest for legacy queue matching on PCs.
     await refreshIdentity({ ...p, ippPath: found.path }, { uuid: check.uuid, model: check.model }).catch(() => undefined);
+    // MFPs: (re)detect the eSCL scanner, so a newly added or replaced device shows its scanner at once.
+    await refreshScanner(p, actor).catch(() => undefined);
   } catch (e) {
     const tried = e instanceof IppDetectError ? e.tried : [];
     result = {

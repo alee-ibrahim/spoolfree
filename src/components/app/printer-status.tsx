@@ -1,4 +1,5 @@
-import { CircleCheckIcon, CircleDashedIcon, LoaderIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
+import { CircleCheckIcon, CircleDashedIcon, LoaderIcon, ScanLineIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { lowMarkers, needsAttention, stripSeverity, type Marker } from "@/lib/ipp/interpret";
@@ -65,6 +66,110 @@ export function StatusBadges({ status }: { status: StatusLike }) {
         </Badge>
       )}
     </div>
+  );
+}
+
+/** eSCL feeder states that need someone at the device (AdfState without "ScannerAdf"). */
+const ADF_PROBLEMS: Record<string, string> = {
+  Jam: "Feeder jam",
+  Mispick: "Feeder mispick",
+  HatchOpen: "Feeder cover open",
+  MultipickDetected: "Feeder multi-feed",
+  InputTrayFailed: "Feeder tray failed",
+  InputTrayOverloaded: "Feeder overloaded",
+  DuplexPageTooShort: "Feeder page too short",
+  DuplexPageTooLong: "Feeder page too long",
+};
+
+/** A scanner's eSCL state as icon + label; feeder problems as their own badge. */
+export function ScannerStateBadge({ state, adfState, showIdle = true }: { state: string; adfState: string | null; showIdle?: boolean }) {
+  const adfProblem = adfState ? ADF_PROBLEMS[adfState] : undefined;
+  let main: ReactNode = null;
+  if (state === "idle") {
+    if (showIdle)
+      main = (
+        <Badge variant="secondary">
+          <ScanLineIcon data-icon="inline-start" className="text-status-good" aria-hidden />
+          Scanner ready
+        </Badge>
+      );
+  } else if (state === "processing" || state === "testing")
+    main = (
+      <Badge variant="secondary">
+        <LoaderIcon data-icon="inline-start" aria-hidden />
+        Scanning
+      </Badge>
+    );
+  else if (state === "stopped" || state === "down")
+    main = (
+      <Badge variant="destructive">
+        <TriangleAlertIcon data-icon="inline-start" aria-hidden />
+        Scanner {state}
+      </Badge>
+    );
+  else
+    main = (
+      <Badge variant="outline">
+        <ScanLineIcon data-icon="inline-start" aria-hidden />
+        Scanner state unknown
+      </Badge>
+    );
+  return (
+    <>
+      {main}
+      {adfProblem && (
+        <Badge variant="destructive">
+          <TriangleAlertIcon data-icon="inline-start" aria-hidden />
+          {adfProblem}
+        </Badge>
+      )}
+    </>
+  );
+}
+
+/**
+ * The scanner line of the Status column (MFPs with an eSCL scanner only). Hidden while the printer itself is offline,
+ * where "Offline" already says it all.
+ */
+export function ScannerStatus({ printerOnline, scanner }: { printerOnline: boolean; scanner: { state: string | null; adfState: string | null; error: string | null } | null }) {
+  if (!scanner || (!printerOnline && !scanner.state)) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {scanner.state ? (
+        <ScannerStateBadge state={scanner.state} adfState={scanner.adfState} />
+      ) : (
+        <Badge variant="outline" title={scanner.error ?? undefined}>
+          <TriangleAlertIcon data-icon="inline-start" className="text-amber-600 dark:text-amber-400" aria-hidden />
+          Scanner not answering
+        </Badge>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Jobs in the printer's own queue (IPP queued-job-count: pending, held or processing) at the last poll.
+ * "—" when it is not known: not polled yet, offline (a stale count would mislead), or not reported by the printer.
+ */
+export function QueueCount({ status }: { status: { online: boolean; queuedJobs: number | null; polledAgo: string } | null }) {
+  const unknown = (why: string) => (
+    <span className="text-muted-foreground" title={why}>
+      —<span className="sr-only">{why}</span>
+    </span>
+  );
+  if (!status) return unknown("Queue unknown: not polled yet");
+  if (!status.online) return unknown(`Queue unknown: printer offline (polled ${status.polledAgo})`);
+  if (status.queuedJobs === null) return unknown(`Queue unknown: the printer does not report it (polled ${status.polledAgo})`);
+  const n = status.queuedJobs;
+  const label = `${n} ${n === 1 ? "job" : "jobs"} in queue (polled ${status.polledAgo})`;
+  return n === 0 ? (
+    <span className="tabular-nums text-muted-foreground" title={label}>
+      0<span className="sr-only"> jobs in queue</span>
+    </span>
+  ) : (
+    <Badge variant="secondary" className="tabular-nums" title={label}>
+      {n} {n === 1 ? "job" : "jobs"}
+    </Badge>
   );
 }
 

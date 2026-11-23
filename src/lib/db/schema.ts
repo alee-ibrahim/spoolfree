@@ -16,6 +16,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { DriverlessCheck, Marker } from "../ipp/interpret";
+import type { ScannerInfo } from "../escl/escl";
 
 export type LegacyTakeover = "off" | "dry-run" | "on";
 /** Default duplex set on the PC queue. "auto" leaves the driver default alone. */
@@ -182,6 +183,11 @@ export const printers = pgTable(
     /** Recent completed IPP jobs measured by the poller (newest last, at most 20). */
     speedSamples: jsonb("speed_samples").$type<SpeedSample[]>().notNull().default([]),
     speedCheckedAt: timestamp("speed_checked_at", { withTimezone: true }),
+    /** eSCL scanner on the device (endpoint and capabilities), null when none was found. Re-detected daily and by Test. */
+    scanner: jsonb("scanner").$type<ScannerInfo>(),
+    scannerCheckedAt: timestamp("scanner_checked_at", { withTimezone: true }),
+    /** Last test scan started (rate limit: TEST_PRINT_MIN_INTERVAL_SECONDS). */
+    lastTestScanAt: timestamp("last_test_scan_at", { withTimezone: true }),
     lastTestAt: timestamp("last_test_at", { withTimezone: true }),
     lastTest: jsonb("last_test").$type<DriverlessCheck & { error?: string | null; ippPath?: string; ippRequestVersion?: string }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -248,6 +254,14 @@ export const printerStatus = pgTable("printer_status", {
   stateMessage: text("state_message"),
   markers: jsonb("markers").$type<Marker[]>().notNull().default([]),
   pageCount: integer("page_count"),
+  /** IPP queued-job-count at the last poll; null when the printer did not report it. Never carried over from an older poll. */
+  queuedJobs: integer("queued_job_count"),
+  /** eSCL ScannerStatus at the last poll (printers with a scanner only): idle, processing, testing, stopped, down. */
+  scannerState: text("scanner_state"),
+  /** eSCL AdfState without "ScannerAdf" (Empty, Loaded, Jam, ...); null without a feeder. */
+  scannerAdfState: text("scanner_adf_state"),
+  /** Why the scanner status could not be read at the last poll. */
+  scannerError: text("scanner_error"),
   source: text("source").notNull().default("none"),
   error: text("error"),
   lastSeen: timestamp("last_seen", { withTimezone: true }),

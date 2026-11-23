@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { lowMarkers, needsAttention, offlineStatus, printerUri, STATUS_ATTRIBUTES, statusFromIpp, type PrinterStatus } from "../ipp/interpret";
 import { identityDue, refreshIdentity } from "./identity";
 import { snmpStatus } from "./snmp";
+import { pollScanner, refreshScanner, scannerDue } from "../escl/service";
 
 type PrinterRow = typeof schema.printers.$inferSelect;
 
@@ -89,6 +90,16 @@ export async function pollAll(): Promise<number> {
     const now = new Date();
     const prev = previous.get(p.id);
     const key = alertKey(s);
+    // MFPs: find the eSCL scanner once a day while the device is up, then read its status every poll.
+    let scanner = p.scanner;
+    if (s.online && scannerDue(p, now)) {
+      const found = await refreshScanner(p).catch((e) => {
+        console.warn(`[spoolfree] scanner of ${p.name}: ${(e as Error).message}`);
+        return null;
+      });
+      if (found && (found.scanner || found.tried.some((t) => t.result === "no eSCL service"))) scanner = found.scanner;
+    }
+    const scannerStatus = await pollScanner({ host: p.host, scanner });
     const values = {
       online: s.online,
       state: s.state,
@@ -96,6 +107,9 @@ export async function pollAll(): Promise<number> {
       stateMessage: s.stateMessage,
       markers: s.markers,
       pageCount: s.pageCount ?? prev?.pageCount ?? null,
+      // Unlike the page counter, a queue length goes stale at once: unknown this poll means unknown.
+      queuedJobs: s.queuedJobs,
+      ...scannerStatus,
       source: s.source,
       error: s.error,
       lastPolledAt: now,

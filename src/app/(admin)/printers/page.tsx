@@ -15,7 +15,7 @@ import { driverNames } from "@/lib/drivers/package";
 import { loadPrinterAssignments } from "@/lib/printer-assignments";
 import { driverDecision, loadPackagesForMatch } from "@/lib/service";
 import { vendorFallbackByQueue } from "@/lib/agent-reports";
-import { shortDn } from "@/lib/format";
+import { shortDn, timeAgo } from "@/lib/format";
 import { activePrinterFilters, brandOptions, filterPrinters, parsePrinterFilters } from "@/lib/list-filters/printers";
 import { PrinterFormDialog, PrintersTable, type DriverPackageOption } from "./printers-client";
 
@@ -144,7 +144,18 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
             vendorProtocol: p.vendorProtocol,
             lprQueue: p.lprQueue,
             ippVersions: p.lastTest?.ippVersions ?? null,
-            status: p.status ? { online: p.status.online, state: p.status.state, stateReasons: p.status.stateReasons, markers: p.status.markers } : null,
+            hasScanner: !!p.scanner,
+            status: p.status
+              ? {
+                  online: p.status.online,
+                  state: p.status.state,
+                  stateReasons: p.status.stateReasons,
+                  markers: p.status.markers,
+                  queuedJobs: p.status.queuedJobs,
+                  polledAgo: timeAgo(p.status.lastPolledAt),
+                  scanner: p.scanner ? { state: p.status.scannerState, adfState: p.status.scannerAdfState, error: p.status.scannerError } : null,
+                }
+              : null,
             decision: {
               mode: dec.mode,
               source: dec.source,

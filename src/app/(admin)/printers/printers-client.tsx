@@ -46,7 +46,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { OuPicker, type OuOption, type PickedOu } from "@/components/app/ou-picker";
 import { PcPicker, type PcOption, type PcOverride } from "@/components/app/pc-picker";
-import { StatusBadges } from "@/components/app/printer-status";
+import { QueueCount, ScannerStatus, StatusBadges } from "@/components/app/printer-status";
+import { TestScanDialog, type TestScanTarget } from "@/components/app/test-scan-dialog";
 import { TestPrintDialog, type TestPrintTarget } from "@/components/app/test-print-dialog";
 import { OuBadges, PcBadges } from "@/components/app/assignment-badges";
 import { cn } from "@/lib/utils";
@@ -120,7 +121,13 @@ export interface PrinterView {
   /** PCs whose agent reports this printer's queue on the per-PC vendor fallback (0.8.1). */
   vendorFallbackPcs: string[];
   /** Live status from the poller (null: not polled yet). */
-  status: { online: boolean; state: string; stateReasons: string[]; markers: Marker[] } | null;
+  status: { online: boolean; state: string; stateReasons: string[]; markers: Marker[]; queuedJobs: number | null;
+    polledAgo: string;
+    /** eSCL scanner status at the last poll; null when the device has no (detected) scanner. */
+    scanner: { state: string | null; adfState: string | null; error: string | null } | null;
+  } | null;
+  /** An eSCL scanner was found on the device (MFP). */
+  hasScanner: boolean;
 }
 
 function useResultToast(state: ActionResult | null, onOk: () => void) {
@@ -744,6 +751,7 @@ function PrinterActions({
   pending,
   onTest,
   onTestPrint,
+  onTestScan,
   onReplace,
   onDelete,
 }: {
@@ -754,6 +762,7 @@ function PrinterActions({
   pending: boolean;
   onTest: () => void;
   onTestPrint: () => void;
+  onTestScan: () => void;
   onReplace: () => void;
   onDelete: () => void;
 }) {
@@ -769,6 +778,7 @@ function PrinterActions({
           Test (IPP)
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onTestPrint}>Test print…</DropdownMenuItem>
+        <DropdownMenuItem onSelect={onTestScan}>{p.hasScanner ? "Test scan…" : "Test scan (find scanner)…"}</DropdownMenuItem>
         <PrinterFormDialog
           printer={p}
           ouOptions={ouOptions}
@@ -848,6 +858,8 @@ export function PrintersTable({
   const [testResult, setTestResult] = useState<(TestResult & { name: string; decision?: DriverDecisionView }) | null>(null);
   const [testPrint, setTestPrint] = useState<TestPrintTarget | null>(null);
   const openTestPrint = (p: PrinterView) => setTestPrint({ kind: "printer", printerId: p.id, printerName: p.name });
+  const [testScan, setTestScan] = useState<TestScanTarget | null>(null);
+  const openTestScan = (p: PrinterView) => setTestScan({ printerId: p.id, printerName: p.name });
   const [pending, startTransition] = useTransition();
   const runTest = (p: PrinterView) =>
     startTransition(async () => {
@@ -895,8 +907,12 @@ export function PrintersTable({
                   <PcBadges pcs={p.pcOverrides} />
                 </div>
               )}
-              <div className="pt-1">
+              <div className="flex flex-wrap items-center gap-2 pt-1">
                 <StatusBadges status={p.status} />
+                <ScannerStatus printerOnline={!!p.status?.online} scanner={p.status?.scanner ?? null} />
+                <span className="text-xs text-muted-foreground">
+                  Queue: <QueueCount status={p.status} />
+                </span>
               </div>
               <div className="flex flex-wrap gap-1 pt-1">
                 <DriverlessBadge p={p} />
@@ -909,7 +925,7 @@ export function PrintersTable({
                 <PrinterIcon data-icon="inline-start" />
                 Test print
               </Button>
-              <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onTestPrint={() => openTestPrint(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+              <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onTestPrint={() => openTestPrint(p)} onTestScan={() => openTestScan(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
             </ItemActions>
           </Item>
         ))}
@@ -921,6 +937,9 @@ export function PrintersTable({
               <TableHead className="pl-4">Name</TableHead>
               <TableHead>IPP address</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead className="text-right" title="Jobs waiting or printing on the printer itself, as of the last status poll">
+                Queue
+              </TableHead>
               <TableHead>Location</TableHead>
               <TableHead>Driverless</TableHead>
               <TableHead>OUs</TableHead>
@@ -949,7 +968,13 @@ export function PrintersTable({
                   {!p.ippPathAuto && <span className="ml-1 font-sans text-muted-foreground">(manual)</span>}
                 </TableCell>
                 <TableCell className="max-w-48 whitespace-normal">
-                  <StatusBadges status={p.status} />
+                  <div className="flex flex-col gap-1">
+                    <StatusBadges status={p.status} />
+                    <ScannerStatus printerOnline={!!p.status?.online} scanner={p.status?.scanner ?? null} />
+                  </div>
+                </TableCell>
+                <TableCell className="text-right">
+                  <QueueCount status={p.status} />
                 </TableCell>
                 <TableCell className="max-w-40 whitespace-normal">{p.location ?? "—"}</TableCell>
                 <TableCell>
@@ -970,7 +995,7 @@ export function PrintersTable({
                     <Button variant="ghost" size="icon-sm" onClick={() => openTestPrint(p)} aria-label={`Test print ${p.name}`} title="Test print">
                       <PrinterIcon />
                     </Button>
-                    <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onTestPrint={() => openTestPrint(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
+                    <PrinterActions p={p} ouOptions={ouOptions} pcOptions={pcOptions} packages={packages} pending={pending} onTest={() => runTest(p)} onTestPrint={() => openTestPrint(p)} onTestScan={() => openTestScan(p)} onReplace={() => setReplacing(p)} onDelete={() => setDeleting(p)} />
                   </div>
                 </TableCell>
               </TableRow>
@@ -982,6 +1007,7 @@ export function PrintersTable({
       {replacing && <ReplaceDialog printer={replacing} open onOpenChange={(o) => !o && setReplacing(null)} />}
       <TestDialog result={testResult} onOpenChange={(o) => !o && setTestResult(null)} />
       <TestPrintDialog target={testPrint} onOpenChange={(o) => !o && setTestPrint(null)} />
+      <TestScanDialog target={testScan} onOpenChange={(o) => !o && setTestScan(null)} />
       <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
