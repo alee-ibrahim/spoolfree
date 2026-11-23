@@ -95,7 +95,7 @@ const schema = z.object({
   LOW_TONER_PERCENT: z.coerce.number().int().min(0).max(100).default(15),
   ALERT_WEBHOOK_URL: z.string().optional(),
   /**
-   * Printer job list for Recent jobs: one IPP Get-Jobs (completed jobs, at most 20) per IPP-reachable printer in each
+   * Printer job list for the Analytics job log: one IPP Get-Jobs (completed jobs, at most 20) per IPP-reachable printer in each
    * poll cycle. On unless "0"/"false". Devices that refuse Get-Jobs are remembered and never asked again.
    */
   PRINTER_JOBS_POLL: z

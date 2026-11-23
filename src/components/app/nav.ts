@@ -2,7 +2,6 @@ import {
   ActivityIcon,
   ChartColumnIcon,
   FolderTreeIcon,
-  ListChecksIcon,
   MonitorSmartphoneIcon,
   PackageIcon,
   PrinterIcon,
@@ -25,7 +24,6 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     label: "Monitor",
     items: [
       { href: "/", label: "Status", icon: ActivityIcon },
-      { href: "/jobs", label: "Recent jobs", short: "Jobs", icon: ListChecksIcon },
       { href: "/analytics", label: "Analytics", icon: ChartColumnIcon },
       { href: "/agents", label: "Agents", icon: ServerCogIcon },
     ],

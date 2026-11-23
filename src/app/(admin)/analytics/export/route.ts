@@ -5,7 +5,7 @@ import { csvCell, parseFilters } from "@/lib/analytics/filters";
 import { jobLog } from "@/lib/analytics/queries";
 import { config } from "@/lib/config";
 
-/** The job log for the current filters as CSV (admins only). At most EXPORT_MAX rows. */
+/** The job log (PC and printer jobs) for the current filters as CSV (admins only). At most EXPORT_MAX rows. */
 const EXPORT_MAX = 100_000;
 
 export async function GET(req: Request) {
@@ -16,11 +16,11 @@ export async function GET(req: Request) {
   const f = parseFilters(Object.fromEntries(url.searchParams), dayIn(c.ANALYTICS_TIME_ZONE, new Date()));
   const { rows } = await jobLog(f, { limit: EXPORT_MAX });
   const docs = c.ANALYTICS_COLLECT_DOCUMENT_NAMES;
-  const cols = ["printed_at_utc", "user", "computer", "ou", "printer", "managed", "queue", "port_host", "pages", "bytes", ...(docs ? ["document"] : [])];
+  const cols = ["printed_at_utc", "user", "computer", "ou", "printer", "managed", "queue", "port_host", "pages", "bytes", ...(docs ? ["document"] : []), "source", "state"];
   const lines = [cols.join(",")];
   for (const j of rows) {
     lines.push(
-      [j.printedAt, j.userName, j.computerName, j.ouDn, j.printer, j.printerId ? "yes" : "no", j.queueName, j.portHost, j.pages, j.bytes, ...(docs ? [j.documentName] : [])]
+      [j.printedAt, j.userName, j.computerName, j.ouDn, j.printer, j.printerId ? "yes" : "no", j.queueName, j.portHost, j.pages, j.bytes, ...(docs ? [j.documentName] : []), j.source === "printer" ? "Printer" : "PC", j.state]
         .map(csvCell)
         .join(","),
     );

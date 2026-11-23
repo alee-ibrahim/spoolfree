@@ -11,10 +11,11 @@ import type { IppValue } from "@/lib/ipp/encoding";
 import { statusFromIpp } from "@/lib/ipp/interpret";
 import { jobAttributes, jobsDue, jobTime, pollPrinterJobs, purgePrinterJobs, toPrinterJobs, unsupportedReason } from "@/lib/status/jobs";
 import { pollAll } from "@/lib/status/poller";
-import { recentJobsQuery, toRecentJob, type RecentJobFilters } from "@/lib/recent-jobs";
+import { jobLogQuery, toJobLogRow } from "@/lib/analytics/job-log";
+import type { AnalyticsFilters } from "@/lib/analytics/filters";
 import { SIMS, startSim } from "../scripts/fake-printers";
 
-/* Printer job list (PRINTER_JOBS_POLL): Get-Jobs inside the status poll, stored with dedupe, merged into Recent jobs. */
+/* Printer job list (PRINTER_JOBS_POLL): Get-Jobs inside the status poll, stored with dedupe, merged into the Analytics job log. */
 
 const pg = vi.hoisted(() => {
   process.env.ANALYTICS_COLLECT_DOCUMENT_NAMES = "1";
@@ -190,33 +191,29 @@ describe("printer job list (poll)", () => {
     expect(left.map((r) => r.jobId).sort()).toEqual([3, 4]);
   });
 
-  it("merges printer jobs into Recent jobs as source printer, without PC jobs and test prints listed twice", async () => {
+  it("merges printer jobs into the job log as source Printer, without the printer's copy of a PC job", async () => {
     const p = await addPrinter("Merged", server);
     const t = new Date("2026-11-20T09:00:00Z");
     const min = (m: number) => new Date(t.getTime() + m * 60_000);
     await d.insert(schema.printJobs).values({ computerGuid: "g", computerName: "FIN-01", recordId: 1, printedAt: t, userName: "EXAMPLE\\Alice", queueName: "Merged", printerId: p.id, pages: 2 });
-    await d.insert(schema.testPrints).values({ printerId: p.id, printerName: "Merged", mode: "direct", requestedBy: "admin@example.org", state: "printed", createdAt: min(30), jobId: 77 });
     await d.insert(schema.printerJobs).values([
       // The PC job above, as the printer lists it.
       { printerId: p.id, jobId: 70, createdRaw: 1, owner: "alice", state: "completed", pages: 2, createdAt: min(0), completedAt: min(1) },
-      // The test print above.
-      { printerId: p.id, jobId: 77, createdRaw: 2, owner: "spoolfree", state: "completed", createdAt: min(30), completedAt: min(30) },
       // A copy at the device, and a canceled job by the same user an hour later: both only the printer knows.
       { printerId: p.id, jobId: 78, createdRaw: 3, owner: "copy", state: "completed", pages: 12, createdAt: min(40), completedAt: min(41) },
       { printerId: p.id, jobId: 79, createdRaw: 4, owner: "alice", state: "canceled", createdAt: min(60), completedAt: min(60) },
       { printerId: p.id, jobId: 80, createdRaw: 5, owner: "x", state: "aborted", createdAt: min(61), completedAt: null, seenAt: min(62) },
     ]);
-    const none: Omit<RecentJobFilters, "page"> = { printer: null, state: null, source: null, q: null };
-    const all = (await d.execute<Record<string, unknown>>(recentJobsQuery(none, 50))).rows.map(toRecentJob);
-    expect(all.map((j) => [j.source, j.jobRef, j.owner, j.state])).toEqual([
-      ["printer", "80", "x", "failed"],
-      ["printer", "79", "alice", "canceled"],
-      ["printer", "78", "copy", "printed"],
-      ["test", "77", "admin@example.org", "printed"],
-      ["pc", "1", "EXAMPLE\\Alice", "printed"],
+    const f: AnalyticsFilters = { from: "2026-11-20", to: "2026-11-20", user: null, printer: p.id, ou: null, computer: null, q: null, source: null };
+    const all = (await d.execute<Record<string, unknown>>(jobLogQuery(f, "UTC", 50))).rows.map(toJobLogRow);
+    expect(all.map((j) => [j.source, j.userName, j.state, j.pages])).toEqual([
+      ["printer", "x", "aborted", null],
+      ["printer", "alice", "canceled", null],
+      ["printer", "copy", "completed", 12],
+      ["pc", "EXAMPLE\\Alice", "completed", 2],
     ]);
-    const copy = all.find((j) => j.jobRef === "78")!;
-    expect(copy).toMatchObject({ printer: "Merged", printerId: p.id, pages: 12, computer: null, submittedAt: min(40).toISOString(), completedAt: min(41).toISOString() });
-    expect((await d.execute<Record<string, unknown>>(recentJobsQuery({ ...none, source: "printer" }, 50))).rows).toHaveLength(3);
+    expect(all[0].printedAt).toBe(min(61).toISOString()); // no completion time: creation time
+    expect(all[2]).toMatchObject({ printer: "Merged", printerId: p.id, computerName: null, queueName: null, printedAt: min(41).toISOString() });
+    expect((await d.execute<Record<string, unknown>>(jobLogQuery({ ...f, source: "printer" }, "UTC", 50))).rows).toHaveLength(3);
   });
 });

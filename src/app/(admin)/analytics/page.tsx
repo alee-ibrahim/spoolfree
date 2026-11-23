@@ -46,19 +46,20 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
     filterOptions(f),
   ]);
   // Jobs in the date range before the other filters, for "N of M jobs".
-  const anyFilter = !!(f.user || f.printer || f.ou || f.computer || f.q);
-  const rangeTotal = anyFilter ? (await jobLog({ ...f, user: null, printer: null, ou: null, computer: null, q: null }, { limit: 0 })).total : log.total;
+  const anyFilter = !!(f.user || f.printer || f.ou || f.computer || f.q || f.source);
+  const rangeTotal = anyFilter ? (await jobLog({ ...f, user: null, printer: null, ou: null, computer: null, q: null, source: null }, { limit: 0 })).total : log.total;
   const fields: FilterField[] = [
     { kind: "dates", label: "Date range", fromKey: "from", toKey: "to", today, required: true, from: f.from, to: f.to },
     { kind: "select", key: "user", label: "User", allLabel: "All users", searchable: true, options: options.users.map((u) => ({ value: u, label: u })) },
     { kind: "select", key: "printer", label: "Printer", allLabel: "All printers", searchable: true, options: options.printers },
     { kind: "select", key: "ou", label: "OU", allLabel: "All OUs", searchable: true, options: options.ous.map((o) => ({ value: o, label: shortDn(o) || o })) },
     { kind: "select", key: "computer", label: "PC", allLabel: "All PCs", searchable: true, options: options.computers.map((c) => ({ value: c, label: c })) },
+    { kind: "toggle", key: "source", label: "Source", allLabel: "All", options: [{ value: "pc", label: "PC" }, { value: "printer", label: "Printer" }] },
   ];
   const showDocs = c.ANALYTICS_COLLECT_DOCUMENT_NAMES;
   const link = (extra: Record<string, string | null>) => `/analytics?${filterParams(f, extra)}`;
   const kpis = [
-    { label: "Print jobs", value: sum.jobs },
+    { label: "PC jobs", value: sum.jobs },
     { label: "Pages from PCs", value: sum.pages },
     { label: "Active users", value: sum.users },
     { label: "Printers used", value: sum.printers },
@@ -84,8 +85,8 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
             <ChartColumnIcon />
             <AlertTitle>Print analytics is off</AlertTitle>
             <AlertDescription>
-              Agents collect print jobs only when ANALYTICS_ENABLED is on. Printer page counters are recorded either way. Read the privacy notes
-              in the docs before you turn it on.
+              Agents collect print jobs only when ANALYTICS_ENABLED is on. Printer page counters are recorded either way, and the job log
+              still lists the printers&apos; own completed jobs (PRINTER_JOBS_POLL). Read the privacy notes in the docs before you turn it on.
             </AlertDescription>
           </Alert>
         )}
@@ -93,7 +94,7 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
         <Suspense>
           <ListFilters
             fields={fields}
-            searchLabel="Search print jobs"
+            searchLabel="Search the job log"
             searchPlaceholder={showDocs ? "User or document name" : "User name"}
             total={rangeTotal}
             shown={log.total}
@@ -121,11 +122,12 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
               <EmptyMedia variant="icon">
                 <ChartColumnIcon />
               </EmptyMedia>
-              <EmptyTitle>No print jobs in this range</EmptyTitle>
+              <EmptyTitle>No print jobs from PCs in this range</EmptyTitle>
               <EmptyDescription>
                 {c.ANALYTICS_ENABLED
                   ? "Agents send the jobs PCs print at each sync. Widen the date range or clear the filters."
-                  : "Turn on ANALYTICS_ENABLED to collect print jobs from PCs."}
+                  : "Turn on ANALYTICS_ENABLED to collect print jobs from PCs."}{" "}
+                {c.PRINTER_JOBS_POLL && "Jobs the printers list themselves are in the job log below."}
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -230,13 +232,15 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
           <CardHeader>
             <CardTitle>Job log</CardTitle>
             <CardDescription>
-              {nf.format(log.total)} job{log.total === 1 ? "" : "s"} in the range. Newest first. Times in {tz}.
+              {nf.format(log.total)} job{log.total === 1 ? "" : "s"} in the range. Newest first. Times in {tz}. Source PC: jobs agents
+              reported. Source Printer: jobs from the printers&apos; own job lists that no PC reported (copies, USB, mobile, direct IP);
+              they count in the job log only, not in the totals and charts above.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <ItemGroup className="gap-2 md:hidden">
               {log.rows.map((j) => (
-                <Item key={j.id} variant="outline" size="sm">
+                <Item key={`${j.source}-${j.id}`} variant="outline" size="sm">
                   <ItemContent className="min-w-0">
                     <ItemTitle className="w-full justify-between">
                       <span className="truncate">{j.userName ?? "(unknown user)"}</span>
@@ -244,7 +248,8 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
                     </ItemTitle>
                     <ItemDescription>
                       {j.printer}
-                      {!j.printerId && " (unmanaged)"} · {j.computerName}
+                      {!j.printerId && " (unmanaged)"} · {j.computerName ?? "printer job"}
+                      {j.state !== "completed" && ` · ${j.state}`}
                     </ItemDescription>
                     {showDocs && j.documentName && <ItemDescription className="break-all">{j.documentName}</ItemDescription>}
                     <ItemDescription className="text-xs tabular-nums">{localTime(j.printedAt, tz)}</ItemDescription>
@@ -256,6 +261,7 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
               <TableHeader>
                 <TableRow>
                   <TableHead>Time</TableHead>
+                  <TableHead>Source</TableHead>
                   <TableHead>User</TableHead>
                   <TableHead>PC</TableHead>
                   <TableHead>Printer</TableHead>
@@ -265,10 +271,18 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
               </TableHeader>
               <TableBody>
                 {log.rows.map((j) => (
-                  <TableRow key={j.id}>
+                  <TableRow key={`${j.source}-${j.id}`}>
                     <TableCell className="tabular-nums">{localTime(j.printedAt, tz)}</TableCell>
+                    <TableCell>
+                      <Badge variant={j.source === "pc" ? "secondary" : "outline"}>{j.source === "pc" ? "PC" : "Printer"}</Badge>
+                      {j.state !== "completed" && (
+                        <Badge variant="destructive" className="ml-2">
+                          {j.state}
+                        </Badge>
+                      )}
+                    </TableCell>
                     <TableCell>{j.userName ?? "—"}</TableCell>
-                    <TableCell>{j.computerName}</TableCell>
+                    <TableCell>{j.computerName ?? "—"}</TableCell>
                     <TableCell>
                       {j.printer}
                       {!j.printerId && (
@@ -309,7 +323,7 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/analyt
 
         <p className="flex items-start gap-2 text-xs text-muted-foreground">
           <ShieldCheckIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
-          Print jobs are kept for {c.ANALYTICS_RETENTION_DAYS} days. Document names are {showDocs ? "collected" : "not collected"}{" "}
+          PC jobs are kept for {c.ANALYTICS_RETENTION_DAYS} days, printer jobs for {c.PRINTER_JOBS_RETENTION_DAYS}. Document names are {showDocs ? "collected" : "not collected"}{" "}
           (ANALYTICS_COLLECT_DOCUMENT_NAMES). Tell staff that printing is logged.
         </p>
       </div>

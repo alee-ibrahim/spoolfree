@@ -52,37 +52,53 @@ local queues, so their jobs are logged on the PC.
 
 ## The Analytics page
 
-- **Filters.** A date range (presets or a custom range) and filters for user, printer, OU and PC, in one row above
-  everything they scope. They are part of the URL, so a view can be bookmarked or shared.
-- **Totals.** Print jobs, pages from PCs, active users and printers used.
+- **Filters.** A date range (presets or a custom range) and filters for user, printer, OU, PC and the job log's source,
+  in one row above everything they scope. They are part of the URL, so a view can be bookmarked or shared.
+- **Totals.** PC jobs, pages from PCs, active users and printers used.
 - **Charts.** Pages per day, then the top users, top PCs, top printers and pages by OU (the PC's OU when the job was
   received), each with a table view.
 - **Printer counters and PC jobs.** For each printer, the pages its own counter advanced in the range, split into pages
   PCs reported and the rest. A counter that goes backwards, or a replaced device (a new revision), restarts that day's
   count, so a swap never shows a negative or huge number.
 - **Queues Spoolfree does not manage.** Unmanaged queues with their port host, PC count and pages.
-- **Job log.** Newest first, 25 per page. Document names appear only when they are collected.
-- **CSV export** of the job log for the current filters (at most 100,000 rows). Cells that start with `=`, `+`, `-` or
-  `@` are prefixed with `'` so spreadsheets do not run them as formulas.
+- **Job log.** PC jobs and printer jobs (below) in one list, newest first, 25 per page, with a Source column (PC or
+  Printer). Document names appear only when they are collected.
+- **CSV export** of the job log for the current filters (at most 100,000 rows), with `source` (`PC` or `Printer`) and
+  `state` columns at the end. Cells that start with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not
+  run them as formulas.
 
-## The Recent jobs page
+## Printer jobs in the job log
 
-**Recent jobs** (in the nav, and linked from the Printers page) lists the latest jobs of all printers in one table:
-printer, job (document name when collected, or "Test page"), user and PC, state, pages, submitted and completed time.
-Filter by printer, state and source, or search user, PC, document or printer. 50 per page, newest first.
+The job log reads only Spoolfree's own tables, so opening it sends nothing to any printer. It has two sources:
 
-It reads only Spoolfree's own tables, so opening it sends nothing to any printer:
-
-- **PC jobs** from `print_jobs` (the agent reports above). Event 307 is logged when a job is done, so these are always
-  "printed" and have only a completed time. Without `ANALYTICS_ENABLED` there are none, and the page says so.
-- **Printer jobs** from `printer_jobs`: each printer's own list of completed jobs, read by the status poller
+- **PC** jobs from `print_jobs` (the agent reports above). Event 307 is logged when a job is done, so these are always
+  completed. Without `ANALYTICS_ENABLED` there are none.
+- **Printer** jobs from `printer_jobs`: each printer's own list of completed jobs, read by the status poller
   (`PRINTER_JOBS_POLL`, on by default). These include jobs that never passed through a Windows PC: copies, USB, mobile
   and direct-IP printing. They show the user as the printer reports it (devices may leave it empty or anonymise it),
-  pages, state (printed, canceled, failed) and times; no PC name.
-- **Test prints** from the admin UI, with their full state (queued, sent, printing, printed, failed, ...).
+  pages and state (completed, canceled, aborted); no PC, OU or queue. Their time is the printer's completion time
+  (else creation time, else when the poller first saw the job).
 
-A printer job that is clearly a job listed already is not shown twice: the printer's copy of a PC job (same printer,
-same user name without the domain, finished within 5 minutes) and of a direct test print (same printer and job id).
+A printer job that is the printer's copy of a PC job (same printer, same user name without the domain, within 5
+minutes) is not listed, so a job printed from a PC appears once, as a PC job.
+
+How the filters apply to printer jobs:
+
+- **Date range, printer and search** (user or document name) apply to both sources.
+- **User** matches printer jobs without the domain: `EXAMPLE\alice` also finds printer jobs by `alice`. The user and
+  printer choices include the users and printers of printer jobs in the range.
+- **PC, OU and unmanaged queue** filters show PC jobs only (printer jobs have none of these).
+- **Source** shows PC jobs, printer jobs or both. The "N of M jobs" count and the pages cover both sources.
+
+**Totals and charts stay PC-only.** The totals, pages over time, top users, PCs, printers and OUs, and unmanaged queues
+count PC jobs only, as before. Printer jobs are not added there: many are the printer's copy of a PC job, matched only
+by a 5-minute heuristic, and printers keep only their last 20 jobs per poll, so adding them would double-count or
+under-count pages. Pages that did not come from PCs are already measured exactly by **Printer counters and PC jobs**
+(from the page counters), and each such job is listed in the job log.
+
+**With `ANALYTICS_ENABLED` off** the Analytics page still shows the job log (it was never hidden), so printer jobs are
+listed there; the totals and charts are empty, and the notice at the top says the job log still lists printer jobs.
+Test prints from the admin UI are not in the job log: they are listed under "Recent test prints" in the test print dialog.
 
 ### Printer job list: what the poller sends
 
