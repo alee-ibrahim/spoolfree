@@ -182,6 +182,13 @@ export const printers = pgTable(
     /** Recent completed IPP jobs measured by the poller (newest last, at most 20). */
     speedSamples: jsonb("speed_samples").$type<SpeedSample[]>().notNull().default([]),
     speedCheckedAt: timestamp("speed_checked_at", { withTimezone: true }),
+    /**
+     * Printer job list (PRINTER_JOBS_POLL): the revision at which the device refused IPP Get-Jobs (operation not
+     * supported, not authorised, HTTP 4xx), and why. The poller never asks that device again; a new endpoint or a
+     * replaced device (new revision) is asked once more.
+     */
+    jobsUnsupportedRevision: integer("jobs_unsupported_revision"),
+    jobsUnsupportedReason: text("jobs_unsupported_reason"),
     lastTestAt: timestamp("last_test_at", { withTimezone: true }),
     lastTest: jsonb("last_test").$type<DriverlessCheck & { error?: string | null; ippPath?: string; ippRequestVersion?: string }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -569,3 +576,43 @@ export const testPrints = pgTable(
 );
 
 export type TestPrint = typeof testPrints.$inferSelect;
+
+// --- Printer job list (0012) ------------------------------------------------------------------------------------
+
+/** IPP job-state keywords stored for printer jobs (Get-Jobs which-jobs=completed only returns these). */
+export const PRINTER_JOB_STATES = ["completed", "canceled", "aborted"] as const;
+export type PrinterJobState = (typeof PRINTER_JOB_STATES)[number];
+
+/**
+ * Completed jobs as the printer itself lists them (IPP Get-Jobs in the status poll, PRINTER_JOBS_POLL): this includes
+ * jobs that never came from a Spoolfree PC (copies, USB, mobile, direct IP). One row per (printer, job-id, raw
+ * time-at-creation), so the same job read again in later polls is stored once, and a job id the device reuses after a
+ * restart is a new row. Bounded by PRINTER_JOBS_RETENTION_DAYS and a per-printer row cap.
+ */
+export const printerJobs = pgTable(
+  "printer_jobs",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    printerId: uuid("printer_id")
+      .notNull()
+      .references(() => printers.id, { onDelete: "cascade" }),
+    jobId: integer("job_id").notNull(),
+    /** time-at-creation exactly as the printer reported it (printer up-time or epoch seconds; 0 when missing): the dedupe key. */
+    createdRaw: bigint("created_raw", { mode: "number" }).notNull(),
+    /** job-name: only requested and stored when ANALYTICS_COLLECT_DOCUMENT_NAMES is on. */
+    name: text("name"),
+    /** job-originating-user-name as the printer reports it (may be empty or anonymised by the device). */
+    owner: text("owner"),
+    state: text("state").$type<PrinterJobState>().notNull(),
+    /** job-impressions-completed. */
+    pages: integer("pages"),
+    /** Wall-clock times derived from printer-up-time (read in the same poll); null when they cannot be derived. */
+    createdAt: timestamp("created_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    /** When the poller first saw the job. */
+    seenAt: timestamp("seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("printer_jobs_job_unique").on(t.printerId, t.jobId, t.createdRaw), index("printer_jobs_printer_idx").on(t.printerId, t.seenAt)],
+);
+
+export type PrinterJob = typeof printerJobs.$inferSelect;

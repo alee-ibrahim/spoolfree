@@ -75,14 +75,47 @@ It reads only Spoolfree's own tables, so opening it sends nothing to any printer
 
 - **PC jobs** from `print_jobs` (the agent reports above). Event 307 is logged when a job is done, so these are always
   "printed" and have only a completed time. Without `ANALYTICS_ENABLED` there are none, and the page says so.
+- **Printer jobs** from `printer_jobs`: each printer's own list of completed jobs, read by the status poller
+  (`PRINTER_JOBS_POLL`, on by default). These include jobs that never passed through a Windows PC: copies, USB, mobile
+  and direct-IP printing. They show the user as the printer reports it (devices may leave it empty or anonymise it),
+  pages, state (printed, canceled, failed) and times; no PC name.
 - **Test prints** from the admin UI, with their full state (queued, sent, printing, printed, failed, ...).
 
-Jobs that never pass through a Windows PC (copies, USB, mobile or direct-IP printing) are not listed; the printer
-counters above count their pages. `ANALYTICS_RETENTION_DAYS` bounds the PC jobs.
+A printer job that is clearly a job listed already is not shown twice: the printer's copy of a PC job (same printer,
+same user name without the domain, finished within 5 minutes) and of a direct test print (same printer and job id).
+
+### Printer job list: what the poller sends
+
+Inside the existing status poll (no new timer, port, host or dependency; same IPP URI and `POLL_TIMEOUT_MS`), for each
+printer that answered the status request over IPP in that cycle:
+
+- **One IPP Get-Jobs** per printer per cycle (`POLL_INTERVAL_SECONDS`, default 120): `which-jobs=completed`, `limit=20`,
+  `requested-attributes` `job-id`, `job-originating-user-name`, `job-state`, `job-impressions-completed`,
+  `time-at-creation`, `time-at-completed`, plus `job-name` only when `ANALYTICS_COLLECT_DOCUMENT_NAMES` is on.
+  Not-completed jobs are not read: that would need a second request; the Queue column counts them and they are listed
+  once they complete.
+- About 0.4 KB sent and at most about 4.5 KB received (20 jobs of roughly 200 bytes), plus HTTP headers.
+- The status request itself also asks for `printer-up-time` (a few bytes more), used to turn the printer's job times
+  into clock times.
+- Offline printers and printers reached only over SNMP are skipped. A device that refuses Get-Jobs (IPP operation not
+  supported or not authorised, HTTP 4xx) is remembered and never asked again; a new endpoint or a replaced device is
+  asked once more. Timeouts are not remembered.
+- Auto driver mode's speed check (`DRIVER_AUTO_SPEED_INTERVAL_MINUTES`) uses the same request when it is due instead
+  of sending its own Get-Jobs.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PRINTER_JOBS_POLL` | `1` | `0` turns the printer job list off: no Get-Jobs from the status poll. |
+| `PRINTER_JOBS_RETENTION_DAYS` | `30` | Printer jobs older than this are deleted (hourly purge). Each printer also keeps at most 1000 rows. |
+
+`ANALYTICS_RETENTION_DAYS` bounds the PC jobs.
 
 ## Privacy
 
 Print logs are personal data. They say who printed, when, from which PC, how much and, with document names on, what.
+The printer job list holds the user names printers report (and document names only when they are collected), so it
+is personal data too, even with `ANALYTICS_ENABLED` off; turn it off with `PRINTER_JOBS_POLL=0`, or clear it with
+`psql -c "truncate printer_jobs"`.
 Before you turn analytics on:
 
 - **Tell staff** that printing is logged, what is kept and for how long. Follow your organisation's rules and local

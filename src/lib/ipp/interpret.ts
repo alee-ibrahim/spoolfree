@@ -39,6 +39,8 @@ export const STATUS_ATTRIBUTES = [
   "printer-impressions-completed",
   "printer-make-and-model",
   "queued-job-count",
+  // Converts job time-at-* (printer up-time seconds) to wall-clock time for the printer job list.
+  "printer-up-time",
 ];
 
 export type PrinterState = "idle" | "processing" | "stopped" | "unknown";
@@ -62,6 +64,8 @@ export interface PrinterStatus {
   /** queued-job-count: jobs pending, held or processing on the printer itself; null when unknown (offline, SNMP, not reported). */
   queuedJobs: number | null;
   model: string | null;
+  /** IPP printer-up-time (seconds) read in this poll; absent or null when unknown. */
+  upTime?: number | null;
   source: "ipp" | "snmp" | "none";
   error: string | null;
 }
@@ -192,6 +196,7 @@ export function statusFromIpp(attrs: Record<string, IppValue[]>, lowPercent: num
   const reasons = strings(attrs["printer-state-reasons"]).filter((r) => r !== "none");
   const pages = first<number>(attrs["printer-impressions-completed"]);
   const queued = first<number>(attrs["queued-job-count"]);
+  const upTime = first<number>(attrs["printer-up-time"]);
   return {
     online: true,
     state: (stateNum !== null && STATE_MAP[stateNum]) || "unknown",
@@ -201,6 +206,7 @@ export function statusFromIpp(attrs: Record<string, IppValue[]>, lowPercent: num
     pageCount: typeof pages === "number" && pages >= 0 ? pages : null,
     queuedJobs: typeof queued === "number" && Number.isInteger(queued) && queued >= 0 ? queued : null,
     model: first<string>(attrs["printer-make-and-model"]),
+    upTime: typeof upTime === "number" && Number.isInteger(upTime) && upTime > 0 ? upTime : null,
     source: "ipp",
     error: null,
   };

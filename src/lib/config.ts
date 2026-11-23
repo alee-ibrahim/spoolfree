@@ -94,6 +94,16 @@ const schema = z.object({
   SNMP_COMMUNITY: z.string().default("public"),
   LOW_TONER_PERCENT: z.coerce.number().int().min(0).max(100).default(15),
   ALERT_WEBHOOK_URL: z.string().optional(),
+  /**
+   * Printer job list for Recent jobs: one IPP Get-Jobs (completed jobs, at most 20) per IPP-reachable printer in each
+   * poll cycle. On unless "0"/"false". Devices that refuse Get-Jobs are remembered and never asked again.
+   */
+  PRINTER_JOBS_POLL: z
+    .string()
+    .optional()
+    .transform((v) => v !== "0" && v?.toLowerCase() !== "false"),
+  /** Printer jobs older than this are deleted (hourly purge); each printer also keeps at most 1000 rows. */
+  PRINTER_JOBS_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
 
   METRICS_TOKEN: z.string().optional(),
 

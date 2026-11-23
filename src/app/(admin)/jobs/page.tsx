@@ -30,7 +30,7 @@ export const metadata = { title: "Recent jobs" };
 
 const PAGE_SIZE = 50;
 const when = (iso: string | null) => (iso ? `${iso.replace("T", " ").slice(0, 16)}` : "—");
-const SOURCE_LABEL = { pc: "PC", test: "Test print" } as const;
+const SOURCE_LABEL = { pc: "PC", printer: "Printer", test: "Test print" } as const;
 
 function StateBadge({ job }: { job: RecentJob }) {
   return (
@@ -45,7 +45,7 @@ export default async function RecentJobsPage({ searchParams }: PageProps<"/jobs"
   const f = parseRecentJobFilters(await searchParams);
   const none = { printer: null, state: null, source: null, q: null };
   const d = db();
-  // Everything comes from Spoolfree's own tables (PC job reports, test prints): opening this page asks no printer anything.
+  // Everything comes from Spoolfree's own tables (PC job reports, test prints, the poller's printer job lists): opening this page asks no printer anything.
   const [rows, [shownRow], [totalRow], printers] = await Promise.all([
     d.execute<Record<string, unknown>>(recentJobsQuery(f, PAGE_SIZE, (f.page - 1) * PAGE_SIZE)),
     d.execute<Record<string, unknown>>(recentJobsCountQuery(f)),
@@ -58,25 +58,32 @@ export default async function RecentJobsPage({ searchParams }: PageProps<"/jobs"
   const fields: FilterField[] = [
     { kind: "select", key: "printer", label: "Printer", allLabel: "All printers", searchable: true, options: printers.map((r) => ({ value: String(r.v), label: String(r.label) })) },
     { kind: "select", key: "state", label: "State", allLabel: "Any state", options: JOB_STATES.map((s) => ({ value: s, label: s })) },
-    { kind: "toggle", key: "source", label: "Source", options: [{ value: "pc", label: "PCs" }, { value: "test", label: "Test prints" }] },
+    { kind: "toggle", key: "source", label: "Source", options: [{ value: "pc", label: "PCs" }, { value: "printer", label: "Printers" }, { value: "test", label: "Test prints" }] },
   ];
   const filtered = activeRecentJobFilters(f) > 0 || !!f.q;
   const pages = Math.max(1, Math.ceil(shown / PAGE_SIZE));
   const link = (page: number) => `/jobs${toQuery({ q: f.q, printer: f.printer, state: f.state, source: f.source, page: page > 1 ? page : null })}`;
-  const analytics = config().ANALYTICS_ENABLED;
-  const empty = analytics ? "No jobs recorded yet. Agents send the jobs PCs print at each sync." : "No jobs recorded yet.";
+  const { ANALYTICS_ENABLED: analytics, PRINTER_JOBS_POLL: printerJobs } = config();
+  const empty = [
+    "No jobs recorded yet.",
+    analytics && "Agents send the jobs PCs print at each sync.",
+    printerJobs && "The status poller reads each printer's completed jobs.",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <>
       <PageHeader title="Recent jobs" />
       <div className="flex flex-col gap-3 p-4 md:gap-4 md:p-6">
-        {!analytics && (
+        {(!analytics || !printerJobs) && (
           <Alert>
             <ListChecksIcon />
-            <AlertTitle>Only test prints are listed</AlertTitle>
+            <AlertTitle>{!analytics && !printerJobs ? "Only test prints are listed" : !analytics ? "No PC jobs are listed" : "No printer job lists are read"}</AlertTitle>
             <AlertDescription>
-              Jobs printed from PCs are recorded only when print analytics (ANALYTICS_ENABLED) is on. Read the privacy notes in the docs before you
-              turn it on.
+              {!analytics &&
+                "Jobs printed from PCs, with the PC name, are recorded only when print analytics (ANALYTICS_ENABLED) is on. Read the privacy notes in the docs before you turn it on. "}
+              {!printerJobs && "Jobs that did not come from a PC (copies, USB, mobile, direct IP) are read from the printers only when PRINTER_JOBS_POLL is on."}
             </AlertDescription>
           </Alert>
         )}
