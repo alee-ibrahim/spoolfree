@@ -96,6 +96,8 @@ export async function pollAll(): Promise<number> {
       stateMessage: s.stateMessage,
       markers: s.markers,
       pageCount: s.pageCount ?? prev?.pageCount ?? null,
+      // Unlike the page counter, a queue length goes stale at once: unknown this poll means unknown.
+      queuedJobs: s.queuedJobs,
       source: s.source,
       error: s.error,
       lastPolledAt: now,

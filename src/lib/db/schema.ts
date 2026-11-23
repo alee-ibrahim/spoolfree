@@ -248,6 +248,8 @@ export const printerStatus = pgTable("printer_status", {
   stateMessage: text("state_message"),
   markers: jsonb("markers").$type<Marker[]>().notNull().default([]),
   pageCount: integer("page_count"),
+  /** IPP queued-job-count at the last poll; null when the printer did not report it. Never carried over from an older poll. */
+  queuedJobs: integer("queued_job_count"),
   source: text("source").notNull().default("none"),
   error: text("error"),
   lastSeen: timestamp("last_seen", { withTimezone: true }),

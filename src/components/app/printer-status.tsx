@@ -68,6 +68,32 @@ export function StatusBadges({ status }: { status: StatusLike }) {
   );
 }
 
+/**
+ * Jobs in the printer's own queue (IPP queued-job-count: pending, held or processing) at the last poll.
+ * "—" when it is not known: not polled yet, offline (a stale count would mislead), or not reported by the printer.
+ */
+export function QueueCount({ status }: { status: { online: boolean; queuedJobs: number | null; polledAgo: string } | null }) {
+  const unknown = (why: string) => (
+    <span className="text-muted-foreground" title={why}>
+      —<span className="sr-only">{why}</span>
+    </span>
+  );
+  if (!status) return unknown("Queue unknown: not polled yet");
+  if (!status.online) return unknown(`Queue unknown: printer offline (polled ${status.polledAgo})`);
+  if (status.queuedJobs === null) return unknown(`Queue unknown: the printer does not report it (polled ${status.polledAgo})`);
+  const n = status.queuedJobs;
+  const label = `${n} ${n === 1 ? "job" : "jobs"} in queue (polled ${status.polledAgo})`;
+  return n === 0 ? (
+    <span className="tabular-nums text-muted-foreground" title={label}>
+      0<span className="sr-only"> jobs in queue</span>
+    </span>
+  ) : (
+    <Badge variant="secondary" className="tabular-nums" title={label}>
+      {n} {n === 1 ? "job" : "jobs"}
+    </Badge>
+  );
+}
+
 /** A CSS colour from the printer's marker-colors value (#RRGGBB), or null. */
 function swatch(color: string | null): string | null {
   const c = color?.split("#").filter(Boolean)[0];

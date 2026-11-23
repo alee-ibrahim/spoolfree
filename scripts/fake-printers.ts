@@ -34,13 +34,15 @@ interface Sim {
   jobs?: SimJob[];
   /** How long a job stays "processing" (ms, default 1500). */
   jobMs?: number;
+  /** Jobs other clients have queued on the device (default 0); received jobs still processing are added to this. */
+  queued?: number;
 }
 
 export const SIMS: Sim[] = [
   { port: 8631, model: "Brother MFC-L8900CDW", color: true, state: 3, reasons: ["none"], markers: [["Black Toner", "#000000", 72], ["Cyan Toner", "#00FFFF", 64], ["Magenta Toner", "#FF00FF", 58], ["Yellow Toner", "#FFFF00", 81]], pages: 48213 },
   { port: 8632, model: "HP LaserJet Pro M404dn", color: false, state: 3, reasons: ["toner-low-warning"], markers: [["Black Cartridge", "#000000", 8]], pages: 120447 },
-  { port: 8633, model: "Canon imageRUNNER ADVANCE DX C3826i", color: true, state: 5, reasons: ["media-jam-error"], markers: [["Black Toner", "#000000", 44], ["Cyan Toner", "#00FFFF", 39], ["Magenta Toner", "#FF00FF", 51], ["Yellow Toner", "#FFFF00", 47]], pages: 301992 },
-  { port: 8634, model: "Epson WorkForce Pro WF-C5890", color: true, state: 4, reasons: ["none"], markers: [["Black Ink", "#000000", 55], ["Cyan Ink", "#00FFFF", 12], ["Magenta Ink", "#FF00FF", 9], ["Yellow Ink", "#FFFF00", 66]], pages: 9120 },
+  { port: 8633, model: "Canon imageRUNNER ADVANCE DX C3826i", color: true, state: 5, reasons: ["media-jam-error"], queued: 2, markers: [["Black Toner", "#000000", 44], ["Cyan Toner", "#00FFFF", 39], ["Magenta Toner", "#FF00FF", 51], ["Yellow Toner", "#FFFF00", 47]], pages: 301992 },
+  { port: 8634, model: "Epson WorkForce Pro WF-C5890", color: true, state: 4, reasons: ["none"], queued: 3, markers: [["Black Ink", "#000000", 55], ["Cyan Ink", "#00FFFF", 12], ["Magenta Ink", "#FF00FF", 9], ["Yellow Ink", "#FFFF00", 66]], pages: 9120 },
   { port: 8635, model: "Kyocera ECOSYS P3145dn", color: false, state: 3, reasons: ["none"], markers: [["Black Toner", "#000000", 93]], pages: 23001 },
 ];
 
@@ -70,7 +72,13 @@ function attrs(s: Sim, uri: string): IppRequestAttribute[] {
     { tag: Tag.integer, name: "marker-low-levels", values: s.markers.map(() => 10) },
     { tag: Tag.integer, name: "marker-high-levels", values: s.markers.map(() => 100) },
     { tag: Tag.integer, name: "printer-impressions-completed", values: [s.pages] },
+    { tag: Tag.integer, name: "queued-job-count", values: [queuedJobs(s)] },
   ];
+}
+
+/** queued-job-count: the preset queue plus received jobs that are still processing. */
+function queuedJobs(s: Sim): number {
+  return (s.queued ?? 0) + (s.jobs ?? []).filter((j) => Date.now() - j.at < (s.jobMs ?? 1500)).length;
 }
 
 function jobAttrs(s: Sim, j: SimJob): IppRequestAttribute[] {
