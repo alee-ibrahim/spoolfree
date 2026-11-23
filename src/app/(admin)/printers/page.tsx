@@ -144,6 +144,7 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
             vendorProtocol: p.vendorProtocol,
             lprQueue: p.lprQueue,
             ippVersions: p.lastTest?.ippVersions ?? null,
+            hasScanner: !!p.scanner,
             status: p.status
               ? {
                   online: p.status.online,
@@ -152,6 +153,7 @@ export default async function PrintersPage({ searchParams }: PageProps<"/printer
                   markers: p.status.markers,
                   queuedJobs: p.status.queuedJobs,
                   polledAgo: timeAgo(p.status.lastPolledAt),
+                  scanner: p.scanner ? { state: p.status.scannerState, adfState: p.status.scannerAdfState, error: p.status.scannerError } : null,
                 }
               : null,
             decision: {

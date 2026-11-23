@@ -78,6 +78,13 @@
       "when": 1795423383729,
       "tag": "0010_printer_queue",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795428325466,
+      "tag": "0011_scanner",
+      "breakpoints": true
     }
   ]
 }
