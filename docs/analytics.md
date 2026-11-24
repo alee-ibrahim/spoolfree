@@ -52,22 +52,86 @@ local queues, so their jobs are logged on the PC.
 
 ## The Analytics page
 
-- **Filters.** A date range (presets or a custom range) and filters for user, printer, OU and PC, in one row above
-  everything they scope. They are part of the URL, so a view can be bookmarked or shared.
-- **Totals.** Print jobs, pages from PCs, active users and printers used.
+- **Filters.** A date range (presets or a custom range) and filters for user, printer, OU, PC and the job log's source,
+  in one row above everything they scope. They are part of the URL, so a view can be bookmarked or shared.
+- **Totals.** PC jobs, pages from PCs, active users and printers used.
 - **Charts.** Pages per day, then the top users, top PCs, top printers and pages by OU (the PC's OU when the job was
   received), each with a table view.
 - **Printer counters and PC jobs.** For each printer, the pages its own counter advanced in the range, split into pages
   PCs reported and the rest. A counter that goes backwards, or a replaced device (a new revision), restarts that day's
   count, so a swap never shows a negative or huge number.
 - **Queues Spoolfree does not manage.** Unmanaged queues with their port host, PC count and pages.
-- **Job log.** Newest first, 25 per page. Document names appear only when they are collected.
-- **CSV export** of the job log for the current filters (at most 100,000 rows). Cells that start with `=`, `+`, `-` or
-  `@` are prefixed with `'` so spreadsheets do not run them as formulas.
+- **Job log.** PC jobs and printer jobs (below) in one list, newest first, 25 per page, with a Source column (PC or
+  Printer). Document names appear only when they are collected.
+- **CSV export** of the job log for the current filters (at most 100,000 rows), with `source` (`PC` or `Printer`) and
+  `state` columns at the end. Cells that start with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not
+  run them as formulas.
+
+## Printer jobs in the job log
+
+The job log reads only Spoolfree's own tables, so opening it sends nothing to any printer. It has two sources:
+
+- **PC** jobs from `print_jobs` (the agent reports above). Event 307 is logged when a job is done, so these are always
+  completed. Without `ANALYTICS_ENABLED` there are none.
+- **Printer** jobs from `printer_jobs`: each printer's own list of completed jobs, read by the status poller
+  (`PRINTER_JOBS_POLL`, on by default). These include jobs that never passed through a Windows PC: copies, USB, mobile
+  and direct-IP printing. They show the user as the printer reports it (devices may leave it empty or anonymise it),
+  pages and state (completed, canceled, aborted); no PC, OU or queue. Their time is the printer's completion time
+  (else creation time, else when the poller first saw the job).
+
+A printer job that is the printer's copy of a PC job (same printer, same user name without the domain, within 5
+minutes) is not listed, so a job printed from a PC appears once, as a PC job.
+
+How the filters apply to printer jobs:
+
+- **Date range, printer and search** (user or document name) apply to both sources.
+- **User** matches printer jobs without the domain: `EXAMPLE\alice` also finds printer jobs by `alice`. The user and
+  printer choices include the users and printers of printer jobs in the range.
+- **PC, OU and unmanaged queue** filters show PC jobs only (printer jobs have none of these).
+- **Source** shows PC jobs, printer jobs or both. The "N of M jobs" count and the pages cover both sources.
+
+**Totals and charts stay PC-only.** The totals, pages over time, top users, PCs, printers and OUs, and unmanaged queues
+count PC jobs only, as before. Printer jobs are not added there: many are the printer's copy of a PC job, matched only
+by a 5-minute heuristic, and printers keep only their last 20 jobs per poll, so adding them would double-count or
+under-count pages. Pages that did not come from PCs are already measured exactly by **Printer counters and PC jobs**
+(from the page counters), and each such job is listed in the job log.
+
+**With `ANALYTICS_ENABLED` off** the Analytics page still shows the job log (it was never hidden), so printer jobs are
+listed there; the totals and charts are empty, and the notice at the top says the job log still lists printer jobs.
+Test prints from the admin UI are not in the job log: they are listed under "Recent test prints" in the test print dialog.
+
+### Printer job list: what the poller sends
+
+Inside the existing status poll (no new timer, port, host or dependency; same IPP URI and `POLL_TIMEOUT_MS`), for each
+printer that answered the status request over IPP in that cycle:
+
+- **One IPP Get-Jobs** per printer per cycle (`POLL_INTERVAL_SECONDS`, default 120): `which-jobs=completed`, `limit=20`,
+  `requested-attributes` `job-id`, `job-originating-user-name`, `job-state`, `job-impressions-completed`,
+  `time-at-creation`, `time-at-completed`, plus `job-name` only when `ANALYTICS_COLLECT_DOCUMENT_NAMES` is on.
+  Not-completed jobs are not read: that would need a second request; the Queue column counts them and they are listed
+  once they complete.
+- About 0.4 KB sent and at most about 4.5 KB received (20 jobs of roughly 200 bytes), plus HTTP headers.
+- The status request itself also asks for `printer-up-time` (a few bytes more), used to turn the printer's job times
+  into clock times.
+- Offline printers and printers reached only over SNMP are skipped. A device that refuses Get-Jobs (IPP operation not
+  supported or not authorised, HTTP 4xx) is remembered and never asked again; a new endpoint or a replaced device is
+  asked once more. Timeouts are not remembered.
+- Auto driver mode's speed check (`DRIVER_AUTO_SPEED_INTERVAL_MINUTES`) uses the same request when it is due instead
+  of sending its own Get-Jobs.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PRINTER_JOBS_POLL` | `1` | `0` turns the printer job list off: no Get-Jobs from the status poll. |
+| `PRINTER_JOBS_RETENTION_DAYS` | `30` | Printer jobs older than this are deleted (hourly purge). Each printer also keeps at most 1000 rows. |
+
+`ANALYTICS_RETENTION_DAYS` bounds the PC jobs.
 
 ## Privacy
 
 Print logs are personal data. They say who printed, when, from which PC, how much and, with document names on, what.
+The printer job list holds the user names printers report (and document names only when they are collected), so it
+is personal data too, even with `ANALYTICS_ENABLED` off; turn it off with `PRINTER_JOBS_POLL=0`, or clear it with
+`psql -c "truncate printer_jobs"`.
 Before you turn analytics on:
 
 - **Tell staff** that printing is logged, what is kept and for how long. Follow your organisation's rules and local

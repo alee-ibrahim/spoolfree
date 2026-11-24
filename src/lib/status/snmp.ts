@@ -128,6 +128,8 @@ export async function snmpStatus(
       stateMessage: null,
       markers: suppliesToMarkers(rows, lowPercent),
       pageCount: num(life),
+      // Printer-MIB has no job queue; only IPP reports it.
+      queuedJobs: null,
       model: descr && Buffer.isBuffer(descr.value) ? descr.value.toString("utf8") : null,
       source: "snmp",
       error: null,

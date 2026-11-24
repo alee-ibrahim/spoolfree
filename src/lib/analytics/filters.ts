@@ -11,7 +11,13 @@ export interface AnalyticsFilters {
   computer: string | null;
   /** Free text: every word must appear in the job's user or document name. */
   q: string | null;
+  /** Job log only: PC jobs (agent reports) or printer jobs (the printers' own job lists); null for both. */
+  source: JobLogSource | null;
 }
+
+/** Where a job log row comes from: "pc" = print_jobs (agents), "printer" = printer_jobs (status poller). */
+export const JOB_LOG_SOURCES = ["pc", "printer"] as const;
+export type JobLogSource = (typeof JOB_LOG_SOURCES)[number];
 
 export const RANGE_PRESETS = [
   { id: "7d", label: "Last 7 days", days: 7 },
@@ -43,13 +49,15 @@ export function parseFilters(sp: Record<string, string | string[] | undefined>, 
   let from = validDay(text(sp.from)) ?? addDays(to, -29);
   if (from > to) [from, to] = [to, from];
   if (addDays(from, MAX_DAYS) < to) from = addDays(to, -MAX_DAYS);
-  return { from, to, user: text(sp.user, 256), printer: text(sp.printer), ou: text(sp.ou, 2048), computer: text(sp.computer, 256), q: text(sp.q, 200) };
+  const src = text(sp.source, 16);
+  const source = (JOB_LOG_SOURCES as readonly string[]).includes(src ?? "") ? (src as JobLogSource) : null;
+  return { from, to, user: text(sp.user, 256), printer: text(sp.printer), ou: text(sp.ou, 2048), computer: text(sp.computer, 256), q: text(sp.q, 200), source };
 }
 
 /** Search params for links (only the set filters). */
 export function filterParams(f: AnalyticsFilters, extra: Record<string, string | null> = {}): string {
   const p = new URLSearchParams();
-  for (const [k, v] of Object.entries({ from: f.from, to: f.to, user: f.user, printer: f.printer, ou: f.ou, computer: f.computer, q: f.q, ...extra })) {
+  for (const [k, v] of Object.entries({ from: f.from, to: f.to, user: f.user, printer: f.printer, ou: f.ou, computer: f.computer, q: f.q, source: f.source, ...extra })) {
     if (v) p.set(k, v);
   }
   return p.toString();

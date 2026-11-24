@@ -8,6 +8,7 @@ import { mergeSpeedSamples, newStickyReason } from "../drivers/auto";
 import { eq } from "drizzle-orm";
 import { lowMarkers, needsAttention, offlineStatus, printerUri, STATUS_ATTRIBUTES, statusFromIpp, type PrinterStatus } from "../ipp/interpret";
 import { identityDue, refreshIdentity } from "./identity";
+import { jobsDue, pollPrinterJobs, purgePrinterJobs } from "./jobs";
 import { snmpStatus } from "./snmp";
 
 type PrinterRow = typeof schema.printers.$inferSelect;
@@ -96,6 +97,8 @@ export async function pollAll(): Promise<number> {
       stateMessage: s.stateMessage,
       markers: s.markers,
       pageCount: s.pageCount ?? prev?.pageCount ?? null,
+      // Unlike the page counter, a queue length goes stale at once: unknown this poll means unknown.
+      queuedJobs: s.queuedJobs,
       source: s.source,
       error: s.error,
       lastPolledAt: now,
@@ -108,9 +111,19 @@ export async function pollAll(): Promise<number> {
     if (s.online && s.pageCount !== null && s.pageCount >= 0) {
       await recordCounter(p, s.pageCount, now).catch((e) => console.warn(`[spoolfree] counter of ${p.name}: ${(e as Error).message}`));
     }
+    const speed = s.online && speedDue(p, now);
+    // Printer job list (PRINTER_JOBS_POLL): one Get-Jobs per IPP-reachable printer; the speed check reuses its answer.
+    let jobs: Awaited<ReturnType<typeof pollPrinterJobs>> = null;
+    if (jobsDue(p, s)) {
+      jobs = await pollPrinterJobs(p, s, now, { speed }).catch((e) => {
+        console.warn(`[spoolfree] job list of ${p.name}: ${(e as Error).message}`);
+        return null;
+      });
+    }
     // Auto driver mode: measure seconds per page of completed IPP jobs (Get-Jobs) to spot slow printers.
-    if (s.online && speedDue(p, now)) {
-      await measureSpeed(p, now).catch((e) => console.warn(`[spoolfree] job speed of ${p.name}: ${(e as Error).message}`));
+    // A device known to refuse Get-Jobs is not asked again for this either.
+    if (speed && (jobs !== null || p.jobsUnsupportedRevision !== p.revision)) {
+      await measureSpeed(p, now, jobs ?? undefined).catch((e) => console.warn(`[spoolfree] job speed of ${p.name}: ${(e as Error).message}`));
     }
     // Device identity (printer-uuid, MACs) for legacy queue matching on PCs: once a day per printer.
     if (s.online && identityDue(p, now)) {
@@ -130,10 +143,11 @@ export function speedDue(p: Pick<PrinterRow, "driverMode" | "autoVendorReason" |
 }
 
 /** Reads completed jobs, stores the samples and, when the printer is now "slow", auto mode's sticky vendor decision. */
-export async function measureSpeed(p: PrinterRow, now: Date) {
+export async function measureSpeed(p: PrinterRow, now: Date, fetched?: Record<string, unknown[]>[]) {
   let samples = p.speedSamples;
   try {
-    const jobs = await getCompletedJobs(printerUri(p), JOB_ATTRIBUTES, config().POLL_TIMEOUT_MS, 20);
+    // Jobs already read this cycle by the printer job list are used as they are: no second Get-Jobs.
+    const jobs = fetched ?? (await getCompletedJobs(printerUri(p), JOB_ATTRIBUTES, config().POLL_TIMEOUT_MS, 20));
     samples = mergeSpeedSamples(p.speedSamples, jobs as Record<string, unknown[]>[], now);
   } finally {
     const sticky = newStickyReason({ ...p, speedSamples: samples }, autoSettings());
@@ -178,6 +192,8 @@ async function purgeIfDue() {
   const { purgeAnalytics } = await import("../analytics/queries");
   const r = await purgeAnalytics();
   if (r.jobs || r.counters) console.log(`[spoolfree] analytics retention: deleted ${r.jobs} print jobs and ${r.counters} counter readings`);
+  const n = await purgePrinterJobs();
+  if (n) console.log(`[spoolfree] printer job list retention: deleted ${n} jobs`);
 }
 
 /**

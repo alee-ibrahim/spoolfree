@@ -46,7 +46,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { OuPicker, type OuOption, type PickedOu } from "@/components/app/ou-picker";
 import { PcPicker, type PcOption, type PcOverride } from "@/components/app/pc-picker";
-import { StatusBadges } from "@/components/app/printer-status";
+import { QueueCount, StatusBadges } from "@/components/app/printer-status";
 import { TestPrintDialog, type TestPrintTarget } from "@/components/app/test-print-dialog";
 import { OuBadges, PcBadges } from "@/components/app/assignment-badges";
 import { cn } from "@/lib/utils";
@@ -120,7 +120,7 @@ export interface PrinterView {
   /** PCs whose agent reports this printer's queue on the per-PC vendor fallback (0.8.1). */
   vendorFallbackPcs: string[];
   /** Live status from the poller (null: not polled yet). */
-  status: { online: boolean; state: string; stateReasons: string[]; markers: Marker[] } | null;
+  status: { online: boolean; state: string; stateReasons: string[]; markers: Marker[]; queuedJobs: number | null; polledAgo: string } | null;
 }
 
 function useResultToast(state: ActionResult | null, onOk: () => void) {
@@ -895,8 +895,11 @@ export function PrintersTable({
                   <PcBadges pcs={p.pcOverrides} />
                 </div>
               )}
-              <div className="pt-1">
+              <div className="flex flex-wrap items-center gap-2 pt-1">
                 <StatusBadges status={p.status} />
+                <span className="text-xs text-muted-foreground">
+                  Queue: <QueueCount status={p.status} />
+                </span>
               </div>
               <div className="flex flex-wrap gap-1 pt-1">
                 <DriverlessBadge p={p} />
@@ -921,6 +924,9 @@ export function PrintersTable({
               <TableHead className="pl-4">Name</TableHead>
               <TableHead>IPP address</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead className="text-right" title="Jobs waiting or printing on the printer itself, as of the last status poll">
+                Queue
+              </TableHead>
               <TableHead>Location</TableHead>
               <TableHead>Driverless</TableHead>
               <TableHead>OUs</TableHead>
@@ -950,6 +956,9 @@ export function PrintersTable({
                 </TableCell>
                 <TableCell className="max-w-48 whitespace-normal">
                   <StatusBadges status={p.status} />
+                </TableCell>
+                <TableCell className="text-right">
+                  <QueueCount status={p.status} />
                 </TableCell>
                 <TableCell className="max-w-40 whitespace-normal">{p.location ?? "—"}</TableCell>
                 <TableCell>

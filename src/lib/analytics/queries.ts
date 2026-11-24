@@ -1,28 +1,12 @@
 import "server-only";
-import { sql, type SQL } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { config } from "../config";
 import { db } from "../db";
 import { counterTotals, daysBetween, pagesNotFromPcs, type CounterDay } from "./counters";
-import { words } from "../list-filters/params";
-import { likeEscape, type AnalyticsFilters } from "./filters";
+import type { AnalyticsFilters } from "./filters";
+import { jobLogCountQuery, jobLogQuery, printerJobOptionsQuery, toJobLogRow, where, type JobLogRow } from "./job-log";
 
-/** WHERE clause for print_jobs j (left-joined printers p) from the filters. */
-export function where(f: AnalyticsFilters, tz: string): SQL {
-  const parts: SQL[] = [
-    sql`j.printed_at >= (${f.from}::date::timestamp at time zone ${tz})`,
-    sql`j.printed_at < ((${f.to}::date + 1)::timestamp at time zone ${tz})`,
-  ];
-  if (f.user) parts.push(sql`lower(j.user_name) = lower(${f.user})`);
-  if (f.computer) parts.push(sql`lower(j.computer_name) = lower(${f.computer})`);
-  if (f.printer?.startsWith("queue:")) parts.push(sql`j.printer_id is null and lower(j.queue_name) = lower(${f.printer.slice(6)})`);
-  else if (f.printer) parts.push(sql`j.printer_id::text = ${f.printer}`);
-  if (f.ou) parts.push(sql`(lower(j.ou_dn) = lower(${f.ou}) or lower(j.ou_dn) like ${"%," + likeEscape(f.ou.toLowerCase())})`);
-  for (const w of words(f.q)) {
-    const pat = `%${likeEscape(w)}%`;
-    parts.push(sql`(j.user_name ilike ${pat} or j.document_name ilike ${pat})`);
-  }
-  return sql.join(parts, sql` and `);
-}
+export { where, type JobLogRow };
 
 const n = (v: unknown) => (v === null || v === undefined ? 0 : Number(v));
 
@@ -39,21 +23,6 @@ export interface Ranked {
   label: string;
   jobs: number;
   pages: number;
-}
-
-export interface JobLogRow {
-  id: number;
-  printedAt: string;
-  userName: string | null;
-  computerName: string;
-  ouDn: string | null;
-  printer: string;
-  printerId: string | null;
-  queueName: string;
-  portHost: string | null;
-  pages: number | null;
-  bytes: number | null;
-  documentName: string | null;
 }
 
 export interface CounterRow {
@@ -110,34 +79,17 @@ export async function top(f: AnalyticsFilters, dim: Dimension, limit = 10): Prom
   return rows.map((r) => ({ key: String(r.k), label: String(r.label), jobs: n(r.jobs), pages: n(r.pages) }));
 }
 
+/**
+ * The job log: PC jobs and the printers' own jobs (without their copies of PC jobs), newest first. Unlike the summary,
+ * charts and rankings (PC jobs only), it does not depend on ANALYTICS_ENABLED for printer jobs.
+ */
 export async function jobLog(f: AnalyticsFilters, opts: { limit: number; offset?: number }): Promise<{ rows: JobLogRow[]; total: number }> {
   const tz = config().ANALYTICS_TIME_ZONE;
-  const w = where(f, tz);
   const [rows, [count]] = await Promise.all([
-    db().execute<Record<string, unknown>>(sql`
-      select j.id, j.printed_at, j.user_name, j.computer_name, j.ou_dn, coalesce(p.name, j.queue_name) printer, j.printer_id,
-             j.queue_name, j.port_host, j.pages, j.bytes, j.document_name
-      from print_jobs j left join printers p on p.id = j.printer_id
-      where ${w} order by j.printed_at desc, j.id desc limit ${opts.limit} offset ${opts.offset ?? 0}`),
-    db().execute<Record<string, unknown>>(sql`select count(*) c from print_jobs j where ${w}`),
+    db().execute<Record<string, unknown>>(jobLogQuery(f, tz, opts.limit, opts.offset ?? 0)),
+    db().execute<Record<string, unknown>>(jobLogCountQuery(f, tz)),
   ]);
-  return {
-    total: n(count?.c),
-    rows: rows.map((r) => ({
-      id: n(r.id),
-      printedAt: new Date(r.printed_at as string).toISOString(),
-      userName: (r.user_name as string) ?? null,
-      computerName: String(r.computer_name),
-      ouDn: (r.ou_dn as string) ?? null,
-      printer: String(r.printer),
-      printerId: (r.printer_id as string) ?? null,
-      queueName: String(r.queue_name),
-      portHost: (r.port_host as string) ?? null,
-      pages: r.pages === null ? null : n(r.pages),
-      bytes: r.bytes === null ? null : n(r.bytes),
-      documentName: (r.document_name as string) ?? null,
-    })),
-  };
+  return { total: n(count?.c), rows: rows.map(toJobLogRow) };
 }
 
 /** Per managed printer: what its own counter says vs what PCs reported, over the filter's date range. */
@@ -197,20 +149,26 @@ export async function unmanagedQueues(f: AnalyticsFilters, limit = 50): Promise<
 /** Filter choices: users, PCs, printers/queues and OUs seen in the range. */
 export async function filterOptions(f: AnalyticsFilters) {
   const tz = config().ANALYTICS_TIME_ZONE;
-  const base = { ...f, user: null, printer: null, ou: null, computer: null, q: null };
+  const base = { ...f, user: null, printer: null, ou: null, computer: null, q: null, source: null };
   const w = where(base, tz);
-  const [users, computers, printers, ous] = await Promise.all([
+  const [users, computers, printers, ous, printerUsers, jobPrinters] = await Promise.all([
     db().execute<Record<string, unknown>>(sql`select distinct j.user_name v from print_jobs j where ${w} and j.user_name is not null order by 1 limit 500`),
     db().execute<Record<string, unknown>>(sql`select distinct j.computer_name v from print_jobs j where ${w} order by 1 limit 500`),
     db().execute<Record<string, unknown>>(sql`
       select distinct coalesce(j.printer_id::text, 'queue:' || j.queue_name) v, coalesce(p.name, j.queue_name || ' (unmanaged)') label
       from print_jobs j left join printers p on p.id = j.printer_id where ${w} order by 2 limit 500`),
     db().execute<Record<string, unknown>>(sql`select distinct j.ou_dn v from print_jobs j where ${w} and j.ou_dn is not null order by 1 limit 500`),
+    // Users and printers of printer jobs (job log), so the filters cover both sources.
+    db().execute<Record<string, unknown>>(printerJobOptionsQuery(base, tz, "users")),
+    db().execute<Record<string, unknown>>(printerJobOptionsQuery(base, tz, "printers")),
   ]);
+  const byLabel = (a: string, b: string) => a.localeCompare(b, "en", { sensitivity: "base" });
+  const printerOptions = new Map(printers.map((r) => [String(r.v), String(r.label)]));
+  for (const r of jobPrinters) if (!printerOptions.has(String(r.v))) printerOptions.set(String(r.v), String(r.label));
   return {
-    users: users.map((r) => String(r.v)),
+    users: [...new Set([...users, ...printerUsers].map((r) => String(r.v)))].sort(byLabel).slice(0, 500),
     computers: computers.map((r) => String(r.v)),
-    printers: printers.map((r) => ({ value: String(r.v), label: String(r.label) })),
+    printers: [...printerOptions].map(([value, label]) => ({ value, label })).sort((a, b) => byLabel(a.label, b.label)).slice(0, 500),
     ous: ous.map((r) => String(r.v)),
   };
 }
